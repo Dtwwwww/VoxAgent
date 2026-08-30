@@ -13,7 +13,12 @@ class CandidateMetric:
 
 
 def select_llm(candidates: tuple[CandidateMetric, ...]) -> str:
+    model_ids = [candidate.model for candidate in candidates]
+    if len(model_ids) != len(set(model_ids)):
+        raise ValueError("Duplicate candidate model IDs are not allowed")
     indexed = {candidate.model: candidate for candidate in candidates}
+    if DEFAULT_MODEL not in indexed:
+        raise ValueError(f"Missing required baseline candidate: {DEFAULT_MODEL}")
     quality = indexed.get(QUALITY_MODEL)
     if (
         quality is not None
@@ -22,6 +27,4 @@ def select_llm(candidates: tuple[CandidateMetric, ...]) -> str:
         and quality.stable_30_minutes
     ):
         return QUALITY_MODEL
-    if DEFAULT_MODEL not in indexed:
-        raise ValueError(f"Missing required baseline candidate: {DEFAULT_MODEL}")
     return DEFAULT_MODEL

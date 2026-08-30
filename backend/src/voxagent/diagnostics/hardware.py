@@ -37,6 +37,8 @@ class HardwareSnapshot:
     ram_free_gb: float
     gpu: GpuSnapshot | None
     disks: tuple[DiskSnapshot, ...]
+    selected_data_drive: str
+    data_drive_probe_error: str | None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -84,6 +86,15 @@ def _cpu_name() -> str:
 
 def collect_hardware(paths: AppPaths) -> HardwareSnapshot:
     memory = psutil.virtual_memory()
+    selected_data_drive = f"{paths.root.drive.upper()}\\"
+    c_disk = _disk("C:\\")
+    disks = [c_disk]
+    data_drive_probe_error: str | None = None
+    if selected_data_drive != "C:\\":
+        try:
+            disks.append(_disk(selected_data_drive))
+        except OSError as error:
+            data_drive_probe_error = str(error)
     return HardwareSnapshot(
         cpu_name=_cpu_name(),
         cpu_cores=psutil.cpu_count(logical=False) or 0,
@@ -91,7 +102,9 @@ def collect_hardware(paths: AppPaths) -> HardwareSnapshot:
         ram_total_gb=_gb(memory.total),
         ram_free_gb=_gb(memory.available),
         gpu=_gpu_snapshot(),
-        disks=(_disk("C:\\"), _disk(f"{paths.root.drive}\\")),
+        disks=tuple(disks),
+        selected_data_drive=selected_data_drive,
+        data_drive_probe_error=data_drive_probe_error,
     )
 
 
@@ -100,8 +113,18 @@ def evaluate_preflight(snapshot: HardwareSnapshot) -> tuple[PreflightIssue, ...]
     issues: list[PreflightIssue] = []
     if disks.get("C:\\") is None or disks["C:\\"].free_gb < 15:
         issues.append(PreflightIssue("c_drive_low", "C: requires at least 15GB free", True))
-    data_disk = next((disk for key, disk in disks.items() if key != "C:\\"), None)
-    if data_disk is None or data_disk.free_gb < 20:
+    selected_data_drive = snapshot.selected_data_drive.upper()
+    data_disk = disks.get(selected_data_drive)
+    if snapshot.data_drive_probe_error is not None or data_disk is None:
+        detail = snapshot.data_drive_probe_error or "drive was not present in the snapshot"
+        issues.append(
+            PreflightIssue(
+                "data_drive_unavailable",
+                f"Selected data drive {selected_data_drive} is unavailable: {detail}",
+                True,
+            )
+        )
+    elif data_disk.free_gb < 20:
         issues.append(PreflightIssue("data_drive_low", "Data drive requires 20GB free", True))
     if snapshot.ram_free_gb < 6:
         issues.append(

@@ -15,6 +15,8 @@ def test_preflight_outputs_json_and_blocks_when_gpu_is_unavailable(monkeypatch, 
         ram_free_gb=8,
         gpu=None,
         disks=(DiskSnapshot("C:\\", 200, 20), DiskSnapshot("D:\\", 557, 100)),
+        selected_data_drive="D:\\",
+        data_drive_probe_error=None,
     )
     monkeypatch.setattr(cli, "collect_hardware", lambda _: snapshot)
 
@@ -24,6 +26,45 @@ def test_preflight_outputs_json_and_blocks_when_gpu_is_unavailable(monkeypatch, 
     assert result.exit_code == 2
     assert payload["hardware"]["gpu"] is None
     assert {issue["code"] for issue in payload["issues"]} == {"vram_unsupported"}
+
+
+def test_preflight_unavailable_selected_drive_is_machine_readable(monkeypatch):
+    from types import SimpleNamespace
+
+    from voxagent.diagnostics import hardware
+    from voxagent.diagnostics.hardware import GpuSnapshot
+
+    monkeypatch.setattr(hardware, "_cpu_name", lambda: "CPU")
+    monkeypatch.setattr(
+        hardware,
+        "_gpu_snapshot",
+        lambda: GpuSnapshot("GPU", 6144, 5000, "driver", "7.5"),
+    )
+    monkeypatch.setattr(
+        hardware.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(total=16 * 1024**3, available=8 * 1024**3),
+    )
+    monkeypatch.setattr(hardware.psutil, "cpu_count", lambda logical: 8 if logical else 4)
+
+    def probe_disk(drive: str) -> DiskSnapshot:
+        if drive == "Z:\\":
+            raise PermissionError("drive unavailable")
+        return DiskSnapshot(drive, 200, 20)
+
+    monkeypatch.setattr(hardware, "_disk", probe_disk)
+    monkeypatch.setattr(cli, "collect_hardware", hardware.collect_hardware)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["preflight", "--json", "--data-root", r"Z:\VoxAgentData"],
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 2
+    assert payload["hardware"]["selected_data_drive"] == "Z:\\"
+    assert payload["hardware"]["data_drive_probe_error"] == "drive unavailable"
+    assert [issue["code"] for issue in payload["issues"]] == ["data_drive_unavailable"]
 
 
 def test_benchmark_llm_requires_model():

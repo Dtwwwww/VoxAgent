@@ -20,6 +20,7 @@ def snapshot(
     ram_free: float = 8,
     vram: int = 6144,
     data_drive: str = "D:\\",
+    data_drive_error: str | None = None,
 ):
     return HardwareSnapshot(
         cpu_name="Intel Core i5-9300H",
@@ -29,6 +30,8 @@ def snapshot(
         ram_free_gb=ram_free,
         gpu=GpuSnapshot("NVIDIA GeForce GTX 1660 Ti", vram, 5000, "572.16", "7.5"),
         disks=(DiskSnapshot("C:\\", 200, c_free), DiskSnapshot(data_drive, 557, d_free)),
+        selected_data_drive=data_drive,
+        data_drive_probe_error=data_drive_error,
     )
 
 
@@ -57,6 +60,47 @@ def test_preflight_reports_only_selected_e_data_drive_when_it_is_low():
     issues = evaluate_preflight(snapshot(data_drive="E:\\", d_free=19.99))
 
     assert {issue.code for issue in issues} == {"data_drive_low"}
+
+
+def test_preflight_does_not_infer_data_drive_from_disk_order():
+    machine = snapshot(data_drive="E:\\", d_free=50)
+    machine = HardwareSnapshot(
+        cpu_name=machine.cpu_name,
+        cpu_cores=machine.cpu_cores,
+        cpu_threads=machine.cpu_threads,
+        ram_total_gb=machine.ram_total_gb,
+        ram_free_gb=machine.ram_free_gb,
+        gpu=machine.gpu,
+        disks=(
+            DiskSnapshot("C:\\", 200, 20),
+            DiskSnapshot("D:\\", 557, 1),
+            DiskSnapshot("E:\\", 557, 50),
+        ),
+        selected_data_drive="E:\\",
+        data_drive_probe_error=None,
+    )
+
+    assert evaluate_preflight(machine) == ()
+
+
+def test_preflight_reports_selected_data_drive_as_unavailable():
+    machine = snapshot(data_drive="E:\\", data_drive_error="WinError 3: path not found")
+    machine = HardwareSnapshot(
+        cpu_name=machine.cpu_name,
+        cpu_cores=machine.cpu_cores,
+        cpu_threads=machine.cpu_threads,
+        ram_total_gb=machine.ram_total_gb,
+        ram_free_gb=machine.ram_free_gb,
+        gpu=machine.gpu,
+        disks=(machine.disks[0],),
+        selected_data_drive="E:\\",
+        data_drive_probe_error=machine.data_drive_probe_error,
+    )
+
+    issues = evaluate_preflight(machine)
+
+    assert [issue.code for issue in issues] == ["data_drive_unavailable"]
+    assert issues[0].blocking is True
 
 
 @pytest.mark.parametrize(
@@ -96,3 +140,27 @@ def test_collect_hardware_returns_no_gpu_when_nvidia_smi_fails(monkeypatch):
     snapshot = hardware.collect_hardware(AppPaths.from_root(Path(r"D:\VoxAgentData")))
 
     assert snapshot.gpu is None
+
+
+def test_collect_hardware_captures_selected_drive_probe_failure(monkeypatch):
+    monkeypatch.setattr(hardware, "_cpu_name", lambda: "CPU")
+    monkeypatch.setattr(hardware, "_gpu_snapshot", lambda: None)
+    monkeypatch.setattr(
+        hardware.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(total=16 * 1024**3, available=8 * 1024**3),
+    )
+    monkeypatch.setattr(hardware.psutil, "cpu_count", lambda logical: 8 if logical else 4)
+
+    def probe_disk(drive: str) -> DiskSnapshot:
+        if drive == "E:\\":
+            raise OSError("selected drive is not mounted")
+        return DiskSnapshot(drive, 200, 20)
+
+    monkeypatch.setattr(hardware, "_disk", probe_disk)
+
+    machine = hardware.collect_hardware(AppPaths.from_root(Path(r"E:\VoxAgentData")))
+
+    assert machine.disks == (DiskSnapshot("C:\\", 200, 20),)
+    assert machine.selected_data_drive == "E:\\"
+    assert machine.data_drive_probe_error == "selected drive is not mounted"
