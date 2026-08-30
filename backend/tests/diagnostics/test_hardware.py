@@ -13,7 +13,14 @@ from voxagent.diagnostics.hardware import (
 )
 
 
-def snapshot(*, c_free: float = 20, d_free: float = 100, ram_free: float = 8, vram: int = 6144):
+def snapshot(
+    *,
+    c_free: float = 20,
+    d_free: float = 100,
+    ram_free: float = 8,
+    vram: int = 6144,
+    data_drive: str = "D:\\",
+):
     return HardwareSnapshot(
         cpu_name="Intel Core i5-9300H",
         cpu_cores=4,
@@ -21,7 +28,7 @@ def snapshot(*, c_free: float = 20, d_free: float = 100, ram_free: float = 8, vr
         ram_total_gb=15.88,
         ram_free_gb=ram_free,
         gpu=GpuSnapshot("NVIDIA GeForce GTX 1660 Ti", vram, 5000, "572.16", "7.5"),
-        disks=(DiskSnapshot("C:\\", 200, c_free), DiskSnapshot("D:\\", 557, d_free)),
+        disks=(DiskSnapshot("C:\\", 200, c_free), DiskSnapshot(data_drive, 557, d_free)),
     )
 
 
@@ -38,6 +45,18 @@ def test_preflight_reports_all_blocking_resource_failures():
         "vram_unsupported",
     }
     assert all(issue.blocking for issue in issues)
+
+
+def test_preflight_uses_selected_e_data_drive_when_it_has_required_headroom():
+    issues = evaluate_preflight(snapshot(data_drive="E:\\", d_free=20))
+
+    assert "data_drive_low" not in {issue.code for issue in issues}
+
+
+def test_preflight_reports_only_selected_e_data_drive_when_it_is_low():
+    issues = evaluate_preflight(snapshot(data_drive="E:\\", d_free=19.99))
+
+    assert {issue.code for issue in issues} == {"data_drive_low"}
 
 
 @pytest.mark.parametrize(

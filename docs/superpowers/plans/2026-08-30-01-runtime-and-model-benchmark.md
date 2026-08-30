@@ -13,7 +13,7 @@
 - Target platform is Windows 11 x64, single user.
 - Python must be `>=3.12,<3.13`; Node.js must be `>=24,<25` when the frontend is introduced.
 - Runtime data defaults to `D:\VoxAgentData`; large models and caches must not default to C:.
-- C: must have at least 15GB free before model installation; D: must have at least 20GB free.
+- C: must have at least 15GB free before model installation; the selected data drive must have at least 20GB free (D: for the default `D:\VoxAgentData` root).
 - GTX 1660 Ti peak model workload must remain below approximately 5.4GB VRAM.
 - Local operation is the default; this plan must not configure or call a cloud model.
 - Do not install a full CUDA Toolkit or CMake for this phase; use prebuilt Ollama and sherpa-onnx runtimes.
