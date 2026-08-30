@@ -1,6 +1,7 @@
 import hashlib
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -28,6 +29,22 @@ def _rewrite_soak_and_rehash_baseline(copied: Path, soak: dict[str, object]) -> 
 
 def test_committed_baseline_is_fully_recomputable():
     assert validate_baseline(BASELINE) == ()
+
+
+def test_hashed_benchmark_json_are_preserved_byte_for_byte():
+    artifacts = sorted((REPO_ROOT / "benchmarks").glob("*.json"))
+    artifacts.extend(sorted((REPO_ROOT / "benchmarks" / "archive").glob("*.json")))
+    relative_paths = [path.relative_to(REPO_ROOT).as_posix() for path in artifacts]
+
+    result = subprocess.run(
+        ["git", "check-attr", "text", "--", *relative_paths],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert all(line.endswith(": unset") for line in result.stdout.splitlines())
 
 
 def test_validator_reports_tampered_timing_artifact(tmp_path):
