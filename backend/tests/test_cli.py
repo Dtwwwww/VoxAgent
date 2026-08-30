@@ -63,4 +63,7 @@ def test_benchmark_llm_disables_environment_proxy(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0
+    assert created_client["base_url"] == "http://127.0.0.1:11434"
     assert created_client["trust_env"] is False
+    assert output.exists()
+    assert json.loads(output.read_text(encoding="utf-8")) == {"model": "test-model", "runs": []}
