@@ -80,7 +80,7 @@
         "artifact_path": "benchmarks/qwen3.5-4b.json",
         "artifact_sha256": "4ff8cc6d88db7c49580d3745408977b707a22ee95b482657bcd19fce2dde8c02",
         "measurement_completed_utc": "2026-08-30T08:15:53Z",
-        "completed_utc_source": "Windows LastWriteTimeUtc of the committed raw artifact, recorded before this combined baseline; corroborated by the Task 3 live-benchmark record.",
+        "completed_utc_source": "Windows LastWriteTimeUtc of the retained pre-normalization timing artifact, recorded before this combined baseline; the current timing artifact was later metadata-normalized only by adding schema_version=1 and run-1/run-2/run-3 identifiers, as verified by qwen3.5-soak-summary.json.",
         "completed_utc_precision": "second; artifact-completion provenance, not a per-run timestamp."
       },
       "resources": {
@@ -100,7 +100,7 @@
         "observed_sample_interval_ms": { "minimum": 257.134, "median": 294.93, "maximum": 396.02 }
       },
       "stability_evidence_path": "benchmarks/qwen3.5-soak-summary.json",
-      "stability_evidence_sha256": "3ee5867229fa3ead183c15eef2356f8ac75ed69101a19a56015163a01a4f5ff4",
+      "stability_evidence_sha256": "94efb681bf28ad7aa8e9150bfe9ec85dd55378473f809b62006f5b355f2ebbb5",
       "stable_30_minutes": false,
       "stability_status": "failed",
       "stability_reason": "The loopback 8192-context soak was proactively stopped at approximately 431 seconds to avoid an OOM after a live runner-RSS observation of at least 7096.7 MiB and free system RAM of at most 0.46 GiB. This is a genuine memory-pressure/RSS-growth stability failure and was not retried.",

@@ -1,0 +1,4 @@
+benchmarks/archive/qwen3.5-4b-pre-normalization-crlf.json -text -diff
+benchmarks/qwen3.5-4b.json -text -diff
+benchmarks/qwen3.5-soak-summary.json -text -diff
+benchmarks/resource-probe-qwen3.5-4b.json -text -diff

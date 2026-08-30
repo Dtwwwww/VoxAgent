@@ -32,9 +32,10 @@ download a model.
 `OLLAMA_NO_CLOUD=1` and `OLLAMA_HOST=127.0.0.1:11434` apply to wrapper child processes. They do
 not retroactively change an already-running Ollama server. Commands that contact Ollama must add
 `-RequireVerifiedOllama`; the wrapper then blocks unless port 11434 is loopback-only, API version
-and tag digests match the committed baseline and selected-root manifests, and the server process's
-offline environment is readable and contains `OLLAMA_NO_CLOUD=1`. An unreadable server environment
-is explicitly `unverified`, not assumed safe.
+and the exact API tag inventory/digests match the committed baseline and selected-root manifests.
+The server environment must be readable, contain `OLLAMA_NO_CLOUD=1`, and set `OLLAMA_MODELS`
+exactly to the selected root's `models\ollama` directory after Windows path normalization. Missing
+environment data is explicitly `unverified`, not assumed safe.
 
 Run repository commands through the same prepared environment:
 
@@ -78,7 +79,10 @@ version and archive hash.
 `probe-resources --mode soak` repeatedly calls only the loopback Ollama endpoint while sampling.
 Memory-pressure limits stop the harness itself; the command never terminates Ollama or any other
 process. The immutable manifest/model-blob identity maps the probe to one runner PID; missing or
-ambiguous attribution fails. Review and sanitize new raw evidence before committing it.
+ambiguous attribution fails. WDDM `[N/A]` per-PID VRAM is never recorded as zero: the harness may
+use whole-device `memory.used` only when that runner is the sole compute process, recording
+`unique_compute_process_total_gpu`; otherwise the strict probe exits nonzero as unavailable.
+Review and sanitize new raw evidence before committing it.
 
 The same verification gate is mandatory for a live timing run:
 

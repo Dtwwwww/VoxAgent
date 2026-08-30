@@ -149,6 +149,8 @@ def probe_resources(
             client.close()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    if report.sampler_error is not None:
+        raise typer.Exit(code=2)
 
 
 if __name__ == "__main__":

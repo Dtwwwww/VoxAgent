@@ -40,11 +40,28 @@ class TargetAttributionError(RuntimeError):
     pass
 
 
+class GpuMemoryUnavailable(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class GpuMemoryObservation:
+    vram_mib: int | None
+    attribution: Literal[
+        "target_pid",
+        "unique_compute_process_total_gpu",
+        "unavailable",
+    ]
+    error: str | None = None
+    observed_compute_pids: tuple[int, ...] = ()
+
+
 @dataclass(frozen=True, slots=True)
 class ResourceSample:
     timestamp_utc: datetime
     runner_rss_bytes: tuple[int, ...]
     vram_mib: int
+    vram_attribution: str
     system_available_bytes: int
 
     def to_dict(self) -> dict[str, object]:
@@ -52,6 +69,7 @@ class ResourceSample:
             "timestamp_utc": self.timestamp_utc.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "runner_rss_bytes": list(self.runner_rss_bytes),
             "vram_mib": self.vram_mib,
+            "vram_attribution": self.vram_attribution,
             "system_available_bytes": self.system_available_bytes,
         }
 
@@ -64,8 +82,17 @@ class ProbeReport:
     sampler_error: str | None = None
 
     def to_dict(self) -> dict[str, object]:
+        attribution_modes = {sample.vram_attribution for sample in self.samples}
+        if len(attribution_modes) == 1:
+            gpu_attribution = next(iter(attribution_modes))
+        elif not attribution_modes and self.sampler_error and self.sampler_error.startswith(
+            "GpuMemoryUnavailable:"
+        ):
+            gpu_attribution = "unavailable"
+        else:
+            gpu_attribution = "mixed_or_unknown"
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "model_id": self.config.model_id,
             "target_identity": {
                 "model_manifest_sha256": self.config.model_manifest_sha256,
@@ -74,6 +101,7 @@ class ProbeReport:
                 "attribution": "strict_target_pid",
             },
             "configured_sample_interval_ms": self.config.sample_interval_ms,
+            "gpu_attribution": gpu_attribution,
             "config": asdict(self.config),
             "summary": summarize_samples(self.samples),
             "stop_reason": self.stop_reason,
@@ -136,25 +164,60 @@ def memory_pressure_reason(sample: ResourceSample, config: ProbeConfig) -> str |
     return None
 
 
-def parse_gpu_vram_for_pid(output: str, target_pid: int) -> int:
-    total = 0
+def parse_gpu_vram_for_pid(output: str, target_pid: int) -> GpuMemoryObservation:
+    compute_pids: set[int] = set()
+    target_memory: list[int] = []
+    target_memory_unavailable = False
+    target_memory_invalid = False
     for row in csv.reader(StringIO(output)):
         if len(row) < 2:
             continue
         try:
             pid = int(row[0].strip())
-            memory = int(row[1].strip())
         except ValueError:
             continue
+        compute_pids.add(pid)
         if pid == target_pid:
-            total += memory
-    return total
+            try:
+                target_memory.append(int(row[1].strip()))
+            except ValueError:
+                if row[1].strip().lower() in {"[n/a]", "n/a"}:
+                    target_memory_unavailable = True
+                else:
+                    target_memory_invalid = True
+    observed_pids = tuple(sorted(compute_pids))
+    if target_pid not in compute_pids:
+        return GpuMemoryObservation(
+            vram_mib=None,
+            attribution="unavailable",
+            error="target PID is absent from nvidia-smi compute-app rows",
+            observed_compute_pids=observed_pids,
+        )
+    if target_memory_invalid:
+        return GpuMemoryObservation(
+            vram_mib=None,
+            attribution="unavailable",
+            error="target per-PID VRAM value is invalid",
+            observed_compute_pids=observed_pids,
+        )
+    if target_memory_unavailable or not target_memory:
+        return GpuMemoryObservation(
+            vram_mib=None,
+            attribution="unavailable",
+            error="target per-PID VRAM is unavailable",
+            observed_compute_pids=observed_pids,
+        )
+    return GpuMemoryObservation(
+        vram_mib=sum(target_memory),
+        attribution="target_pid",
+        observed_compute_pids=observed_pids,
+    )
 
 
-def _gpu_vram_mib(target_pid: int) -> int:
+def query_gpu_memory(target_pid: int) -> GpuMemoryObservation:
     executable = shutil.which("nvidia-smi")
     if executable is None:
-        return 0
+        return GpuMemoryObservation(None, "unavailable", "nvidia-smi is unavailable")
     try:
         result = subprocess.run(
             [
@@ -167,9 +230,46 @@ def _gpu_vram_mib(target_pid: int) -> int:
             text=True,
             timeout=10,
         )
-        return parse_gpu_vram_for_pid(result.stdout, target_pid)
+        per_pid = parse_gpu_vram_for_pid(result.stdout, target_pid)
     except (OSError, subprocess.SubprocessError, ValueError):
-        return 0
+        return GpuMemoryObservation(None, "unavailable", "per-PID nvidia-smi query failed")
+    if per_pid.vram_mib is not None:
+        return per_pid
+    if per_pid.error != "target per-PID VRAM is unavailable":
+        return per_pid
+    if per_pid.observed_compute_pids != (target_pid,):
+        return per_pid
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        device_values = [
+            int(row[0].strip())
+            for row in csv.reader(StringIO(result.stdout))
+            if row and row[0].strip()
+        ]
+        if len(device_values) != 1:
+            raise ValueError("expected exactly one GPU memory value")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return GpuMemoryObservation(
+            None,
+            "unavailable",
+            "whole-device nvidia-smi fallback query failed",
+            per_pid.observed_compute_pids,
+        )
+    return GpuMemoryObservation(
+        device_values[0],
+        "unique_compute_process_total_gpu",
+        observed_compute_pids=per_pid.observed_compute_pids,
+    )
 
 
 def collect_runner_processes() -> tuple[RunnerProcess, ...]:
@@ -212,10 +312,14 @@ def resolve_target_runner_pid(
 
 def collect_resource_sample(target_pid: int) -> ResourceSample:
     process = psutil.Process(target_pid)
+    gpu = query_gpu_memory(target_pid)
+    if gpu.vram_mib is None:
+        raise GpuMemoryUnavailable(gpu.error or "GPU memory is unavailable")
     return ResourceSample(
         timestamp_utc=datetime.now(UTC),
         runner_rss_bytes=(int(process.memory_info().rss),),
-        vram_mib=_gpu_vram_mib(target_pid),
+        vram_mib=gpu.vram_mib,
+        vram_attribution=gpu.attribution,
         system_available_bytes=int(psutil.virtual_memory().available),
     )
 

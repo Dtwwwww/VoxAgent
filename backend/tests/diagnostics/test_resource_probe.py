@@ -1,3 +1,4 @@
+import subprocess
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from time import monotonic
@@ -5,6 +6,7 @@ from time import monotonic
 import pytest
 
 from voxagent.diagnostics.resource_probe import (
+    GpuMemoryUnavailable,
     ProbeConfig,
     ResourceSample,
     RunnerProcess,
@@ -12,6 +14,7 @@ from voxagent.diagnostics.resource_probe import (
     build_probe_report,
     memory_pressure_reason,
     parse_gpu_vram_for_pid,
+    query_gpu_memory,
     resolve_target_runner_pid,
     run_resource_probe,
 )
@@ -22,12 +25,14 @@ def _sample(
     *,
     rss_bytes: tuple[int, ...] = (1024,),
     vram_mib: int = 100,
+    vram_attribution: str = "target_pid",
     available_bytes: int = 8 * 1024**3,
 ) -> ResourceSample:
     return ResourceSample(
         timestamp_utc=datetime(2026, 8, 30, tzinfo=UTC) + timedelta(milliseconds=offset_ms),
         runner_rss_bytes=rss_bytes,
         vram_mib=vram_mib,
+        vram_attribution=vram_attribution,
         system_available_bytes=available_bytes,
     )
 
@@ -48,7 +53,8 @@ def test_probe_report_schema_and_summary_are_recomputable():
     )
 
     payload = report.to_dict()
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
+    assert payload["gpu_attribution"] == "target_pid"
     assert payload["config"]["sample_interval_ms"] == 100
     assert payload["summary"] == {
         "sample_count": 2,
@@ -105,7 +111,73 @@ def test_target_blob_resolves_to_exactly_one_runner_pid():
 def test_gpu_vram_is_counted_only_for_target_pid():
     output = "10, 2048\n20, 4096\n10, 512\n"
 
-    assert parse_gpu_vram_for_pid(output, 10) == 2560
+    observation = parse_gpu_vram_for_pid(output, 10)
+
+    assert observation.vram_mib == 2560
+    assert observation.attribution == "target_pid"
+
+
+def test_wddm_na_uses_total_gpu_only_for_unique_target_process(monkeypatch):
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 0, "22540, [N/A]\n", ""),
+            subprocess.CompletedProcess([], 0, "3949\n", ""),
+        ]
+    )
+    monkeypatch.setattr(
+        "voxagent.diagnostics.resource_probe.subprocess.run",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    monkeypatch.setattr("voxagent.diagnostics.resource_probe.shutil.which", lambda _name: "smi")
+
+    observation = query_gpu_memory(22540)
+
+    assert observation.vram_mib == 3949
+    assert observation.attribution == "unique_compute_process_total_gpu"
+
+
+def test_wddm_na_rejects_fallback_when_other_compute_process_exists(monkeypatch):
+    output = "22540, [N/A]\n999, 512\n"
+    monkeypatch.setattr(
+        "voxagent.diagnostics.resource_probe.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, output, ""),
+    )
+    monkeypatch.setattr("voxagent.diagnostics.resource_probe.shutil.which", lambda _name: "smi")
+
+    observation = query_gpu_memory(22540)
+
+    assert observation.vram_mib is None
+    assert observation.attribution == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "compute_output",
+    ["999, 512\n", "22540, not-a-number\n"],
+)
+def test_missing_or_invalid_target_gpu_memory_is_unavailable(monkeypatch, compute_output):
+    monkeypatch.setattr(
+        "voxagent.diagnostics.resource_probe.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, compute_output, ""),
+    )
+    monkeypatch.setattr("voxagent.diagnostics.resource_probe.shutil.which", lambda _name: "smi")
+
+    observation = query_gpu_memory(22540)
+
+    assert observation.vram_mib is None
+    assert observation.attribution == "unavailable"
+
+
+def test_nvidia_smi_failure_is_unavailable(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(1, "nvidia-smi")
+
+    monkeypatch.setattr("voxagent.diagnostics.resource_probe.subprocess.run", fail)
+    monkeypatch.setattr("voxagent.diagnostics.resource_probe.shutil.which", lambda _name: "smi")
+
+    observation = query_gpu_memory(22540)
+
+    assert observation.vram_mib is None
+    assert observation.attribution == "unavailable"
 
 
 def test_sampler_error_is_recorded_and_returns_without_hanging():
@@ -130,6 +202,29 @@ def test_sampler_error_is_recorded_and_returns_without_hanging():
     assert payload["stop_reason"] == "sampler_error"
     assert payload["sampler_error"] == "RuntimeError: sampler broke"
     assert payload["samples"] == []
+
+
+def test_unavailable_gpu_memory_marks_strict_probe_failed():
+    config = ProbeConfig(
+        model_id="test-model",
+        mode="observe",
+        duration_seconds=30,
+        sample_interval_ms=100,
+        stop_available_ram_gib=0.5,
+        stop_runner_rss_mib=7000,
+        model_manifest_sha256="a" * 64,
+        model_blob_digest="b" * 64,
+        runner_pid=10,
+    )
+
+    def unavailable_sampler():
+        raise GpuMemoryUnavailable("per-PID VRAM is unavailable")
+
+    report = run_resource_probe(config, sample_provider=unavailable_sampler)
+
+    assert report.to_dict()["gpu_attribution"] == "unavailable"
+    assert report.stop_reason == "sampler_error"
+    assert report.sampler_error == "GpuMemoryUnavailable: per-PID VRAM is unavailable"
 
 
 def test_blocked_sampler_is_bounded_by_main_deadline():

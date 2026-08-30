@@ -216,7 +216,6 @@ def _validate_candidate(
         layer for layer in layers if layer.get("mediaType") == "application/vnd.ollama.image.model"
     ]
     probe_identity = probe.get("target_identity") or {}
-    _compare(issues, f"{model_id}.probe.schema_version", probe.get("schema_version"), 2)
     _compare(
         issues,
         f"{model_id}.probe.target_manifest",
@@ -232,19 +231,133 @@ def _validate_candidate(
         )
     attribution = probe_identity.get("attribution")
     if attribution == "historical_unavailable":
+        _compare(issues, f"{model_id}.probe.schema_version", probe.get("schema_version"), 2)
         if probe_identity.get("runner_pid") is not None or not probe_identity.get(
             "attribution_limitation"
         ):
             issues.append(f"{model_id}.probe.attribution: historical limitation is incomplete")
     elif attribution == "strict_target_pid":
+        _compare(issues, f"{model_id}.probe.schema_version", probe.get("schema_version"), 3)
         if not isinstance(probe_identity.get("runner_pid"), int):
             issues.append(f"{model_id}.probe.attribution: strict target PID is required")
         if any(len(sample.get("runner_rss_bytes", [])) != 1 for sample in samples):
             issues.append(f"{model_id}.probe.attribution: strict samples require one runner RSS")
+        gpu_attribution = probe.get("gpu_attribution")
+        if gpu_attribution not in {"target_pid", "unique_compute_process_total_gpu"}:
+            issues.append(f"{model_id}.probe.gpu_attribution: strict GPU attribution is required")
+        if any(
+            sample.get("vram_attribution") != gpu_attribution
+            or not isinstance(sample.get("vram_mib"), int)
+            for sample in samples
+        ):
+            issues.append(
+                f"{model_id}.probe.gpu_attribution: every sample must use the declared mode"
+            )
     else:
         issues.append(f"{model_id}.probe.attribution: unsupported attribution mode")
     if probe.get("sampler_error") is not None:
         issues.append(f"{model_id}.probe.sampler_error: accepted probes must be error-free")
+
+
+def _validate_soak_source_chain(
+    baseline_path: Path,
+    quality: dict[str, object],
+    soak: dict[str, object],
+    issues: list[str],
+) -> None:
+    retained_sources = soak.get("retained_source_files")
+    if not isinstance(retained_sources, list) or not retained_sources:
+        issues.append("qwen3.5:4b.soak.retained_source_files: expected a non-empty list")
+        return
+    for index, retained in enumerate(retained_sources):
+        label = f"qwen3.5:4b.soak.retained_source_files[{index}]"
+        try:
+            retained_path = _artifact_path(baseline_path, retained["path"])
+            _compare(
+                issues,
+                f"{label}.sha256",
+                _sha256(retained_path),
+                retained["sha256"],
+            )
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            issues.append(f"{label}: {type(error).__name__}: {error}")
+
+    try:
+        attestation = soak["normalization_attestation"]
+        source_path = _artifact_path(baseline_path, attestation["source_path"])
+        current_path = _artifact_path(baseline_path, attestation["current_artifact_path"])
+        expected_changes = [
+            {"operation": "add", "path": "/schema_version", "value": 1},
+            {"operation": "add", "path": "/runs/0/run_id", "value": "run-1"},
+            {"operation": "add", "path": "/runs/1/run_id", "value": "run-2"},
+            {"operation": "add", "path": "/runs/2/run_id", "value": "run-3"},
+        ]
+        _compare(
+            issues,
+            "qwen3.5:4b.soak.normalization_attestation.changes",
+            attestation.get("changes"),
+            expected_changes,
+        )
+        _compare(
+            issues,
+            "qwen3.5:4b.soak.normalization_attestation.unchanged_run_fields",
+            attestation.get("unchanged_run_fields"),
+            ["prompt", "ttft_seconds", "total_seconds", "text"],
+        )
+        _compare(
+            issues,
+            "qwen3.5:4b.soak.normalization_attestation.source_sha256",
+            _sha256(source_path),
+            attestation["source_sha256"],
+        )
+        _compare(
+            issues,
+            "qwen3.5:4b.soak.normalization_attestation.current_sha256",
+            _sha256(current_path),
+            attestation["current_artifact_sha256"],
+        )
+        timing_provenance = quality["timing_provenance"]
+        _compare(
+            issues,
+            "qwen3.5:4b.soak.normalization_attestation.current_path",
+            attestation["current_artifact_path"],
+            timing_provenance["artifact_path"],
+        )
+        _compare(
+            issues,
+            "qwen3.5:4b.soak.normalization_attestation.current_baseline_sha256",
+            attestation["current_artifact_sha256"],
+            timing_provenance["artifact_sha256"],
+        )
+        if not any(
+            retained.get("path") == attestation["source_path"]
+            and retained.get("sha256") == attestation["source_sha256"]
+            for retained in retained_sources
+        ):
+            issues.append(
+                "qwen3.5:4b.soak.normalization_attestation: source is not in retained_source_files"
+            )
+
+        source = json.loads(source_path.read_text(encoding="utf-8"))
+        current = json.loads(current_path.read_text(encoding="utf-8"))
+        normalized = {
+            "schema_version": 1,
+            "model": source["model"],
+            "runs": [
+                {"run_id": f"run-{index}", **run}
+                for index, run in enumerate(source["runs"], start=1)
+            ],
+        }
+        if normalized != current:
+            issues.append(
+                "qwen3.5:4b.soak.normalization_attestation: current timing is not the "
+                "declared metadata-only conversion"
+            )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        issues.append(
+            "qwen3.5:4b.soak.normalization_attestation: "
+            f"{type(error).__name__}: {error}"
+        )
 
 
 def validate_baseline(baseline_path: Path) -> tuple[str, ...]:
@@ -295,6 +408,7 @@ def validate_baseline(baseline_path: Path) -> tuple[str, ...]:
                 quality["stable_30_minutes"],
                 soak.get("stability_status") == "passed" and not soak.get("stopped_early"),
             )
+            _validate_soak_source_chain(baseline_path, quality, soak, issues)
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
             issues.append(f"qwen3.5:4b.soak: {type(error).__name__}: {error}")
     try:

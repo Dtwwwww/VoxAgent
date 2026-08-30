@@ -49,9 +49,22 @@
       "relevance": "Retained three-prompt fixed resource probe preceding the soak; not raw soak telemetry."
     },
     {
-      "path": "benchmarks/qwen3.5-4b.json",
+      "path": "benchmarks/archive/qwen3.5-4b-pre-normalization-crlf.json",
       "sha256": "68db055b64053595dcde17fdb1bd2e927f8d27c5b7c1fb3d47d0684f13dc7c33",
-      "relevance": "Committed three-run timing artifact preceding the soak; not raw soak telemetry."
+      "relevance": "Byte-exact CRLF archive of the three-run timing artifact preceding the soak; recovered from git commit 9e616746 and its original Windows line endings; not raw soak telemetry."
     }
-  ]
+  ],
+  "normalization_attestation": {
+    "source_path": "benchmarks/archive/qwen3.5-4b-pre-normalization-crlf.json",
+    "source_sha256": "68db055b64053595dcde17fdb1bd2e927f8d27c5b7c1fb3d47d0684f13dc7c33",
+    "current_artifact_path": "benchmarks/qwen3.5-4b.json",
+    "current_artifact_sha256": "4ff8cc6d88db7c49580d3745408977b707a22ee95b482657bcd19fce2dde8c02",
+    "changes": [
+      {"operation": "add", "path": "/schema_version", "value": 1},
+      {"operation": "add", "path": "/runs/0/run_id", "value": "run-1"},
+      {"operation": "add", "path": "/runs/1/run_id", "value": "run-2"},
+      {"operation": "add", "path": "/runs/2/run_id", "value": "run-3"}
+    ],
+    "unchanged_run_fields": ["prompt", "ttft_seconds", "total_seconds", "text"]
+  }
 }

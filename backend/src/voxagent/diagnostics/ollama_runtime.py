@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import ntpath
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PureWindowsPath
 
@@ -26,6 +27,7 @@ class OllamaRuntimeObservation:
     api_model_digests: dict[str, str]
     local_manifest_digests: dict[str, str | None]
     server_environment: dict[str, str] | None
+    selected_models_root: str
     collection_errors: tuple[str, ...] = ()
 
 
@@ -62,6 +64,10 @@ def _is_loopback_address(address: str) -> bool:
         return False
 
 
+def _normalize_windows_path(path: str) -> str:
+    return ntpath.normcase(ntpath.normpath(path))
+
+
 def evaluate_ollama_runtime(
     expectation: OllamaRuntimeExpectation,
     observation: OllamaRuntimeObservation,
@@ -86,6 +92,14 @@ def evaluate_ollama_runtime(
             _issue(
                 "ollama_version_mismatch",
                 f"Expected Ollama {expectation.version}, observed {observation.api_version!r}.",
+            )
+        )
+
+    if set(observation.api_model_digests) != set(expectation.model_digests):
+        issues.append(
+            _issue(
+                "ollama_api_inventory_mismatch",
+                "Ollama API tags must exactly equal the committed baseline model set.",
             )
         )
 
@@ -114,6 +128,27 @@ def evaluate_ollama_runtime(
             _issue(
                 "ollama_offline_unverified",
                 "The existing Ollama server's OLLAMA_NO_CLOUD=1 environment could not be verified.",
+            )
+        )
+    observed_models_root = (
+        observation.server_environment.get("OLLAMA_MODELS")
+        if observation.server_environment
+        else None
+    )
+    if not observed_models_root:
+        issues.append(
+            _issue(
+                "ollama_models_root_unverified",
+                "The existing Ollama server's OLLAMA_MODELS environment could not be verified.",
+            )
+        )
+    elif _normalize_windows_path(observed_models_root) != _normalize_windows_path(
+        observation.selected_models_root
+    ):
+        issues.append(
+            _issue(
+                "ollama_models_root_mismatch",
+                "The existing Ollama server is not using the selected-root models directory.",
             )
         )
     return OllamaRuntimeReport(
@@ -195,9 +230,9 @@ def collect_ollama_runtime_observation(
             tags_response.raise_for_status()
             for item in tags_response.json().get("models", []):
                 digest = str(item.get("digest") or "")
-                for name in {item.get("name"), item.get("model")}:
-                    if name and digest:
-                        api_models[str(name)] = digest
+                name = item.get("name") or item.get("model")
+                if name and digest:
+                    api_models[str(name)] = digest
     except (httpx.HTTPError, ValueError, TypeError) as error:
         errors.append(f"Ollama API inspection failed: {error}")
 
@@ -210,7 +245,7 @@ def collect_ollama_runtime_observation(
             }
             server_environment = {
                 key: normalized_environment[key]
-                for key in ("OLLAMA_NO_CLOUD", "OLLAMA_HOST")
+                for key in ("OLLAMA_NO_CLOUD", "OLLAMA_HOST", "OLLAMA_MODELS")
                 if key in normalized_environment
             }
         except (OSError, psutil.Error):
@@ -222,6 +257,7 @@ def collect_ollama_runtime_observation(
         api_model_digests=api_models,
         local_manifest_digests=_selected_root_manifest_digests(data_root, expectation),
         server_environment=server_environment,
+        selected_models_root=str((data_root / "models" / "ollama").resolve()),
         collection_errors=tuple(errors),
     )
 
