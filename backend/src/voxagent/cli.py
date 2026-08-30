@@ -60,7 +60,9 @@ def benchmark_llm(
         raise typer.BadParameter("--model is required")
 
     async def execute() -> dict[str, object]:
-        async with httpx.AsyncClient(base_url="http://127.0.0.1:11434") as http:
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:11434", trust_env=False
+        ) as http:
             result = await run_llm_benchmark(OllamaClient(http), model, LLM_BENCHMARK_PROMPTS)
             return result.to_dict()
 
