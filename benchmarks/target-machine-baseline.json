@@ -44,7 +44,7 @@
         "probe_ended_utc": "2026-08-30T08:42:24.0943544Z",
         "sample_count": 23,
         "sampler_configured_interval_ms": 100,
-        "observed_sample_interval_ms": { "minimum": 254.698, "median": 290.681, "maximum": 340.065 }
+        "observed_sample_interval_ms": { "minimum": 254.698, "median": 290.239, "maximum": 340.065 }
       },
       "stable_30_minutes": null,
       "stability_status": "not_run",
