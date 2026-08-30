@@ -212,6 +212,39 @@ def _validate_candidate(
         issues.append(f"{model_id}.model_identity.blob_refs: every digest must be lowercase sha256")
     if not any(layer.get("mediaType") == "application/vnd.ollama.image.model" for layer in layers):
         issues.append(f"{model_id}.model_identity.layers: model layer is required")
+    model_layers = [
+        layer for layer in layers if layer.get("mediaType") == "application/vnd.ollama.image.model"
+    ]
+    probe_identity = probe.get("target_identity") or {}
+    _compare(issues, f"{model_id}.probe.schema_version", probe.get("schema_version"), 2)
+    _compare(
+        issues,
+        f"{model_id}.probe.target_manifest",
+        probe_identity.get("model_manifest_sha256"),
+        digest,
+    )
+    if model_layers:
+        _compare(
+            issues,
+            f"{model_id}.probe.target_model_blob",
+            probe_identity.get("model_blob_digest"),
+            model_layers[0].get("digest"),
+        )
+    attribution = probe_identity.get("attribution")
+    if attribution == "historical_unavailable":
+        if probe_identity.get("runner_pid") is not None or not probe_identity.get(
+            "attribution_limitation"
+        ):
+            issues.append(f"{model_id}.probe.attribution: historical limitation is incomplete")
+    elif attribution == "strict_target_pid":
+        if not isinstance(probe_identity.get("runner_pid"), int):
+            issues.append(f"{model_id}.probe.attribution: strict target PID is required")
+        if any(len(sample.get("runner_rss_bytes", [])) != 1 for sample in samples):
+            issues.append(f"{model_id}.probe.attribution: strict samples require one runner RSS")
+    else:
+        issues.append(f"{model_id}.probe.attribution: unsupported attribution mode")
+    if probe.get("sampler_error") is not None:
+        issues.append(f"{model_id}.probe.sampler_error: accepted probes must be error-free")
 
 
 def validate_baseline(baseline_path: Path) -> tuple[str, ...]:

@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import threading
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from io import StringIO
 from statistics import median
@@ -23,6 +23,21 @@ class ProbeConfig:
     sample_interval_ms: int
     stop_available_ram_gib: float
     stop_runner_rss_mib: int
+    model_manifest_sha256: str | None = None
+    model_blob_digest: str | None = None
+    runner_pid: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerProcess:
+    pid: int
+    name: str
+    command_line: str
+    rss_bytes: int
+
+
+class TargetAttributionError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,13 +61,23 @@ class ProbeReport:
     config: ProbeConfig
     samples: tuple[ResourceSample, ...]
     stop_reason: str
+    sampler_error: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
+            "model_id": self.config.model_id,
+            "target_identity": {
+                "model_manifest_sha256": self.config.model_manifest_sha256,
+                "model_blob_digest": self.config.model_blob_digest,
+                "runner_pid": self.config.runner_pid,
+                "attribution": "strict_target_pid",
+            },
+            "configured_sample_interval_ms": self.config.sample_interval_ms,
             "config": asdict(self.config),
             "summary": summarize_samples(self.samples),
             "stop_reason": self.stop_reason,
+            "sampler_error": self.sampler_error,
             "safety": "Stops only this harness; it never terminates Ollama or other processes.",
             "samples": [sample.to_dict() for sample in self.samples],
         }
@@ -60,7 +85,13 @@ class ProbeReport:
 
 def summarize_samples(samples: tuple[ResourceSample, ...]) -> dict[str, object]:
     if not samples:
-        raise ValueError("At least one resource sample is required")
+        return {
+            "sample_count": 0,
+            "peak_runner_rss_bytes": 0,
+            "peak_vram_mib": 0,
+            "minimum_available_ram_bytes": None,
+            "observed_sample_interval_ms": None,
+        }
     intervals = [
         (current.timestamp_utc - previous.timestamp_utc).total_seconds() * 1000
         for previous, current in zip(samples, samples[1:], strict=False)
@@ -87,9 +118,14 @@ def build_probe_report(
     config: ProbeConfig,
     samples: tuple[ResourceSample, ...],
     stop_reason: str,
+    sampler_error: str | None = None,
 ) -> ProbeReport:
-    summarize_samples(samples)
-    return ProbeReport(config=config, samples=samples, stop_reason=stop_reason)
+    return ProbeReport(
+        config=config,
+        samples=samples,
+        stop_reason=stop_reason,
+        sampler_error=sampler_error,
+    )
 
 
 def memory_pressure_reason(sample: ResourceSample, config: ProbeConfig) -> str | None:
@@ -100,7 +136,22 @@ def memory_pressure_reason(sample: ResourceSample, config: ProbeConfig) -> str |
     return None
 
 
-def _gpu_vram_mib() -> int:
+def parse_gpu_vram_for_pid(output: str, target_pid: int) -> int:
+    total = 0
+    for row in csv.reader(StringIO(output)):
+        if len(row) < 2:
+            continue
+        try:
+            pid = int(row[0].strip())
+            memory = int(row[1].strip())
+        except ValueError:
+            continue
+        if pid == target_pid:
+            total += memory
+    return total
+
+
+def _gpu_vram_mib(target_pid: int) -> int:
     executable = shutil.which("nvidia-smi")
     if executable is None:
         return 0
@@ -108,7 +159,7 @@ def _gpu_vram_mib() -> int:
         result = subprocess.run(
             [
                 executable,
-                "--query-compute-apps=used_gpu_memory",
+                "--query-compute-apps=pid,used_gpu_memory",
                 "--format=csv,noheader,nounits",
             ],
             check=True,
@@ -116,25 +167,55 @@ def _gpu_vram_mib() -> int:
             text=True,
             timeout=10,
         )
-        rows = csv.reader(StringIO(result.stdout))
-        return sum(int(row[0].strip()) for row in rows if row and row[0].strip().isdigit())
+        return parse_gpu_vram_for_pid(result.stdout, target_pid)
     except (OSError, subprocess.SubprocessError, ValueError):
         return 0
 
 
-def collect_resource_sample() -> ResourceSample:
-    rss_values: list[int] = []
+def collect_runner_processes() -> tuple[RunnerProcess, ...]:
+    runners: list[RunnerProcess] = []
     for process in psutil.process_iter(["name", "memory_info"]):
         try:
             name = (process.info["name"] or "").lower()
             if name in {"llama-server", "llama-server.exe"}:
-                rss_values.append(int(process.info["memory_info"].rss))
+                runners.append(
+                    RunnerProcess(
+                        pid=process.pid,
+                        name=name,
+                        command_line=" ".join(process.cmdline()),
+                        rss_bytes=int(process.info["memory_info"].rss),
+                    )
+                )
         except (psutil.AccessDenied, psutil.NoSuchProcess):
             continue
+    return tuple(runners)
+
+
+def resolve_target_runner_pid(
+    model_blob_digest: str,
+    processes: tuple[RunnerProcess, ...],
+    requested_pid: int | None = None,
+) -> int:
+    normalized = model_blob_digest.removeprefix("sha256:")
+    marker = f"sha256-{normalized}"
+    candidates = [process.pid for process in processes if marker in process.command_line]
+    if requested_pid is not None:
+        if requested_pid not in candidates:
+            raise TargetAttributionError("requested PID does not match the target model blob")
+        return requested_pid
+    if not candidates:
+        raise TargetAttributionError("no llama-server runner matches the target model blob")
+    if len(candidates) != 1:
+        raise TargetAttributionError("ambiguous llama-server runners match the target model blob")
+    return candidates[0]
+
+
+def collect_resource_sample(target_pid: int) -> ResourceSample:
+    process = psutil.Process(target_pid)
     return ResourceSample(
         timestamp_utc=datetime.now(UTC),
-        runner_rss_bytes=tuple(rss_values),
-        vram_mib=_gpu_vram_mib(),
+        runner_rss_bytes=(int(process.memory_info().rss),),
+        vram_mib=_gpu_vram_mib(target_pid),
         system_available_bytes=int(psutil.virtual_memory().available),
     )
 
@@ -143,41 +224,84 @@ def run_resource_probe(
     config: ProbeConfig,
     *,
     workload: Callable[[], None] | None = None,
-    sample_provider: Callable[[], ResourceSample] = collect_resource_sample,
+    sample_provider: Callable[[], ResourceSample] | None = None,
 ) -> ProbeReport:
     if config.duration_seconds <= 0 or config.sample_interval_ms <= 0:
         raise ValueError("Probe duration and sample interval must be positive")
+
+    if sample_provider is None:
+        if config.model_blob_digest is None:
+            raise TargetAttributionError("model blob digest is required for strict attribution")
+        runner_pid = resolve_target_runner_pid(
+            config.model_blob_digest,
+            collect_runner_processes(),
+            config.runner_pid,
+        )
+        config = replace(config, runner_pid=runner_pid)
+
+        def attributed_sample_provider() -> ResourceSample:
+            return collect_resource_sample(runner_pid)
+
+        sample_provider = attributed_sample_provider
 
     samples: list[ResourceSample] = []
     stop_event = threading.Event()
     started = monotonic()
     stop_reason = ["duration_reached"]
+    sampler_error: list[str | None] = [None]
 
     def sample_until_stopped() -> None:
-        while not stop_event.is_set():
-            sample = sample_provider()
-            samples.append(sample)
-            pressure = memory_pressure_reason(sample, config)
-            if pressure is not None:
-                stop_reason[0] = pressure
-                stop_event.set()
-                return
-            remaining = config.duration_seconds - (monotonic() - started)
-            if remaining <= 0:
-                stop_event.set()
-                return
-            stop_event.wait(min(config.sample_interval_ms / 1000, remaining))
+        try:
+            while not stop_event.is_set():
+                sample = sample_provider()
+                samples.append(sample)
+                pressure = memory_pressure_reason(sample, config)
+                if pressure is not None:
+                    stop_reason[0] = pressure
+                    return
+                remaining = config.duration_seconds - (monotonic() - started)
+                if remaining <= 0:
+                    return
+                stop_event.wait(min(config.sample_interval_ms / 1000, remaining))
+        except Exception as error:  # noqa: BLE001 - sampler failures belong in the report
+            sampler_error[0] = f"{type(error).__name__}: {error}"
+            if stop_reason[0] == "duration_reached":
+                stop_reason[0] = "sampler_error"
+        finally:
+            stop_event.set()
 
-    sampler = threading.Thread(target=sample_until_stopped, name="voxagent-resource-probe")
+    sampler = threading.Thread(
+        target=sample_until_stopped,
+        name="voxagent-resource-probe",
+        daemon=True,
+    )
     sampler.start()
+    deadline = started + config.duration_seconds
     if workload is None:
-        sampler.join()
+        while sampler.is_alive() and not stop_event.is_set():
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                stop_reason[0] = "sampler_deadline_exceeded"
+                stop_event.set()
+                break
+            sampler.join(min(remaining, 0.05))
+        if sampler.is_alive() and stop_reason[0] == "sampler_deadline_exceeded":
+            sampler.join(0.1)
     else:
-        while not stop_event.is_set():
+        while sampler.is_alive() and not stop_event.is_set():
+            if monotonic() >= deadline:
+                stop_reason[0] = "sampler_deadline_exceeded"
+                stop_event.set()
+                break
             try:
                 workload()
             except Exception as error:  # noqa: BLE001 - the report must retain workload failure
                 stop_reason[0] = f"workload_error:{type(error).__name__}:{error}"
                 stop_event.set()
-        sampler.join()
-    return build_probe_report(config, tuple(samples), stop_reason[0])
+        sampler.join(0.1)
+    return build_probe_report(
+        config,
+        tuple(samples),
+        stop_reason[0],
+        sampler_error=sampler_error[0],
+    )

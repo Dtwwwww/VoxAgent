@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -102,3 +103,30 @@ def test_validator_rejects_soak_summary_inconsistent_with_candidate(tmp_path):
 
     assert any("stability_status" in issue for issue in issues)
     assert any("raw_samples_retained" in issue for issue in issues)
+
+
+def test_validator_accepts_canonical_strict_target_probe(tmp_path):
+    copied = tmp_path / "repo" / "benchmarks"
+    shutil.copytree(REPO_ROOT / "benchmarks", copied)
+    probe_path = copied / "resource-probe-qwen3-4b.json"
+    probe = json.loads(probe_path.read_text(encoding="utf-8"))
+    probe["target_identity"].update(
+        {
+            "runner_pid": 123,
+            "attribution": "strict_target_pid",
+        }
+    )
+    probe["target_identity"].pop("attribution_limitation", None)
+    for sample in probe["samples"]:
+        if not sample["runner_rss_bytes"]:
+            sample["runner_rss_bytes"] = [0]
+    probe_path.write_text(json.dumps(probe), encoding="utf-8")
+
+    baseline_path = copied / "target-machine-baseline.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline["llm_candidates"][0]["resource_provenance"]["probe_sha256"] = (
+        hashlib.sha256(probe_path.read_bytes()).hexdigest()
+    )
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+
+    assert validate_baseline(baseline_path) == ()

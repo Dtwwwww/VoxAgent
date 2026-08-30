@@ -45,7 +45,7 @@
   "retained_source_files": [
     {
       "path": "benchmarks/resource-probe-qwen3.5-4b.json",
-      "sha256": "356d6ce55f01c093c90ada3edc0084b05818e370399de9d5ef483ec5f46b3c82",
+      "sha256": "a260ee8875156bd5cbd959015e19021eaaad92caa8ddad2ba99a0f84b4d2e976",
       "relevance": "Retained three-prompt fixed resource probe preceding the soak; not raw soak telemetry."
     },
     {

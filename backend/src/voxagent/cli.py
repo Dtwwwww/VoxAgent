@@ -86,6 +86,9 @@ def validate_baseline_command(
 def probe_resources(
     model: Annotated[str, typer.Option("--model")],
     output: Annotated[Path, typer.Option("--output", dir_okay=False)],
+    manifest_sha256: Annotated[str, typer.Option("--manifest-sha256")],
+    model_blob_digest: Annotated[str, typer.Option("--model-blob-digest")],
+    runner_pid: Annotated[int | None, typer.Option("--runner-pid")] = None,
     mode: Annotated[str, typer.Option("--mode")] = "observe",
     duration_seconds: Annotated[float, typer.Option("--duration-seconds")] = 60,
     sample_interval_ms: Annotated[int, typer.Option("--sample-interval-ms")] = 100,
@@ -99,6 +102,9 @@ def probe_resources(
         sample_interval_ms=sample_interval_ms,
         stop_available_ram_gib=0.5,
         stop_runner_rss_mib=7000,
+        model_manifest_sha256=manifest_sha256,
+        model_blob_digest=model_blob_digest,
+        runner_pid=runner_pid,
     )
     workload = None
     if mode == "soak":

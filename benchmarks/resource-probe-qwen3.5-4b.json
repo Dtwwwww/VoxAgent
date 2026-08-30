@@ -1,6 +1,15 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "model_id": "qwen3.5:4b",
+  "target_identity": {
+    "model_manifest_sha256": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+    "model_blob_digest": "sha256:81fb60c7daa80fc1123380b98970b320ae233409f0f71a72ed7b9b0d62f40490",
+    "runner_pid": null,
+    "attribution": "historical_unavailable",
+    "attribution_limitation": "The retained historical sampler did not preserve a trustworthy target PID; values are preserved without claiming strict attribution."
+  },
+  "mode": "historical_fixed_prompt_probe",
+  "sampler_error": null,
   "sanitization": "Removed process IDs, command lines, PowerShell remoting metadata, and absolute paths; timestamps and numeric measurements are unchanged.",
   "configured_sample_interval_ms": 100,
   "samples": [

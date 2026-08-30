@@ -49,7 +49,7 @@
       "resources": { "fixed_prompt_probe_peak_runner_rss_mib": 743.73, "fixed_prompt_probe_peak_vram_mib": 3783 },
       "resource_provenance": {
         "probe_path": "benchmarks/resource-probe-qwen3-4b.json",
-        "probe_sha256": "d29cebda3d4c82cb57c7dde18eb49bbda77b1b3b3b458872dced509bc1c0bb89",
+        "probe_sha256": "57c94d6185e902f698acb99c8da22ba8111f359f357a20a93ff23ffc653746e2",
         "probe_started_utc": "2026-08-30T08:42:17.6113839Z",
         "probe_ended_utc": "2026-08-30T08:42:24.0943544Z",
         "sample_count": 23,
@@ -92,7 +92,7 @@
       },
       "resource_provenance": {
         "probe_path": "benchmarks/resource-probe-qwen3.5-4b.json",
-        "probe_sha256": "356d6ce55f01c093c90ada3edc0084b05818e370399de9d5ef483ec5f46b3c82",
+        "probe_sha256": "a260ee8875156bd5cbd959015e19021eaaad92caa8ddad2ba99a0f84b4d2e976",
         "probe_started_utc": "2026-08-30T08:42:26.0628043Z",
         "probe_ended_utc": "2026-08-30T08:42:41.7323380Z",
         "sample_count": 52,
@@ -100,7 +100,7 @@
         "observed_sample_interval_ms": { "minimum": 257.134, "median": 294.93, "maximum": 396.02 }
       },
       "stability_evidence_path": "benchmarks/qwen3.5-soak-summary.json",
-      "stability_evidence_sha256": "6df4849a7789e214a21135d1e603c4184251e3eada0577f406cd5d1321411ce6",
+      "stability_evidence_sha256": "3ee5867229fa3ead183c15eef2356f8ac75ed69101a19a56015163a01a4f5ff4",
       "stable_30_minutes": false,
       "stability_status": "failed",
       "stability_reason": "The loopback 8192-context soak was proactively stopped at approximately 431 seconds to avoid an OOM after a live runner-RSS observation of at least 7096.7 MiB and free system RAM of at most 0.46 GiB. This is a genuine memory-pressure/RSS-growth stability failure and was not retried.",
@@ -131,7 +131,7 @@
       "resources": { "fixed_prompt_probe_peak_runner_rss_mib": 657.43, "fixed_prompt_probe_peak_vram_mib": 2233 },
       "resource_provenance": {
         "probe_path": "benchmarks/resource-probe-qwen3-1.7b.json",
-        "probe_sha256": "5769b006a4e4aa81aa9085a4ad5c13bbfcfb9d7e5079fbb821654ae930c9f43c",
+        "probe_sha256": "87de52c7e369caeb3bf0897ae0c2e25a8e5b28877761b67c73401b748f384cd8",
         "probe_started_utc": "2026-08-30T08:42:43.7333104Z",
         "probe_ended_utc": "2026-08-30T08:42:51.7476558Z",
         "sample_count": 26,
