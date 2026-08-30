@@ -11,6 +11,7 @@ from voxagent.config import AppPaths, resolve_data_root
 from voxagent.diagnostics.baseline_validator import validate_baseline
 from voxagent.diagnostics.hardware import collect_hardware, evaluate_preflight
 from voxagent.diagnostics.llm_benchmark import LLM_BENCHMARK_PROMPTS, run_llm_benchmark
+from voxagent.diagnostics.ollama_runtime import verify_ollama_runtime
 from voxagent.diagnostics.resource_probe import ProbeConfig, run_resource_probe
 from voxagent.llm.ollama import OllamaClient
 
@@ -80,6 +81,24 @@ def validate_baseline_command(
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2) if as_json else payload)
     if issues:
         raise typer.Exit(code=1)
+
+
+@app.command("verify-ollama-runtime")
+def verify_ollama_runtime_command(
+    data_root: Annotated[Path | None, typer.Option("--data-root", dir_okay=True)] = None,
+    baseline: Annotated[Path, typer.Option("--baseline", dir_okay=False)] = Path(
+        "benchmarks/target-machine-baseline.json"
+    ),
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    report = verify_ollama_runtime(
+        data_root=resolve_data_root(data_root),
+        baseline_path=baseline.resolve(),
+    )
+    payload = report.to_dict()
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2) if as_json else payload)
+    if not report.valid:
+        raise typer.Exit(code=2)
 
 
 @app.command("probe-resources")

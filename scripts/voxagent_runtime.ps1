@@ -9,7 +9,13 @@ param(
     [switch]$Quiet,
 
     [Parameter(Mandatory = $false)]
-    [scriptblock]$Command
+    [switch]$RequireVerifiedOllama,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowUnverifiedOllama,
+
+    [Parameter(Mandatory = $false)]
+    [object]$Command
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,9 +77,66 @@ else {
 }
 
 if ($Command) {
-    & $Command
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+    if ($Command -is [scriptblock]) {
+        $commandBlock = $Command
+    }
+    elseif ($Command -is [string]) {
+        $commandBlock = [scriptblock]::Create($Command)
+    }
+    else {
+        throw '-Command must be a PowerShell script block or string.'
+    }
+    if ($RequireVerifiedOllama) {
+        $backendRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'backend'
+        $baselinePath = Join-Path (
+            Split-Path -Parent $PSScriptRoot
+        ) 'benchmarks\target-machine-baseline.json'
+        $verificationOutput = & uv run --project $backendRoot voxagent verify-ollama-runtime `
+            --data-root $resolvedRoot `
+            --baseline $baselinePath `
+            --json
+        $verificationExitCode = $LASTEXITCODE
+        if ($verificationExitCode -ne 0) {
+            $onlyOfflineStateIsUnverified = $false
+            try {
+                $verification = ($verificationOutput -join [Environment]::NewLine) |
+                    ConvertFrom-Json
+                $issueCodes = @($verification.issues | ForEach-Object { [string]$_.code })
+                $onlyOfflineStateIsUnverified = (
+                    $issueCodes.Count -gt 0 -and
+                    @($issueCodes | Where-Object {
+                        $_ -ne 'ollama_offline_unverified'
+                    }).Count -eq 0
+                )
+            }
+            catch {
+                $onlyOfflineStateIsUnverified = $false
+            }
+            $overrideAllowed = (
+                $onlyOfflineStateIsUnverified -and
+                $AllowUnverifiedOllama -and
+                $env:VOXAGENT_ACCEPT_UNVERIFIED_OLLAMA -eq (
+                    'I_ACCEPT_EXISTING_OLLAMA_WITH_UNVERIFIED_OFFLINE_STATE'
+                )
+            )
+            if (-not $overrideAllowed) {
+                throw "Ollama runtime verification blocked command: $verificationOutput"
+            }
+            Write-Warning (
+                'Running with an explicitly accepted, unverified existing Ollama server. ' +
+                'The wrapper did not change or restart that service.'
+            )
+        }
+    }
+    $LASTEXITCODE = 0
+    & $commandBlock
+    $commandSucceeded = $?
+    $commandExitCode = $LASTEXITCODE
+    if (-not $commandSucceeded) {
+        exit $(if ($commandExitCode -ne 0) { $commandExitCode } else { 1 })
+    }
+    if ($commandExitCode -ne 0) {
+        exit $commandExitCode
     }
     exit 0
 }
@@ -83,6 +146,9 @@ if (-not $Quiet) {
         data_root = $resolvedRoot
         preflight = $preflightStatus
         environment = $runtimeEnvironment
-        behavior = 'Prepared directories and environment only; no service was started or stopped.'
+        behavior = (
+            'Prepared directories and child-process environment only; no service was started, ' +
+            'stopped, or reconfigured, and no existing Ollama service was claimed as verified.'
+        )
     } | ConvertTo-Json -Depth 4
 }

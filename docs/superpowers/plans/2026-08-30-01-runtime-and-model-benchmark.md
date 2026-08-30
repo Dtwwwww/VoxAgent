@@ -34,11 +34,21 @@ current verification and future reruns so every cache/model/temp path follows th
     uv run voxagent validate-baseline --baseline ../benchmarks/target-machine-baseline.json --json
     Pop-Location
 }
+& .\scripts\voxagent_runtime.ps1 -RequireVerifiedOllama -Command {
+    Push-Location backend
+    uv run voxagent benchmark-llm --model qwen3:4b-instruct-2507-q4_K_M `
+      --output ../benchmarks/new-qwen3-4b.json
+    Pop-Location
+}
 ```
 
 The wrapper defaults to `D:\VoxAgentData`, honors `VOXAGENT_DATA_ROOT` and explicit `-DataRoot`,
-sets Ollama to loopback/offline mode, and gates execution on C: plus the selected data drive.
-Speech downloads invoke the same preflight before any archive download.
+and gates execution on C: plus the selected data drive. Its loopback/offline environment applies
+to child commands only; it does not reconfigure an already-running Ollama service. Standard live
+Ollama commands use `-RequireVerifiedOllama`, which verifies loopback listeners, API version/tag
+inventory, selected-root manifest digests, and the server process's offline environment before
+execution. Unverifiable offline state blocks by default. Speech downloads invoke the same
+preflight before any archive download.
 
 ---
 

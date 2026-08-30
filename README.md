@@ -23,10 +23,18 @@ From PowerShell at the repository root:
 & .\scripts\voxagent_runtime.ps1
 ```
 
-This creates only the selected runtime directories, exports `OLLAMA_MODELS`, `UV_CACHE_DIR`,
-speech/model roots and temporary paths, then runs the C: plus selected-data-drive preflight.
-It sets `OLLAMA_NO_CLOUD=1` and `OLLAMA_HOST=127.0.0.1:11434`. With no `-Command`, it does not
-start or stop Ollama, download a model, or run an application.
+This creates only the selected runtime directories, constructs `OLLAMA_MODELS`, `UV_CACHE_DIR`,
+speech/model roots and temporary paths for a supplied `-Command`, then runs the C: plus
+selected-data-drive preflight. With no `-Command`, it reports those child-process values but does
+not persist them in the calling shell. It never starts, stops, or reconfigures Ollama and does not
+download a model.
+
+`OLLAMA_NO_CLOUD=1` and `OLLAMA_HOST=127.0.0.1:11434` apply to wrapper child processes. They do
+not retroactively change an already-running Ollama server. Commands that contact Ollama must add
+`-RequireVerifiedOllama`; the wrapper then blocks unless port 11434 is loopback-only, API version
+and tag digests match the committed baseline and selected-root manifests, and the server process's
+offline environment is readable and contains `OLLAMA_NO_CLOUD=1`. An unreadable server environment
+is explicitly `unverified`, not assumed safe.
 
 Run repository commands through the same prepared environment:
 
@@ -52,13 +60,33 @@ version and archive hash.
 ## Baseline verification and resource probes
 
 ```powershell
-Push-Location backend
-uv run voxagent validate-baseline --baseline ../benchmarks/target-machine-baseline.json --json
-uv run voxagent probe-resources --model qwen3:4b-instruct-2507-q4_K_M `
-  --mode observe --duration-seconds 60 --output ../benchmarks/new-probe.json
-Pop-Location
+& .\scripts\voxagent_runtime.ps1 -Command {
+    Push-Location backend
+    uv run voxagent validate-baseline --baseline ../benchmarks/target-machine-baseline.json --json
+    Pop-Location
+}
+& .\scripts\voxagent_runtime.ps1 -RequireVerifiedOllama -Command {
+    Push-Location backend
+    uv run voxagent probe-resources --model qwen3:4b-instruct-2507-q4_K_M `
+      --manifest-sha256 0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0 `
+      --model-blob-digest sha256:85e4a5b7b8ef0e48af0e8658f5aaab9c2324c76c1641493f4d1e25fce54b18b9 `
+      --mode observe --duration-seconds 60 --output ../benchmarks/new-probe.json
+    Pop-Location
+}
 ```
 
 `probe-resources --mode soak` repeatedly calls only the loopback Ollama endpoint while sampling.
 Memory-pressure limits stop the harness itself; the command never terminates Ollama or any other
-process. Review and sanitize new raw evidence before committing it.
+process. The immutable manifest/model-blob identity maps the probe to one runner PID; missing or
+ambiguous attribution fails. Review and sanitize new raw evidence before committing it.
+
+The same verification gate is mandatory for a live timing run:
+
+```powershell
+& .\scripts\voxagent_runtime.ps1 -RequireVerifiedOllama -Command {
+    Push-Location backend
+    uv run voxagent benchmark-llm --model qwen3:4b-instruct-2507-q4_K_M `
+      --output ../benchmarks/new-qwen3-4b.json
+    Pop-Location
+}
+```
