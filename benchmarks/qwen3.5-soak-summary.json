@@ -43,8 +43,8 @@
   ],
   "retained_source_files": [
     {
-      "path": "D:\\VoxAgentData\\cache\\resource-probe-qwen3-5-4b-20260830-164224.json",
-      "sha256": "df18be1addd138bd43b4496392a3bb0bd227747af7bbcbc5dca5082bee7f3a6b",
+      "path": "benchmarks/resource-probe-qwen3.5-4b.json",
+      "sha256": "356d6ce55f01c093c90ada3edc0084b05818e370399de9d5ef483ec5f46b3c82",
       "relevance": "Retained three-prompt fixed resource probe preceding the soak; not raw soak telemetry."
     },
     {

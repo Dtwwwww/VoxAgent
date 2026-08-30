@@ -19,6 +19,27 @@
 - Do not install a full CUDA Toolkit or CMake for this phase; use prebuilt Ollama and sherpa-onnx runtimes.
 - Every accepted entry in the combined baseline must include UTC timestamp, model identifier, machine snapshot, latency, RAM, VRAM, and success/failure reason; raw per-model timing artifacts may be joined with the resource sampler in Task 5.
 
+## Current Standard Runtime Commands
+
+The executable implementation now uses one PowerShell entry point for operational commands. The
+task-by-task snippets below remain the original TDD construction record; use this wrapper for
+current verification and future reruns so every cache/model/temp path follows the selected root:
+
+```powershell
+& .\scripts\voxagent_runtime.ps1
+& .\scripts\voxagent_runtime.ps1 -Command {
+    Push-Location backend
+    uv run --extra dev --extra speech pytest -q
+    uv run --extra dev ruff check src tests
+    uv run voxagent validate-baseline --baseline ../benchmarks/target-machine-baseline.json --json
+    Pop-Location
+}
+```
+
+The wrapper defaults to `D:\VoxAgentData`, honors `VOXAGENT_DATA_ROOT` and explicit `-DataRoot`,
+sets Ollama to loopback/offline mode, and gates execution on C: plus the selected data drive.
+Speech downloads invoke the same preflight before any archive download.
+
 ---
 
 ## Planned File Structure
@@ -1096,4 +1117,4 @@ Do not begin Plan 02 until all conditions hold:
 - All three Ollama models produce non-empty Chinese output locally.
 - SenseVoice, Kokoro, and Melo model directories exist and sherpa-onnx imports from the locked environment.
 - `benchmarks/target-machine-baseline.json` contains real LLM measurements, verified speech-asset states, and an accepted default LLM.
-- `uv run pytest` and `uv run ruff check src tests` pass.
+- The standard runtime wrapper completes preflight; its pytest, Ruff, and baseline-validator commands pass.

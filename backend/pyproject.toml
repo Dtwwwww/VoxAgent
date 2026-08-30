@@ -32,7 +32,7 @@ packages = ["src/voxagent"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "-q --basetemp=D:/VoxAgentData/cache/pytest"
+addopts = "-q"
 
 [tool.ruff]
 target-version = "py312"

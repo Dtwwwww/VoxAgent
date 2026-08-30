@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -48,6 +49,8 @@ def _write_manifest(
 
 
 def _run_script(data_root: Path, manifest: Path) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["VOXAGENT_ALLOW_TEST_PREFLIGHT_BYPASS"] = "1"
     return subprocess.run(
         [
             POWERSHELL,
@@ -60,10 +63,12 @@ def _run_script(data_root: Path, manifest: Path) -> subprocess.CompletedProcess[
             str(data_root),
             "-ModelManifestPath",
             str(manifest),
+            "-SkipPreflightForTests",
         ],
         check=False,
         capture_output=True,
         text=True,
+        env=environment,
     )
 
 

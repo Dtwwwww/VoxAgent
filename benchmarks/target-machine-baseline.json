@@ -1,11 +1,13 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "captured_at_utc": "2026-08-30T08:54:24.1885786Z",
   "machine_snapshot_id": "target-machine-final-20260830T085424Z",
   "machine_snapshot_reference": "Shared final snapshot reference collected after individual timing runs, resource probes, and soak; it is not a claim that free-memory values were simultaneous with every candidate measurement.",
   "collection": {
     "local_only": true,
     "ollama_endpoint": "http://127.0.0.1:11434",
+    "ollama_version": "0.33.2",
+    "ollama_version_source": "Read-only GET http://127.0.0.1:11434/api/version at baseline hardening time.",
     "context_tokens": 8192,
     "resource_probe": "Three fixed single-turn Chinese prompts per model; sampled actual llama-server runner RSS and nvidia-smi VRAM; each runner was unloaded with ollama stop.",
     "aggregation": "p50 is the median of three raw runs; p95 is nearest-rank p95 (rank ceil(0.95 * 3) = 3, therefore the maximum)."
@@ -25,6 +27,12 @@
   "llm_candidates": [
     {
       "model_id": "qwen3:4b-instruct-2507-q4_K_M",
+      "model_identity": {
+        "ollama_tag_digest": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
+        "local_manifest_path": "${DATA_ROOT}\\models\\ollama\\manifests\\registry.ollama.ai\\library\\qwen3\\4b-instruct-2507-q4_K_M",
+        "local_manifest_sha256": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
+        "identity_source": "Read-only /api/tags plus SHA-256 of the local Ollama manifest; no pull or tag mutation was performed."
+      },
       "machine_snapshot_id": "target-machine-final-20260830T085424Z",
       "raw_artifact": "qwen3-4b.json",
       "run_count": 3,
@@ -38,8 +46,8 @@
       },
       "resources": { "fixed_prompt_probe_peak_runner_rss_mib": 743.73, "fixed_prompt_probe_peak_vram_mib": 3783 },
       "resource_provenance": {
-        "probe_path": "D:\\VoxAgentData\\cache\\resource-probe-qwen3-4b-instruct-2507-q4_K_M-20260830-164214.json",
-        "probe_sha256": "284db3e44e120a54588d1ca28e1aa0aa3359771ec7d9b1c24e1dec194865dd77",
+        "probe_path": "benchmarks/resource-probe-qwen3-4b.json",
+        "probe_sha256": "d29cebda3d4c82cb57c7dde18eb49bbda77b1b3b3b458872dced509bc1c0bb89",
         "probe_started_utc": "2026-08-30T08:42:17.6113839Z",
         "probe_ended_utc": "2026-08-30T08:42:24.0943544Z",
         "sample_count": 23,
@@ -54,6 +62,12 @@
     },
     {
       "model_id": "qwen3.5:4b",
+      "model_identity": {
+        "ollama_tag_digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+        "local_manifest_path": "${DATA_ROOT}\\models\\ollama\\manifests\\registry.ollama.ai\\library\\qwen3.5\\4b",
+        "local_manifest_sha256": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+        "identity_source": "Read-only /api/tags plus SHA-256 of the local Ollama manifest; no pull or tag mutation was performed."
+      },
       "machine_snapshot_id": "target-machine-final-20260830T085424Z",
       "raw_artifact": "qwen3.5-4b.json",
       "run_count": 3,
@@ -73,8 +87,8 @@
         "overall_resource_interpretation": "The lower-bounded RSS observation from the failed soak supersedes the smaller fixed-prompt-probe RSS as the relevant overall observed peak; no raw soak samples remain for independent recomputation."
       },
       "resource_provenance": {
-        "probe_path": "D:\\VoxAgentData\\cache\\resource-probe-qwen3-5-4b-20260830-164224.json",
-        "probe_sha256": "df18be1addd138bd43b4496392a3bb0bd227747af7bbcbc5dca5082bee7f3a6b",
+        "probe_path": "benchmarks/resource-probe-qwen3.5-4b.json",
+        "probe_sha256": "356d6ce55f01c093c90ada3edc0084b05818e370399de9d5ef483ec5f46b3c82",
         "probe_started_utc": "2026-08-30T08:42:26.0628043Z",
         "probe_ended_utc": "2026-08-30T08:42:41.7323380Z",
         "sample_count": 52,
@@ -90,6 +104,12 @@
     },
     {
       "model_id": "qwen3:1.7b",
+      "model_identity": {
+        "ollama_tag_digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+        "local_manifest_path": "${DATA_ROOT}\\models\\ollama\\manifests\\registry.ollama.ai\\library\\qwen3\\1.7b",
+        "local_manifest_sha256": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+        "identity_source": "Read-only /api/tags plus SHA-256 of the local Ollama manifest; no pull or tag mutation was performed."
+      },
       "machine_snapshot_id": "target-machine-final-20260830T085424Z",
       "raw_artifact": "qwen3-1.7b.json",
       "run_count": 3,
@@ -103,8 +123,8 @@
       },
       "resources": { "fixed_prompt_probe_peak_runner_rss_mib": 657.43, "fixed_prompt_probe_peak_vram_mib": 2233 },
       "resource_provenance": {
-        "probe_path": "D:\\VoxAgentData\\cache\\resource-probe-qwen3-1-7b-20260830-164241.json",
-        "probe_sha256": "6001bc84cd2db994362752f64b9f6008479849b103945b309a5328570627a1bf",
+        "probe_path": "benchmarks/resource-probe-qwen3-1.7b.json",
+        "probe_sha256": "5769b006a4e4aa81aa9085a4ad5c13bbfcfb9d7e5079fbb821654ae930c9f43c",
         "probe_started_utc": "2026-08-30T08:42:43.7333104Z",
         "probe_ended_utc": "2026-08-30T08:42:51.7476558Z",
         "sample_count": 26,
@@ -119,9 +139,9 @@
     }
   ],
   "speech_assets": [
-    { "name": "SenseVoice int8", "directory": "D:\\VoxAgentData\\models\\speech\\sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17", "installed": true, "completion_marker": ".voxagent-complete" },
-    { "name": "Kokoro int8 multi-lang", "directory": "D:\\VoxAgentData\\models\\speech\\kokoro-int8-multi-lang-v1_1", "installed": true, "completion_marker": ".voxagent-complete" },
-    { "name": "Melo zh/en", "directory": "D:\\VoxAgentData\\models\\speech\\vits-melo-tts-zh_en", "installed": true, "completion_marker": ".voxagent-complete" }
+    { "name": "SenseVoice int8", "directory": "${DATA_ROOT}\\models\\speech\\sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17", "installed": true, "completion_marker": ".voxagent-complete" },
+    { "name": "Kokoro int8 multi-lang", "directory": "${DATA_ROOT}\\models\\speech\\kokoro-int8-multi-lang-v1_1", "installed": true, "completion_marker": ".voxagent-complete" },
+    { "name": "Melo zh/en", "directory": "${DATA_ROOT}\\models\\speech\\vits-melo-tts-zh_en", "installed": true, "completion_marker": ".voxagent-complete" }
   ],
   "asr_candidates": [],
   "tts_candidates": [],

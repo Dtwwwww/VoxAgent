@@ -1,12 +1,27 @@
 param(
     [Parameter(Mandatory = $false)]
-    [string]$DataRoot = 'D:\VoxAgentData',
+    [string]$DataRoot,
 
     [Parameter(Mandatory = $false)]
-    [string]$ModelManifestPath
+    [string]$ModelManifestPath,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipPreflightForTests
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $DataRoot) {
+    if ($env:VOXAGENT_DATA_ROOT) {
+        $DataRoot = $env:VOXAGENT_DATA_ROOT
+    }
+    else {
+        $DataRoot = 'D:\VoxAgentData'
+    }
+}
+
+$runtimeBootstrap = Join-Path $PSScriptRoot 'voxagent_runtime.ps1'
+& $runtimeBootstrap -DataRoot $DataRoot -Quiet -SkipPreflightForTests:$SkipPreflightForTests
 
 function Get-ArchiveSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)

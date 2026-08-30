@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "model_id": "qwen3:4b-instruct-2507-q4_K_M",
+  "sanitization": "Removed process IDs, command lines, PowerShell remoting metadata, and absolute paths; timestamps and numeric measurements are unchanged.",
+  "configured_sample_interval_ms": 100,
+  "samples": [
+    {"timestamp_utc":"2026-08-30T08:42:17.6113839Z","runner_rss_bytes":[165658624],"vram_mib":0},
+    {"timestamp_utc":"2026-08-30T08:42:17.8739784Z","runner_rss_bytes":[],"vram_mib":9},
+    {"timestamp_utc":"2026-08-30T08:42:18.1650356Z","runner_rss_bytes":[],"vram_mib":0},
+    {"timestamp_utc":"2026-08-30T08:42:18.4504810Z","runner_rss_bytes":[52592640],"vram_mib":0},
+    {"timestamp_utc":"2026-08-30T08:42:18.7802810Z","runner_rss_bytes":[285024256],"vram_mib":69},
+    {"timestamp_utc":"2026-08-30T08:42:19.0946984Z","runner_rss_bytes":[316325888],"vram_mib":69},
+    {"timestamp_utc":"2026-08-30T08:42:19.3736021Z","runner_rss_bytes":[291213312],"vram_mib":69},
+    {"timestamp_utc":"2026-08-30T08:42:19.6596742Z","runner_rss_bytes":[319909888],"vram_mib":1861},
+    {"timestamp_utc":"2026-08-30T08:42:19.9908642Z","runner_rss_bytes":[648912896],"vram_mib":2445},
+    {"timestamp_utc":"2026-08-30T08:42:20.2985006Z","runner_rss_bytes":[648937472],"vram_mib":2445},
+    {"timestamp_utc":"2026-08-30T08:42:20.5891815Z","runner_rss_bytes":[648937472],"vram_mib":2445},
+    {"timestamp_utc":"2026-08-30T08:42:20.9292464Z","runner_rss_bytes":[648937472],"vram_mib":2445},
+    {"timestamp_utc":"2026-08-30T08:42:21.1909683Z","runner_rss_bytes":[689242112],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:21.4618663Z","runner_rss_bytes":[742637568],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:21.7265707Z","runner_rss_bytes":[759586816],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:22.0472350Z","runner_rss_bytes":[763076608],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:22.3606753Z","runner_rss_bytes":[768700416],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:22.7006866Z","runner_rss_bytes":[770527232],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:23.0142792Z","runner_rss_bytes":[778018816],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:23.2895143Z","runner_rss_bytes":[779853824],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:23.5793112Z","runner_rss_bytes":[779853824],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:23.8396567Z","runner_rss_bytes":[779853824],"vram_mib":3783},
+    {"timestamp_utc":"2026-08-30T08:42:24.0943544Z","runner_rss_bytes":[779853824],"vram_mib":3783}
+  ]
+}
