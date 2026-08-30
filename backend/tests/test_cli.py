@@ -24,3 +24,10 @@ def test_preflight_outputs_json_and_blocks_when_gpu_is_unavailable(monkeypatch, 
     assert result.exit_code == 2
     assert payload["hardware"]["gpu"] is None
     assert {issue["code"] for issue in payload["issues"]} == {"vram_unsupported"}
+
+
+def test_benchmark_llm_requires_model():
+    result = CliRunner().invoke(cli.app, ["benchmark-llm"])
+
+    assert result.exit_code != 0
+    assert "--model is required" in result.stderr
