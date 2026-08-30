@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-08-30T08:54:24.1885786Z",
+  "collection": {
+    "local_only": true,
+    "ollama_endpoint": "http://127.0.0.1:11434",
+    "context_tokens": 8192,
+    "resource_probe": "Three fixed single-turn Chinese prompts per model; sampled actual llama-server runner RSS and nvidia-smi VRAM; each runner was unloaded with ollama stop.",
+    "aggregation": "p50 is the median of three raw runs; p95 is nearest-rank p95 (rank ceil(0.95 * 3) = 3, therefore the maximum)."
+  },
+  "hardware": {
+    "cpu_name": "Intel(R) Core(TM) i5-9300H CPU @ 2.40GHz",
+    "cpu_cores": 4,
+    "cpu_threads": 8,
+    "ram_total_gb": 15.88,
+    "ram_free_gb_at_capture": 8.37,
+    "gpu": {
+      "name": "NVIDIA GeForce GTX 1660 Ti",
+      "memory_total_mb": 6144,
+      "memory_free_mb_at_capture": 5966,
+      "driver_version": "572.16",
+      "compute_capability": "7.5"
+    },
+    "disks": [
+      {
+        "drive": "C:\\",
+        "total_gb": 200.0,
+        "free_gb": 16.07
+      },
+      {
+        "drive": "D:\\",
+        "total_gb": 557.31,
+        "free_gb": 283.53
+      }
+    ]
+  },
+  "llm_candidates": [
+    {
+      "model_id": "qwen3:4b-instruct-2507-q4_K_M",
+      "raw_artifact": "qwen3-4b.json",
+      "run_count": 3,
+      "timing_seconds": {
+        "p50_ttft": 0.15,
+        "p95_ttft": 0.306,
+        "p50_total": 0.795,
+        "p95_total": 1.334
+      },
+      "resources": {
+        "peak_runner_rss_mib": 743.73,
+        "peak_vram_mib": 3783
+      },
+      "stable_30_minutes": null,
+      "stability_status": "not_run",
+      "stability_reason": "Thirty-minute soak was limited to QUALITY_MODEL qwen3.5:4b; the default candidate is not evaluated by the selection rule's stability predicate.",
+      "quality_status": "quality_concern",
+      "notes": [
+        "All three raw runs were non-empty and the introduction/tool-request semantics passed.",
+        "The memory-extraction response was semantically poor, producing a coffee vignette instead of a durable preference memory."
+      ]
+    },
+    {
+      "model_id": "qwen3.5:4b",
+      "raw_artifact": "qwen3.5-4b.json",
+      "run_count": 3,
+      "timing_seconds": {
+        "p50_ttft": 0.209,
+        "p95_ttft": 0.503,
+        "p50_total": 0.881,
+        "p95_total": 1.147
+      },
+      "resources": {
+        "peak_runner_rss_mib": 1212.74,
+        "peak_vram_mib": 3949
+      },
+      "stable_30_minutes": false,
+      "stability_status": "failed",
+      "stability_reason": "The loopback 8192-context soak was proactively stopped at approximately 431 seconds to avoid an OOM after actual runner RSS reached at least 7096.70 MiB and free system RAM fell to at most 0.46 GiB. VRAM peak was 3949 MiB; this is a genuine memory-pressure/RSS-growth stability failure and was not retried.",
+      "quality_status": "quality_passed",
+      "notes": [
+        "All three raw benchmark prompts were semantically followed.",
+        "The failed stability criterion prevents this quality model from being selected."
+      ]
+    },
+    {
+      "model_id": "qwen3:1.7b",
+      "raw_artifact": "qwen3-1.7b.json",
+      "run_count": 3,
+      "timing_seconds": {
+        "p50_ttft": 0.094,
+        "p95_ttft": 0.325,
+        "p50_total": 0.403,
+        "p95_total": 1.114
+      },
+      "resources": {
+        "peak_runner_rss_mib": 657.43,
+        "peak_vram_mib": 2233
+      },
+      "stable_30_minutes": null,
+      "stability_status": "not_run",
+      "stability_reason": "Thirty-minute soak was limited to QUALITY_MODEL qwen3.5:4b; qwen3:1.7b is retained only as an emergency-degradation reference.",
+      "quality_status": "quality_failed",
+      "notes": [
+        "Non-empty raw responses failed the quality review: the introduction was not two sentences, memory added unsupported inferences, and tool handling drifted into manual cross-platform instructions.",
+        "Not eligible as a quality-equivalent candidate."
+      ]
+    }
+  ],
+  "speech_assets": [
+    {
+      "name": "SenseVoice int8",
+      "directory": "D:\\VoxAgentData\\models\\speech\\sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+      "installed": true,
+      "completion_marker": ".voxagent-complete"
+    },
+    {
+      "name": "Kokoro int8 multi-lang",
+      "directory": "D:\\VoxAgentData\\models\\speech\\kokoro-int8-multi-lang-v1_1",
+      "installed": true,
+      "completion_marker": ".voxagent-complete"
+    },
+    {
+      "name": "Melo zh/en",
+      "directory": "D:\\VoxAgentData\\models\\speech\\vits-melo-tts-zh_en",
+      "installed": true,
+      "completion_marker": ".voxagent-complete"
+    }
+  ],
+  "asr_candidates": [],
+  "tts_candidates": [],
+  "plan_02_note": "Plan 02 appends measured ASR and TTS candidate entries using this schema; neither array is populated by this LLM baseline.",
+  "selection": {
+    "selected_model": "qwen3:4b-instruct-2507-q4_K_M",
+    "method": "voxagent.diagnostics.selection.select_llm",
+    "quality_model_inputs": {
+      "p95_ttft_seconds": 0.503,
+      "peak_vram_mb": 3949,
+      "stable_30_minutes": false
+    },
+    "result_reason": "qwen3.5:4b has acceptable p95 TTFT and VRAM but failed stability, so select_llm returned the required default model."
+  }
+}
