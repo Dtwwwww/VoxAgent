@@ -7,6 +7,7 @@ Local-first Windows voice companion for a GTX 1660 Ti / 16GB target machine.
 - `backend/`: Python local service and diagnostics
 - `frontend/`: React/Electron client, introduced by Plan 02 and Plan 05
 - `benchmarks/`: committed machine-readable benchmark summaries
+- [`docs/plan-01/README.md`](docs/plan-01/README.md): Plan 1 manual startup and model commands
 - `docs/superpowers/specs/`: approved product design
 - `docs/superpowers/plans/`: ordered implementation plans
 
