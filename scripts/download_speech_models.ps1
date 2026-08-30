@@ -30,12 +30,15 @@ $models = @(
 
 foreach ($model in $models) {
     $target = Join-Path $modelRoot $model.Directory
-    if (Test-Path -LiteralPath $target) {
+    $completeMarker = Join-Path $target '.voxagent-complete'
+    if ((Test-Path -LiteralPath $target) -and (Test-Path -LiteralPath $completeMarker)) {
         Write-Host "Present: $($model.Name)"
         continue
     }
     $archive = Join-Path $modelRoot $model.Archive
-    Invoke-WebRequest -Uri $model.Url -OutFile $archive
+    if (-not (Test-Path -LiteralPath $archive)) {
+        Invoke-WebRequest -Uri $model.Url -OutFile $archive
+    }
     tar.exe -xjf $archive -C $modelRoot
     if ($LASTEXITCODE -ne 0) {
         throw "Extraction failed for $($model.Name)"
@@ -43,5 +46,6 @@ foreach ($model in $models) {
     if (-not (Test-Path -LiteralPath $target)) {
         throw "Extraction failed for $($model.Name)"
     }
+    New-Item -ItemType File -Force -Path $completeMarker | Out-Null
     Remove-Item -LiteralPath $archive
 }
