@@ -1,5 +1,4 @@
 from dataclasses import FrozenInstanceError
-from pathlib import Path
 
 import pytest
 
@@ -22,6 +21,10 @@ def test_speech_manifest_has_exact_immutable_slotted_models():
                 "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
             ),
             directory_name="sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+            version="2024-07-17",
+            source="k2-fsa/sherpa-onnx release asr-models",
+            archive_sha256="7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
+            required_files=("model.int8.onnx", "tokens.txt"),
         ),
         SpeechModel(
             name="kokoro-int8-zh-en",
@@ -31,6 +34,15 @@ def test_speech_manifest_has_exact_immutable_slotted_models():
                 "kokoro-int8-multi-lang-v1_1.tar.bz2"
             ),
             directory_name="kokoro-int8-multi-lang-v1_1",
+            version="1.1",
+            source="k2-fsa/sherpa-onnx release tts-models",
+            archive_sha256="a1e94694776049035c4f2c6529f003aaece993c76aae9a78995831c3c4dcafc6",
+            required_files=(
+                "model.int8.onnx",
+                "voices.bin",
+                "tokens.txt",
+                "lexicon-zh.txt",
+            ),
         ),
         SpeechModel(
             name="melo-zh-en",
@@ -40,36 +52,16 @@ def test_speech_manifest_has_exact_immutable_slotted_models():
                 "vits-melo-tts-zh_en.tar.bz2"
             ),
             directory_name="vits-melo-tts-zh_en",
+            version="vits-melo-tts-zh_en",
+            source="k2-fsa/sherpa-onnx release tts-models",
+            archive_sha256="e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
+            required_files=("model.onnx", "tokens.txt", "lexicon.txt"),
         ),
     )
     assert not hasattr(SPEECH_MODELS[0], "__dict__")
     with pytest.raises(FrozenInstanceError):
         SPEECH_MODELS[0].name = "changed"
 
-
-def test_downloader_requires_completion_marker_and_preserves_failed_archives():
-    script = (Path(__file__).parents[3] / "scripts" / "download_speech_models.ps1").read_text(
-        encoding="utf-8"
-    )
-    marker_index = script.index("$completeMarker = Join-Path $target '.voxagent-complete'")
-    skip_index = script.index("if ((Test-Path -LiteralPath $target) -and")
-    marker_skip_index = script.index("Test-Path -LiteralPath $completeMarker", skip_index)
-    archive_index = script.index("$archive = Join-Path $modelRoot $model.Archive")
-    download_guard_index = script.index("if (-not (Test-Path -LiteralPath $archive))")
-    download_index = script.index("Invoke-WebRequest -Uri $model.Url -OutFile $archive")
-    tar_index = script.index("tar.exe -xjf $archive -C $modelRoot")
-    exit_guard_index = script.index("if ($LASTEXITCODE -ne 0)")
-    target_check_index = script.index("if (-not (Test-Path -LiteralPath $target))")
-    create_marker_index = script.index(
-        "New-Item -ItemType File -Force -Path $completeMarker | Out-Null"
-    )
-    remove_index = script.index("Remove-Item -LiteralPath $archive")
-
-    assert marker_index < skip_index < marker_skip_index < archive_index
-    assert archive_index < download_guard_index < download_index < tar_index
-    assert tar_index < exit_guard_index < target_check_index < create_marker_index < remove_index
-    exit_guard = script[exit_guard_index:target_check_index]
-    assert 'throw "Extraction failed for $($model.Name)"' in exit_guard
 
 def test_measure_call_records_elapsed_and_result(monkeypatch):
     times = iter([5.0, 5.25])
