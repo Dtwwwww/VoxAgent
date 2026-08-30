@@ -29,6 +29,8 @@
       "model_id": "qwen3:4b-instruct-2507-q4_K_M",
       "model_identity": {
         "ollama_tag_digest": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
+        "attestation_path": "benchmarks/ollama-manifest-qwen3-4b.json",
+        "attestation_sha256": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
         "local_manifest_path": "${DATA_ROOT}\\models\\ollama\\manifests\\registry.ollama.ai\\library\\qwen3\\4b-instruct-2507-q4_K_M",
         "local_manifest_sha256": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
         "identity_source": "Read-only /api/tags plus SHA-256 of the local Ollama manifest; no pull or tag mutation was performed."
@@ -39,7 +41,7 @@
       "timing_seconds": { "p50_ttft": 0.15, "p95_ttft": 0.306, "p50_total": 0.795, "p95_total": 1.334 },
       "timing_provenance": {
         "artifact_path": "benchmarks/qwen3-4b.json",
-        "artifact_sha256": "4b7ba4a2fbf5bd715319ec462a25d45c228494b9b5e9d334f216d64449f3a466",
+        "artifact_sha256": "f0c0012792aad61e84b13dfc6988390e4a45721700fb5d239019c464569701ee",
         "measurement_completed_utc": "2026-08-30T07:34:41Z",
         "completed_utc_source": "Windows LastWriteTimeUtc of the committed raw artifact, recorded before this combined baseline; corroborated by the Task 3 live-benchmark record.",
         "completed_utc_precision": "second; artifact-completion provenance, not a per-run timestamp."
@@ -64,6 +66,8 @@
       "model_id": "qwen3.5:4b",
       "model_identity": {
         "ollama_tag_digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+        "attestation_path": "benchmarks/ollama-manifest-qwen3.5-4b.json",
+        "attestation_sha256": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
         "local_manifest_path": "${DATA_ROOT}\\models\\ollama\\manifests\\registry.ollama.ai\\library\\qwen3.5\\4b",
         "local_manifest_sha256": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
         "identity_source": "Read-only /api/tags plus SHA-256 of the local Ollama manifest; no pull or tag mutation was performed."
@@ -74,7 +78,7 @@
       "timing_seconds": { "p50_ttft": 0.209, "p95_ttft": 0.503, "p50_total": 0.881, "p95_total": 1.147 },
       "timing_provenance": {
         "artifact_path": "benchmarks/qwen3.5-4b.json",
-        "artifact_sha256": "68db055b64053595dcde17fdb1bd2e927f8d27c5b7c1fb3d47d0684f13dc7c33",
+        "artifact_sha256": "4ff8cc6d88db7c49580d3745408977b707a22ee95b482657bcd19fce2dde8c02",
         "measurement_completed_utc": "2026-08-30T08:15:53Z",
         "completed_utc_source": "Windows LastWriteTimeUtc of the committed raw artifact, recorded before this combined baseline; corroborated by the Task 3 live-benchmark record.",
         "completed_utc_precision": "second; artifact-completion provenance, not a per-run timestamp."
@@ -96,6 +100,7 @@
         "observed_sample_interval_ms": { "minimum": 257.134, "median": 294.93, "maximum": 396.02 }
       },
       "stability_evidence_path": "benchmarks/qwen3.5-soak-summary.json",
+      "stability_evidence_sha256": "6df4849a7789e214a21135d1e603c4184251e3eada0577f406cd5d1321411ce6",
       "stable_30_minutes": false,
       "stability_status": "failed",
       "stability_reason": "The loopback 8192-context soak was proactively stopped at approximately 431 seconds to avoid an OOM after a live runner-RSS observation of at least 7096.7 MiB and free system RAM of at most 0.46 GiB. This is a genuine memory-pressure/RSS-growth stability failure and was not retried.",
@@ -106,6 +111,8 @@
       "model_id": "qwen3:1.7b",
       "model_identity": {
         "ollama_tag_digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+        "attestation_path": "benchmarks/ollama-manifest-qwen3-1.7b.json",
+        "attestation_sha256": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
         "local_manifest_path": "${DATA_ROOT}\\models\\ollama\\manifests\\registry.ollama.ai\\library\\qwen3\\1.7b",
         "local_manifest_sha256": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
         "identity_source": "Read-only /api/tags plus SHA-256 of the local Ollama manifest; no pull or tag mutation was performed."
@@ -116,7 +123,7 @@
       "timing_seconds": { "p50_ttft": 0.094, "p95_ttft": 0.325, "p50_total": 0.403, "p95_total": 1.114 },
       "timing_provenance": {
         "artifact_path": "benchmarks/qwen3-1.7b.json",
-        "artifact_sha256": "2c04307d4eab58df52aa7624f6f701567296a5114fb97e50db637d9d5e1b20df",
+        "artifact_sha256": "25309e063d04b08f6f06508d6f5ff708e645aca7650c413798d9984e68fcd616",
         "measurement_completed_utc": "2026-08-30T08:26:43Z",
         "completed_utc_source": "Windows LastWriteTimeUtc of the committed raw artifact, recorded before this combined baseline; corroborated by the Task 3 live-benchmark record.",
         "completed_utc_precision": "second; artifact-completion provenance, not a per-run timestamp."

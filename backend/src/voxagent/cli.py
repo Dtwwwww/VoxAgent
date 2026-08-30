@@ -10,17 +10,11 @@ import typer
 from voxagent.config import AppPaths, resolve_data_root
 from voxagent.diagnostics.baseline_validator import validate_baseline
 from voxagent.diagnostics.hardware import collect_hardware, evaluate_preflight
-from voxagent.diagnostics.llm_benchmark import run_llm_benchmark
+from voxagent.diagnostics.llm_benchmark import LLM_BENCHMARK_PROMPTS, run_llm_benchmark
 from voxagent.diagnostics.resource_probe import ProbeConfig, run_resource_probe
 from voxagent.llm.ollama import OllamaClient
 
 app = typer.Typer(no_args_is_help=True)
-
-LLM_BENCHMARK_PROMPTS = (
-    "请用两句自然中文介绍你自己，每句不超过二十个字。",
-    "用户说他喜欢喝无糖咖啡。请只输出一条适合长期保存的记忆。",
-    "用户要求打开记事本。请说明需要调用工具，不要声称已经完成。",
-)
 
 @app.callback()
 def main() -> None:

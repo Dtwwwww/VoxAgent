@@ -5,6 +5,7 @@
   "started_utc": "2026-08-30T08:44:10Z",
   "abort_utc_approx": "2026-08-30T08:51:21Z",
   "elapsed_seconds_approx": 431,
+  "stopped_early": true,
   "soak_process_pid": 24148,
   "sampler_process_pid": 11028,
   "runner_process_pid_observed": 16348,

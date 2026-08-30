@@ -1,19 +1,23 @@
 {
+  "schema_version": 1,
   "model": "qwen3.5:4b",
   "runs": [
     {
+      "run_id": "run-1",
       "prompt": "请用两句自然中文介绍你自己，每句不超过二十个字。",
       "ttft_seconds": 0.503,
       "total_seconds": 0.881,
       "text": "我是通义千问，你的智能助手。\n我懂知识、会创作，能陪你聊天。"
     },
     {
+      "run_id": "run-2",
       "prompt": "用户说他喜欢喝无糖咖啡。请只输出一条适合长期保存的记忆。",
       "ttft_seconds": 0.209,
       "total_seconds": 0.579,
       "text": "该用户偏好饮用无糖咖啡，请在其相关饮食或健康建议中优先提供无糖选项。"
     },
     {
+      "run_id": "run-3",
       "prompt": "用户要求打开记事本。请说明需要调用工具，不要声称已经完成。",
       "ttft_seconds": 0.184,
       "total_seconds": 1.147,

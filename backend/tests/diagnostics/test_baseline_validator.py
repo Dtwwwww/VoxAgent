@@ -46,3 +46,59 @@ def test_validate_baseline_cli_returns_nonzero_json_for_mismatch(tmp_path):
     assert result.exit_code == 1
     assert payload["valid"] is False
     assert any("selected_model" in issue for issue in payload["issues"])
+
+
+def test_validator_rejects_artifact_path_outside_benchmarks(tmp_path):
+    copied = tmp_path / "repo" / "benchmarks"
+    shutil.copytree(REPO_ROOT / "benchmarks", copied)
+    baseline_path = copied / "target-machine-baseline.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline["llm_candidates"][0]["timing_provenance"]["artifact_path"] = "../outside.json"
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+
+    issues = validate_baseline(baseline_path)
+
+    assert any("outside benchmarks" in issue for issue in issues)
+
+
+def test_validator_rejects_tampered_manifest_attestation(tmp_path):
+    copied = tmp_path / "repo" / "benchmarks"
+    shutil.copytree(REPO_ROOT / "benchmarks", copied)
+    attestation = copied / "ollama-manifest-qwen3-4b.json"
+    manifest = json.loads(attestation.read_text(encoding="utf-8"))
+    manifest["layers"][0]["digest"] = "sha256:" + "0" * 64
+    attestation.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
+
+    issues = validate_baseline(copied / "target-machine-baseline.json")
+
+    assert any("model_identity" in issue for issue in issues)
+
+
+def test_validator_rejects_incomplete_fixed_prompt_run(tmp_path):
+    copied = tmp_path / "repo" / "benchmarks"
+    shutil.copytree(REPO_ROOT / "benchmarks", copied)
+    timing_path = copied / "qwen3-4b.json"
+    timing = json.loads(timing_path.read_text(encoding="utf-8"))
+    timing["runs"][0]["prompt"] = "unexpected prompt"
+    timing["runs"][0]["text"] = ""
+    timing_path.write_text(json.dumps(timing), encoding="utf-8")
+
+    issues = validate_baseline(copied / "target-machine-baseline.json")
+
+    assert any("fixed_prompts" in issue for issue in issues)
+    assert any("non_empty_text" in issue for issue in issues)
+
+
+def test_validator_rejects_soak_summary_inconsistent_with_candidate(tmp_path):
+    copied = tmp_path / "repo" / "benchmarks"
+    shutil.copytree(REPO_ROOT / "benchmarks", copied)
+    soak_path = copied / "qwen3.5-soak-summary.json"
+    soak = json.loads(soak_path.read_text(encoding="utf-8"))
+    soak["stability_status"] = "passed"
+    soak["raw_samples_retained"] = True
+    soak_path.write_text(json.dumps(soak), encoding="utf-8")
+
+    issues = validate_baseline(copied / "target-machine-baseline.json")
+
+    assert any("stability_status" in issue for issue in issues)
+    assert any("raw_samples_retained" in issue for issue in issues)

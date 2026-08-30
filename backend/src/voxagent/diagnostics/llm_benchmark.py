@@ -5,6 +5,12 @@ from time import perf_counter
 
 from voxagent.llm.ollama import OllamaClient
 
+LLM_BENCHMARK_PROMPTS = (
+    "请用两句自然中文介绍你自己，每句不超过二十个字。",
+    "用户说他喜欢喝无糖咖啡。请只输出一条适合长期保存的记忆。",
+    "用户要求打开记事本。请说明需要调用工具，不要声称已经完成。",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class LlmRun:
