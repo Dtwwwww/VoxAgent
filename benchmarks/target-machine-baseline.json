@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "captured_at_utc": "2026-08-30T08:54:24.1885786Z",
+  "machine_snapshot_id": "target-machine-final-20260830T085424Z",
+  "machine_snapshot_reference": "Shared final snapshot reference collected after individual timing runs, resource probes, and soak; it is not a claim that free-memory values were simultaneous with every candidate measurement.",
   "collection": {
     "local_only": true,
     "ollama_endpoint": "http://127.0.0.1:11434",
@@ -14,116 +16,112 @@
     "cpu_threads": 8,
     "ram_total_gb": 15.88,
     "ram_free_gb_at_capture": 8.37,
-    "gpu": {
-      "name": "NVIDIA GeForce GTX 1660 Ti",
-      "memory_total_mb": 6144,
-      "memory_free_mb_at_capture": 5966,
-      "driver_version": "572.16",
-      "compute_capability": "7.5"
-    },
+    "gpu": { "name": "NVIDIA GeForce GTX 1660 Ti", "memory_total_mb": 6144, "memory_free_mb_at_capture": 5966, "driver_version": "572.16", "compute_capability": "7.5" },
     "disks": [
-      {
-        "drive": "C:\\",
-        "total_gb": 200.0,
-        "free_gb": 16.07
-      },
-      {
-        "drive": "D:\\",
-        "total_gb": 557.31,
-        "free_gb": 283.53
-      }
+      { "drive": "C:\\", "total_gb": 200.0, "free_gb": 16.07 },
+      { "drive": "D:\\", "total_gb": 557.31, "free_gb": 283.53 }
     ]
   },
   "llm_candidates": [
     {
       "model_id": "qwen3:4b-instruct-2507-q4_K_M",
+      "machine_snapshot_id": "target-machine-final-20260830T085424Z",
       "raw_artifact": "qwen3-4b.json",
       "run_count": 3,
-      "timing_seconds": {
-        "p50_ttft": 0.15,
-        "p95_ttft": 0.306,
-        "p50_total": 0.795,
-        "p95_total": 1.334
+      "timing_seconds": { "p50_ttft": 0.15, "p95_ttft": 0.306, "p50_total": 0.795, "p95_total": 1.334 },
+      "timing_provenance": {
+        "artifact_path": "benchmarks/qwen3-4b.json",
+        "artifact_sha256": "4b7ba4a2fbf5bd715319ec462a25d45c228494b9b5e9d334f216d64449f3a466",
+        "measurement_completed_utc": "2026-08-30T07:34:41Z",
+        "completed_utc_source": "Windows LastWriteTimeUtc of the committed raw artifact, recorded before this combined baseline; corroborated by the Task 3 live-benchmark record.",
+        "completed_utc_precision": "second; artifact-completion provenance, not a per-run timestamp."
       },
-      "resources": {
-        "peak_runner_rss_mib": 743.73,
-        "peak_vram_mib": 3783
+      "resources": { "fixed_prompt_probe_peak_runner_rss_mib": 743.73, "fixed_prompt_probe_peak_vram_mib": 3783 },
+      "resource_provenance": {
+        "probe_path": "D:\\VoxAgentData\\cache\\resource-probe-qwen3-4b-instruct-2507-q4_K_M-20260830-164214.json",
+        "probe_sha256": "284db3e44e120a54588d1ca28e1aa0aa3359771ec7d9b1c24e1dec194865dd77",
+        "probe_started_utc": "2026-08-30T08:42:17.6113839Z",
+        "probe_ended_utc": "2026-08-30T08:42:24.0943544Z",
+        "sample_count": 23,
+        "sampler_configured_interval_ms": 100,
+        "observed_sample_interval_ms": { "minimum": 254.698, "median": 290.681, "maximum": 340.065 }
       },
       "stable_30_minutes": null,
       "stability_status": "not_run",
       "stability_reason": "Thirty-minute soak was limited to QUALITY_MODEL qwen3.5:4b; the default candidate is not evaluated by the selection rule's stability predicate.",
       "quality_status": "quality_concern",
-      "notes": [
-        "All three raw runs were non-empty and the introduction/tool-request semantics passed.",
-        "The memory-extraction response was semantically poor, producing a coffee vignette instead of a durable preference memory."
-      ]
+      "notes": ["All three raw runs were non-empty and the introduction/tool-request semantics passed.", "The memory-extraction response was semantically poor, producing a coffee vignette instead of a durable preference memory."]
     },
     {
       "model_id": "qwen3.5:4b",
+      "machine_snapshot_id": "target-machine-final-20260830T085424Z",
       "raw_artifact": "qwen3.5-4b.json",
       "run_count": 3,
-      "timing_seconds": {
-        "p50_ttft": 0.209,
-        "p95_ttft": 0.503,
-        "p50_total": 0.881,
-        "p95_total": 1.147
+      "timing_seconds": { "p50_ttft": 0.209, "p95_ttft": 0.503, "p50_total": 0.881, "p95_total": 1.147 },
+      "timing_provenance": {
+        "artifact_path": "benchmarks/qwen3.5-4b.json",
+        "artifact_sha256": "68db055b64053595dcde17fdb1bd2e927f8d27c5b7c1fb3d47d0684f13dc7c33",
+        "measurement_completed_utc": "2026-08-30T08:15:53Z",
+        "completed_utc_source": "Windows LastWriteTimeUtc of the committed raw artifact, recorded before this combined baseline; corroborated by the Task 3 live-benchmark record.",
+        "completed_utc_precision": "second; artifact-completion provenance, not a per-run timestamp."
       },
       "resources": {
-        "peak_runner_rss_mib": 1212.74,
-        "peak_vram_mib": 3949
+        "fixed_prompt_probe_peak_runner_rss_mib": 1212.74,
+        "fixed_prompt_probe_peak_vram_mib": 3949,
+        "observed_peak_runner_rss_mib_at_least": 7096.7,
+        "soak_observed_vram_mib_at_abort": 3949,
+        "overall_resource_interpretation": "The lower-bounded RSS observation from the failed soak supersedes the smaller fixed-prompt-probe RSS as the relevant overall observed peak; no raw soak samples remain for independent recomputation."
       },
+      "resource_provenance": {
+        "probe_path": "D:\\VoxAgentData\\cache\\resource-probe-qwen3-5-4b-20260830-164224.json",
+        "probe_sha256": "df18be1addd138bd43b4496392a3bb0bd227747af7bbcbc5dca5082bee7f3a6b",
+        "probe_started_utc": "2026-08-30T08:42:26.0628043Z",
+        "probe_ended_utc": "2026-08-30T08:42:41.7323380Z",
+        "sample_count": 52,
+        "sampler_configured_interval_ms": 100,
+        "observed_sample_interval_ms": { "minimum": 257.134, "median": 294.93, "maximum": 396.02 }
+      },
+      "stability_evidence_path": "benchmarks/qwen3.5-soak-summary.json",
       "stable_30_minutes": false,
       "stability_status": "failed",
-      "stability_reason": "The loopback 8192-context soak was proactively stopped at approximately 431 seconds to avoid an OOM after actual runner RSS reached at least 7096.70 MiB and free system RAM fell to at most 0.46 GiB. VRAM peak was 3949 MiB; this is a genuine memory-pressure/RSS-growth stability failure and was not retried.",
+      "stability_reason": "The loopback 8192-context soak was proactively stopped at approximately 431 seconds to avoid an OOM after a live runner-RSS observation of at least 7096.7 MiB and free system RAM of at most 0.46 GiB. This is a genuine memory-pressure/RSS-growth stability failure and was not retried.",
       "quality_status": "quality_passed",
-      "notes": [
-        "All three raw benchmark prompts were semantically followed.",
-        "The failed stability criterion prevents this quality model from being selected."
-      ]
+      "notes": ["All three raw benchmark prompts were semantically followed.", "The failed stability criterion prevents this quality model from being selected."]
     },
     {
       "model_id": "qwen3:1.7b",
+      "machine_snapshot_id": "target-machine-final-20260830T085424Z",
       "raw_artifact": "qwen3-1.7b.json",
       "run_count": 3,
-      "timing_seconds": {
-        "p50_ttft": 0.094,
-        "p95_ttft": 0.325,
-        "p50_total": 0.403,
-        "p95_total": 1.114
+      "timing_seconds": { "p50_ttft": 0.094, "p95_ttft": 0.325, "p50_total": 0.403, "p95_total": 1.114 },
+      "timing_provenance": {
+        "artifact_path": "benchmarks/qwen3-1.7b.json",
+        "artifact_sha256": "2c04307d4eab58df52aa7624f6f701567296a5114fb97e50db637d9d5e1b20df",
+        "measurement_completed_utc": "2026-08-30T08:26:43Z",
+        "completed_utc_source": "Windows LastWriteTimeUtc of the committed raw artifact, recorded before this combined baseline; corroborated by the Task 3 live-benchmark record.",
+        "completed_utc_precision": "second; artifact-completion provenance, not a per-run timestamp."
       },
-      "resources": {
-        "peak_runner_rss_mib": 657.43,
-        "peak_vram_mib": 2233
+      "resources": { "fixed_prompt_probe_peak_runner_rss_mib": 657.43, "fixed_prompt_probe_peak_vram_mib": 2233 },
+      "resource_provenance": {
+        "probe_path": "D:\\VoxAgentData\\cache\\resource-probe-qwen3-1-7b-20260830-164241.json",
+        "probe_sha256": "6001bc84cd2db994362752f64b9f6008479849b103945b309a5328570627a1bf",
+        "probe_started_utc": "2026-08-30T08:42:43.7333104Z",
+        "probe_ended_utc": "2026-08-30T08:42:51.7476558Z",
+        "sample_count": 26,
+        "sampler_configured_interval_ms": 100,
+        "observed_sample_interval_ms": { "minimum": 264.834, "median": 319.28, "maximum": 390.154 }
       },
       "stable_30_minutes": null,
       "stability_status": "not_run",
       "stability_reason": "Thirty-minute soak was limited to QUALITY_MODEL qwen3.5:4b; qwen3:1.7b is retained only as an emergency-degradation reference.",
       "quality_status": "quality_failed",
-      "notes": [
-        "Non-empty raw responses failed the quality review: the introduction was not two sentences, memory added unsupported inferences, and tool handling drifted into manual cross-platform instructions.",
-        "Not eligible as a quality-equivalent candidate."
-      ]
+      "notes": ["Non-empty raw responses failed the quality review: the introduction was not two sentences, memory added unsupported inferences, and tool handling drifted into manual cross-platform instructions.", "Not eligible as a quality-equivalent candidate."]
     }
   ],
   "speech_assets": [
-    {
-      "name": "SenseVoice int8",
-      "directory": "D:\\VoxAgentData\\models\\speech\\sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
-      "installed": true,
-      "completion_marker": ".voxagent-complete"
-    },
-    {
-      "name": "Kokoro int8 multi-lang",
-      "directory": "D:\\VoxAgentData\\models\\speech\\kokoro-int8-multi-lang-v1_1",
-      "installed": true,
-      "completion_marker": ".voxagent-complete"
-    },
-    {
-      "name": "Melo zh/en",
-      "directory": "D:\\VoxAgentData\\models\\speech\\vits-melo-tts-zh_en",
-      "installed": true,
-      "completion_marker": ".voxagent-complete"
-    }
+    { "name": "SenseVoice int8", "directory": "D:\\VoxAgentData\\models\\speech\\sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17", "installed": true, "completion_marker": ".voxagent-complete" },
+    { "name": "Kokoro int8 multi-lang", "directory": "D:\\VoxAgentData\\models\\speech\\kokoro-int8-multi-lang-v1_1", "installed": true, "completion_marker": ".voxagent-complete" },
+    { "name": "Melo zh/en", "directory": "D:\\VoxAgentData\\models\\speech\\vits-melo-tts-zh_en", "installed": true, "completion_marker": ".voxagent-complete" }
   ],
   "asr_candidates": [],
   "tts_candidates": [],
@@ -131,11 +129,7 @@
   "selection": {
     "selected_model": "qwen3:4b-instruct-2507-q4_K_M",
     "method": "voxagent.diagnostics.selection.select_llm",
-    "quality_model_inputs": {
-      "p95_ttft_seconds": 0.503,
-      "peak_vram_mb": 3949,
-      "stable_30_minutes": false
-    },
-    "result_reason": "qwen3.5:4b has acceptable p95 TTFT and VRAM but failed stability, so select_llm returned the required default model."
+    "quality_model_inputs": { "p95_ttft_seconds": 0.503, "peak_vram_mb": 3949, "stable_30_minutes": false },
+    "result_reason": "qwen3.5:4b has acceptable p95 TTFT and fixed-prompt-probe VRAM but failed stability, so select_llm returned the required default model."
   }
 }

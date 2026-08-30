@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "model_id": "qwen3.5:4b",
+  "context_tokens": 8192,
+  "started_utc": "2026-08-30T08:44:10Z",
+  "abort_utc_approx": "2026-08-30T08:51:21Z",
+  "elapsed_seconds_approx": 431,
+  "soak_process_pid": 24148,
+  "sampler_process_pid": 11028,
+  "runner_process_pid_observed": 16348,
+  "request_failure_observation": {
+    "observed_failures": 0,
+    "basis": "The soak process was still alive and requests were continuously accepted when it was protectively stopped.",
+    "limitation": "The forced safety stop prevented the script from persisting its final request counter, so an exact request-success count is unavailable."
+  },
+  "observations": {
+    "runner_rss_mib": {
+      "at_least": 7096.7,
+      "basis": "Live process observation before the stop.",
+      "precision_and_limit": "A lower bound only; no retained raw soak samples permit independent recomputation of the decimal value."
+    },
+    "free_system_ram_gib": {
+      "at_most": 0.46,
+      "basis": "Live system-memory observation before the stop.",
+      "precision_and_limit": "An upper bound only; no retained raw soak samples permit independent recomputation."
+    },
+    "vram_mib_at_abort": 3949,
+    "controller_followup_observation": {
+      "runner_rss_mib_rounded": 7020,
+      "free_system_ram_gib": 0.11,
+      "runner_process_pid": 16348,
+      "vram_mib": 3949,
+      "basis": "Controller observation after the initial lower-bound observation and before the protective stop."
+    }
+  },
+  "stability_status": "failed",
+  "stop_reason": "Protective abort for genuine runner RSS growth/memory pressure before OOM could affect user processes; no retry was run.",
+  "raw_samples_retained": false,
+  "evidence_limitations": [
+    "The original soak sampler output was not persisted because the test process and its sampler were force-stopped for system safety.",
+    "This summary records contemporaneous observations and bounds; it does not claim an independently recomputable soak peak or exact request count.",
+    "The retained fixed-prompt probe is a distinct short measurement and must not be treated as soak telemetry."
+  ],
+  "retained_source_files": [
+    {
+      "path": "D:\\VoxAgentData\\cache\\resource-probe-qwen3-5-4b-20260830-164224.json",
+      "sha256": "df18be1addd138bd43b4496392a3bb0bd227747af7bbcbc5dca5082bee7f3a6b",
+      "relevance": "Retained three-prompt fixed resource probe preceding the soak; not raw soak telemetry."
+    },
+    {
+      "path": "benchmarks/qwen3.5-4b.json",
+      "sha256": "68db055b64053595dcde17fdb1bd2e927f8d27c5b7c1fb3d47d0684f13dc7c33",
+      "relevance": "Committed three-run timing artifact preceding the soak; not raw soak telemetry."
+    }
+  ]
+}
