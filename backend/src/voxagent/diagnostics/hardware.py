@@ -62,9 +62,12 @@ def _gpu_snapshot() -> GpuSnapshot | None:
         "--query-gpu=name,memory.total,memory.free,driver_version,compute_cap",
         "--format=csv,noheader,nounits",
     ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
-    row = next(csv.reader(StringIO(result.stdout.strip())))
-    return GpuSnapshot(row[0].strip(), int(row[1]), int(row[2]), row[3].strip(), row[4].strip())
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
+        row = next(csv.reader(StringIO(result.stdout.strip())))
+        return GpuSnapshot(row[0].strip(), int(row[1]), int(row[2]), row[3].strip(), row[4].strip())
+    except (csv.Error, IndexError, OSError, StopIteration, subprocess.SubprocessError, ValueError):
+        return None
 
 
 def _disk(drive: str) -> DiskSnapshot:

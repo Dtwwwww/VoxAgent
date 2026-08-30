@@ -1,3 +1,10 @@
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from voxagent.config import AppPaths
+from voxagent.diagnostics import hardware
 from voxagent.diagnostics.hardware import (
     DiskSnapshot,
     GpuSnapshot,
@@ -31,3 +38,42 @@ def test_preflight_reports_all_blocking_resource_failures():
         "vram_unsupported",
     }
     assert all(issue.blocking for issue in issues)
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "",
+        "NVIDIA GeForce GTX 1660 Ti, 6144",
+        "NVIDIA GeForce GTX 1660 Ti, unavailable, 5000, 572.16, 7.5",
+    ],
+)
+def test_gpu_snapshot_returns_none_for_unusable_nvidia_smi_output(monkeypatch, stdout: str):
+    monkeypatch.setattr(hardware.shutil, "which", lambda _: "nvidia-smi")
+    monkeypatch.setattr(
+        hardware.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=stdout),
+    )
+
+    assert hardware._gpu_snapshot() is None
+
+
+def test_collect_hardware_returns_no_gpu_when_nvidia_smi_fails(monkeypatch):
+    def failing_run(*args, **kwargs):
+        raise hardware.subprocess.CalledProcessError(1, "nvidia-smi")
+
+    monkeypatch.setattr(hardware.shutil, "which", lambda _: "nvidia-smi")
+    monkeypatch.setattr(hardware.subprocess, "run", failing_run)
+    monkeypatch.setattr(hardware, "_cpu_name", lambda: "CPU")
+    monkeypatch.setattr(
+        hardware.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(total=16 * 1024**3, available=8 * 1024**3),
+    )
+    monkeypatch.setattr(hardware.psutil, "cpu_count", lambda logical: 8 if logical else 4)
+    monkeypatch.setattr(hardware, "_disk", lambda drive: DiskSnapshot(drive, 100, 50))
+
+    snapshot = hardware.collect_hardware(AppPaths.from_root(Path(r"D:\VoxAgentData")))
+
+    assert snapshot.gpu is None
