@@ -37,8 +37,11 @@ foreach ($model in $models) {
     $archive = Join-Path $modelRoot $model.Archive
     Invoke-WebRequest -Uri $model.Url -OutFile $archive
     tar.exe -xjf $archive -C $modelRoot
-    Remove-Item -LiteralPath $archive
+    if ($LASTEXITCODE -ne 0) {
+        throw "Extraction failed for $($model.Name)"
+    }
     if (-not (Test-Path -LiteralPath $target)) {
         throw "Extraction failed for $($model.Name)"
     }
+    Remove-Item -LiteralPath $archive
 }
