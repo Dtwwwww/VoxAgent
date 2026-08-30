@@ -6,7 +6,10 @@ param(
     [string]$ModelManifestPath,
 
     [Parameter(Mandatory = $false)]
-    [switch]$SkipPreflightForTests
+    [switch]$SkipPreflightForTests,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowCustomManifestForTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +21,24 @@ if (-not $DataRoot) {
     else {
         $DataRoot = 'D:\VoxAgentData'
     }
+}
+
+$defaultManifestPath = Join-Path (
+    Split-Path -Parent $PSScriptRoot
+) 'backend\src\voxagent\speech\models.json'
+if ($ModelManifestPath) {
+    $customManifestAllowed = (
+        $AllowCustomManifestForTests -and
+        $SkipPreflightForTests -and
+        $env:VOXAGENT_ALLOW_TEST_MODEL_MANIFEST -eq '1' -and
+        $env:VOXAGENT_ALLOW_TEST_PREFLIGHT_BYPASS -eq '1'
+    )
+    if (-not $customManifestAllowed) {
+        throw 'Custom model manifests are disabled; the explicit test-only double gate is required.'
+    }
+}
+else {
+    $ModelManifestPath = $defaultManifestPath
 }
 
 $runtimeBootstrap = Join-Path $PSScriptRoot 'voxagent_runtime.ps1'
@@ -41,13 +62,63 @@ function Get-ArchiveSha256 {
     }
 }
 
+function Assert-ContainedPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    $pathFull = [IO.Path]::GetFullPath($Path)
+    $prefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+    if (-not $pathFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unsafe $Label path outside selected root: $Path"
+    }
+    return $pathFull
+}
+
+function Resolve-ManifestPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or
+        [IO.Path]::IsPathRooted($RelativePath) -or
+        $RelativePath -match '^[A-Za-z]:' -or
+        @($RelativePath -split '[\\/]').Contains('..')) {
+        throw "Unsafe manifest path for $Label`: $RelativePath"
+    }
+    $candidate = Join-Path $Root $RelativePath
+    return Assert-ContainedPath -Root $Root -Path $candidate -Label "manifest $Label"
+}
+
+function Assert-SafeLeafName {
+    param(
+        [Parameter(Mandatory = $true)][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if ([string]::IsNullOrWhiteSpace($Value) -or
+        [IO.Path]::IsPathRooted($Value) -or
+        $Value -match '[\\/]' -or
+        $Value -in @('.', '..')) {
+        throw "Unsafe manifest path for $Label`: $Value"
+    }
+}
+
 function Test-RequiredFiles {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)]$RequiredFiles
     )
     foreach ($relativePath in @($RequiredFiles)) {
-        $candidate = Join-Path $Root ([string]$relativePath)
+        $candidate = Resolve-ManifestPath `
+            -Root $Root `
+            -RelativePath ([string]$relativePath) `
+            -Label 'RequiredFiles'
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             return $false
         }
@@ -99,92 +170,142 @@ function Copy-ArchiveSource {
 
 function Move-ToQuarantine {
     param(
+        [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$Reason
     )
     if (Test-Path -LiteralPath $Path) {
+        $safePath = Assert-ContainedPath -Root $Root -Path $Path -Label 'quarantine source'
         $quarantinePath = "$Path.corrupt-$Reason-$([Guid]::NewGuid().ToString('N'))"
-        Move-Item -LiteralPath $Path -Destination $quarantinePath
+        $safeQuarantine = Assert-ContainedPath `
+            -Root $Root `
+            -Path $quarantinePath `
+            -Label 'quarantine destination'
+        Move-Item -LiteralPath $safePath -Destination $safeQuarantine
     }
 }
 
-$models = @(
-    @{
-        Name = 'sensevoice-int8'
-        Archive = 'sensevoice-int8.tar.bz2'
-        Directory = 'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17'
-        Url = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2'
-        Version = '2024-07-17'
-        ArchiveSha256 = '7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e'
-        RequiredFiles = @('model.int8.onnx', 'tokens.txt')
-    },
-    @{
-        Name = 'kokoro-int8-zh-en'
-        Archive = 'kokoro-int8-multi-lang-v1_1.tar.bz2'
-        Directory = 'kokoro-int8-multi-lang-v1_1'
-        Url = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2'
-        Version = '1.1'
-        ArchiveSha256 = 'a1e94694776049035c4f2c6529f003aaece993c76aae9a78995831c3c4dcafc6'
-        RequiredFiles = @('model.int8.onnx', 'voices.bin', 'tokens.txt', 'lexicon-zh.txt')
-    },
-    @{
-        Name = 'melo-zh-en'
-        Archive = 'vits-melo-tts-zh_en.tar.bz2'
-        Directory = 'vits-melo-tts-zh_en'
-        Url = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-melo-tts-zh_en.tar.bz2'
-        Version = 'vits-melo-tts-zh_en'
-        ArchiveSha256 = 'e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514'
-        RequiredFiles = @('model.onnx', 'tokens.txt', 'lexicon.txt')
+function Assert-SafeArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$ExtractionRoot
+    )
+    $members = @(& tar.exe -tjf $ArchivePath)
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar.exe could not enumerate archive members (exit $LASTEXITCODE)"
     }
-)
-
-if ($ModelManifestPath) {
-    $models = @(Get-Content -Raw -LiteralPath $ModelManifestPath | ConvertFrom-Json)
+    $verboseMembers = @(& tar.exe -tvjf $ArchivePath)
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar.exe could not inspect archive member types (exit $LASTEXITCODE)"
+    }
+    foreach ($line in $verboseMembers) {
+        $entry = ([string]$line).TrimStart()
+        if ($entry -and $entry[0] -notin @('-', 'd')) {
+            throw "Unsafe archive member type (link/reparse/special): $line"
+        }
+    }
+    foreach ($memberValue in $members) {
+        $member = ([string]$memberValue).Trim()
+        $normalized = $member.Replace('\', '/')
+        if (-not $member -or
+            $normalized.StartsWith('/') -or
+            $normalized -match '^[A-Za-z]:' -or
+            @($normalized -split '/').Contains('..')) {
+            throw "Unsafe archive member path: $member"
+        }
+        $null = Resolve-ManifestPath `
+            -Root $ExtractionRoot `
+            -RelativePath $normalized `
+            -Label 'archive member'
+    }
 }
 
-$modelRoot = Join-Path $DataRoot 'models\speech'
-$stagingRoot = Join-Path $modelRoot '.staging'
+$models = @(Get-Content -Raw -LiteralPath $ModelManifestPath | ConvertFrom-Json)
+
+$modelRoot = [IO.Path]::GetFullPath((Join-Path $DataRoot 'models\speech'))
+$stagingRoot = Assert-ContainedPath `
+    -Root $modelRoot `
+    -Path (Join-Path $modelRoot '.staging') `
+    -Label 'staging root'
 New-Item -ItemType Directory -Force -Path $modelRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
 
 foreach ($model in $models) {
-    $target = Join-Path $modelRoot ([string]$model.Directory)
+    Assert-SafeLeafName -Value ([string]$model.Name) -Label 'Name'
+    Assert-SafeLeafName -Value ([string]$model.Archive) -Label 'Archive'
+    Assert-SafeLeafName -Value ([string]$model.Directory) -Label 'Directory'
+    if (-not ([string]$model.ArchiveSha256 -match '^[0-9a-fA-F]{64}$')) {
+        throw "Invalid ArchiveSha256 for $($model.Name)"
+    }
+    if (@($model.RequiredFiles).Count -eq 0) {
+        throw "RequiredFiles must not be empty for $($model.Name)"
+    }
+    foreach ($requiredFile in @($model.RequiredFiles)) {
+        $null = Resolve-ManifestPath `
+            -Root $modelRoot `
+            -RelativePath ([string]$requiredFile) `
+            -Label 'RequiredFiles'
+    }
+
+    $target = Resolve-ManifestPath `
+        -Root $modelRoot `
+        -RelativePath ([string]$model.Directory) `
+        -Label 'Directory'
     if (Test-CompletedModel -Target $target -Model $model) {
         Write-Host "Present: $($model.Name)"
         continue
     }
 
-    $archive = Join-Path $modelRoot ([string]$model.Archive)
-    $partialArchive = "$archive.part"
+    $archive = Resolve-ManifestPath `
+        -Root $modelRoot `
+        -RelativePath ([string]$model.Archive) `
+        -Label 'Archive'
+    $partialArchive = Assert-ContainedPath `
+        -Root $modelRoot `
+        -Path "$archive.part" `
+        -Label 'partial archive'
     $expectedHash = ([string]$model.ArchiveSha256).ToLowerInvariant()
 
     if (Test-Path -LiteralPath $partialArchive) {
+        $null = Assert-ContainedPath `
+            -Root $modelRoot `
+            -Path $partialArchive `
+            -Label 'partial archive removal'
         Remove-Item -LiteralPath $partialArchive -Force
     }
     if ((Test-Path -LiteralPath $archive -PathType Leaf) -and
         ((Get-ArchiveSha256 -Path $archive) -ne $expectedHash)) {
-        Move-ToQuarantine -Path $archive -Reason 'checksum'
+        Move-ToQuarantine -Root $modelRoot -Path $archive -Reason 'checksum'
     }
 
     if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
         Copy-ArchiveSource -Source ([string]$model.Url) -Destination $partialArchive
         $downloadedHash = Get-ArchiveSha256 -Path $partialArchive
         if ($downloadedHash -ne $expectedHash) {
-            Move-ToQuarantine -Path $partialArchive -Reason 'download'
+            Move-ToQuarantine -Root $modelRoot -Path $partialArchive -Reason 'download'
             throw "Checksum mismatch for $($model.Name): expected $expectedHash, got $downloadedHash"
         }
+        $null = Assert-ContainedPath -Root $modelRoot -Path $partialArchive -Label 'download publish'
+        $null = Assert-ContainedPath -Root $modelRoot -Path $archive -Label 'archive publish'
         Move-Item -LiteralPath $partialArchive -Destination $archive
     }
 
-    $staging = Join-Path $stagingRoot "$($model.Name)-$([Guid]::NewGuid().ToString('N'))"
+    $staging = Resolve-ManifestPath `
+        -Root $stagingRoot `
+        -RelativePath "$($model.Name)-$([Guid]::NewGuid().ToString('N'))" `
+        -Label 'staging directory'
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     $published = $false
     try {
+        Assert-SafeArchive -ArchivePath $archive -ExtractionRoot $staging
         & tar.exe -xjf $archive -C $staging
         if ($LASTEXITCODE -ne 0) {
             throw "tar.exe exited with code $LASTEXITCODE"
         }
-        $extractedTarget = Join-Path $staging ([string]$model.Directory)
+        $extractedTarget = Resolve-ManifestPath `
+            -Root $staging `
+            -RelativePath ([string]$model.Directory) `
+            -Label 'extracted model'
         if (-not (Test-Path -LiteralPath $extractedTarget -PathType Container)) {
             throw "archive did not contain $($model.Directory)"
         }
@@ -204,31 +325,44 @@ foreach ($model in $models) {
 
         $backup = $null
         if (Test-Path -LiteralPath $target) {
-            $backup = "$target.backup-$([Guid]::NewGuid().ToString('N'))"
+            $backup = Assert-ContainedPath `
+                -Root $modelRoot `
+                -Path "$target.backup-$([Guid]::NewGuid().ToString('N'))" `
+                -Label 'model backup'
+            $null = Assert-ContainedPath -Root $modelRoot -Path $target -Label 'backup source'
             Move-Item -LiteralPath $target -Destination $backup
         }
         try {
+            $null = Assert-ContainedPath `
+                -Root $staging `
+                -Path $extractedTarget `
+                -Label 'model publish source'
+            $null = Assert-ContainedPath -Root $modelRoot -Path $target -Label 'model publish target'
             Move-Item -LiteralPath $extractedTarget -Destination $target
             $published = $true
         }
         catch {
             if ($backup -and (-not (Test-Path -LiteralPath $target))) {
+                $null = Assert-ContainedPath -Root $modelRoot -Path $backup -Label 'backup restore'
+                $null = Assert-ContainedPath -Root $modelRoot -Path $target -Label 'restore target'
                 Move-Item -LiteralPath $backup -Destination $target
             }
             throw
         }
         if ($backup) {
+            $null = Assert-ContainedPath -Root $modelRoot -Path $backup -Label 'backup removal'
             Remove-Item -LiteralPath $backup -Recurse -Force
         }
     }
     catch {
         if (-not $published) {
-            Move-ToQuarantine -Path $archive -Reason 'extraction'
+            Move-ToQuarantine -Root $modelRoot -Path $archive -Reason 'extraction'
         }
         throw "Extraction failed for $($model.Name): $($_.Exception.Message)"
     }
     finally {
         if (Test-Path -LiteralPath $staging) {
+            $null = Assert-ContainedPath -Root $stagingRoot -Path $staging -Label 'staging removal'
             Remove-Item -LiteralPath $staging -Recurse -Force
         }
     }

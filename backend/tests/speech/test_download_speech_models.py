@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -6,8 +7,11 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "download_speech_models.ps1"
+SHARED_MANIFEST = REPO_ROOT / "backend" / "src" / "voxagent" / "speech" / "models.json"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
 
 
@@ -29,6 +33,7 @@ def _write_manifest(
     source: Path,
     archive_sha256: str,
     required_files: tuple[str, ...],
+    directory: str = "fixture-model-v1",
 ) -> None:
     path.write_text(
         json.dumps(
@@ -36,7 +41,7 @@ def _write_manifest(
                 {
                     "Name": "fixture-model",
                     "Archive": "fixture.tar.bz2",
-                    "Directory": "fixture-model-v1",
+                    "Directory": directory,
                     "Url": str(source),
                     "Version": "test-v1",
                     "ArchiveSha256": archive_sha256,
@@ -48,23 +53,32 @@ def _write_manifest(
     )
 
 
-def _run_script(data_root: Path, manifest: Path) -> subprocess.CompletedProcess[str]:
+def _run_script(
+    data_root: Path,
+    manifest: Path,
+    *,
+    authorize_custom_manifest: bool = True,
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["VOXAGENT_ALLOW_TEST_PREFLIGHT_BYPASS"] = "1"
+    command = [
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(SCRIPT),
+        "-DataRoot",
+        str(data_root),
+        "-ModelManifestPath",
+        str(manifest),
+        "-SkipPreflightForTests",
+    ]
+    if authorize_custom_manifest:
+        environment["VOXAGENT_ALLOW_TEST_MODEL_MANIFEST"] = "1"
+        command.append("-AllowCustomManifestForTests")
     return subprocess.run(
-        [
-            POWERSHELL,
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(SCRIPT),
-            "-DataRoot",
-            str(data_root),
-            "-ModelManifestPath",
-            str(manifest),
-            "-SkipPreflightForTests",
-        ],
+        command,
         check=False,
         capture_output=True,
         text=True,
@@ -153,3 +167,124 @@ def test_archive_missing_required_files_is_not_published(tmp_path):
     assert result.returncode != 0
     assert "one or more required files are missing" in result.stderr
     assert not (data_root / "models" / "speech" / "fixture-model-v1").exists()
+
+
+def test_custom_manifest_requires_explicit_double_test_gate(tmp_path):
+    source = tmp_path / "model.tar.bz2"
+    _make_archive(source, "fixture-model-v1", ("model.onnx",))
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest,
+        source=source,
+        archive_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        required_files=("model.onnx",),
+    )
+
+    result = _run_script(
+        tmp_path / "data",
+        manifest,
+        authorize_custom_manifest=False,
+    )
+
+    assert result.returncode != 0
+    assert "Custom model manifests are disabled" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "unsafe_value"),
+    [
+        ("Name", "..\\outside"),
+        ("Archive", "..\\outside.tar.bz2"),
+        ("Directory", "..\\outside"),
+        ("RequiredFiles", ["..\\sentinel.txt"]),
+    ],
+)
+def test_manifest_paths_are_rejected_without_touching_sentinel(
+    tmp_path,
+    field,
+    unsafe_value,
+):
+    source = tmp_path / "model.tar.bz2"
+    _make_archive(source, "fixture-model-v1", ("model.onnx",))
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest,
+        source=source,
+        archive_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        required_files=("model.onnx",),
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload[0][field] = unsafe_value
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    sentinel = tmp_path / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    result = _run_script(tmp_path / "data", manifest)
+
+    assert result.returncode != 0
+    assert "Unsafe manifest path" in result.stderr
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_traversal_archive_is_rejected_before_extraction(tmp_path):
+    source = tmp_path / "traversal.tar.bz2"
+    with tarfile.open(source, "w:bz2") as archive:
+        model = tarfile.TarInfo("fixture-model-v1/model.onnx")
+        model.size = 5
+        archive.addfile(model, io.BytesIO(b"model"))
+        traversal = tarfile.TarInfo("../../escape.txt")
+        traversal.size = 6
+        archive.addfile(traversal, io.BytesIO(b"escape"))
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest,
+        source=source,
+        archive_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        required_files=("model.onnx",),
+    )
+    sentinel = tmp_path / "escape.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    result = _run_script(tmp_path / "data", manifest)
+
+    assert result.returncode != 0
+    assert "Unsafe archive member" in result.stderr
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("member_type", [tarfile.SYMTYPE, tarfile.LNKTYPE])
+def test_link_archive_member_is_rejected_before_extraction(tmp_path, member_type):
+    source = tmp_path / "link.tar.bz2"
+    with tarfile.open(source, "w:bz2") as archive:
+        model = tarfile.TarInfo("fixture-model-v1/model.onnx")
+        model.size = 5
+        archive.addfile(model, io.BytesIO(b"model"))
+        link = tarfile.TarInfo("fixture-model-v1/link")
+        link.type = member_type
+        link.linkname = "../../sentinel.txt"
+        archive.addfile(link)
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest,
+        source=source,
+        archive_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        required_files=("model.onnx",),
+    )
+    sentinel = tmp_path / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    result = _run_script(tmp_path / "data", manifest)
+
+    assert result.returncode != 0
+    assert "Unsafe archive member type" in result.stderr
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_shared_manifest_is_the_only_speech_model_inventory():
+    payload = json.loads(SHARED_MANIFEST.read_text(encoding="utf-8"))
+    script = SCRIPT.read_text(encoding="utf-8-sig")
+
+    assert len(payload) == 3
+    assert all(len(model["ArchiveSha256"]) == 64 for model in payload)
+    assert "models.json" in script
+    assert "sensevoice-int8" not in script
