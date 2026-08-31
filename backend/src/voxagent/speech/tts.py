@@ -10,7 +10,7 @@ from typing import Literal, Protocol
 import numpy as np
 import soundfile
 
-from voxagent.speech.vad import prepare_sherpa_onnx_runtime
+from voxagent.speech.vad import ModelAssetError, prepare_sherpa_onnx_runtime
 from voxagent.speech.voice_catalog import VoiceCatalog
 
 PUBLIC_TTS_SPEEDS = frozenset({0.8, 1.0, 1.2})
@@ -18,6 +18,10 @@ TtsEngineName = Literal["kokoro", "melo"]
 VOICE_REVIEW_SEED = 20260830
 KOKORO_REVIEW_VOICE_IDS = (3, 13, 27, 43, 58, 69, 85, 98)
 VOICE_REVIEW_SENTENCE = "你好，我是声灵，很高兴陪你一起聊天。"
+VOICE_REVIEW_SPEED = 1.2
+_MIN_REVIEW_DURATION_SECONDS = 3.0
+_MAX_REVIEW_DURATION_SECONDS = 5.0
+_SILENCE_THRESHOLD_PCM16 = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,12 +70,12 @@ class SherpaOfflineTts:
         engine: TtsEngineName,
         catalog: VoiceCatalog | None = None,
     ) -> SherpaOfflineTts:
-        model_dir = Path(path).resolve()
-        if not model_dir.is_absolute() or voice_id < 0:
+        supplied_path = Path(path)
+        if not supplied_path.is_absolute() or voice_id < 0:
             raise ValueError("TTS model directory must be absolute and voice_id non-negative")
-        prepare_sherpa_onnx_runtime()
-        import sherpa_onnx
-
+        model_dir = supplied_path.resolve()
+        if engine not in {"kokoro", "melo"}:
+            raise ValueError(f"Unsupported TTS engine: {engine}")
         if engine == "kokoro":
             required = (
                 "model.int8.onnx",
@@ -80,7 +84,13 @@ class SherpaOfflineTts:
                 "lexicon-zh.txt",
                 "espeak-ng-data",
             )
-            cls._require_assets(model_dir, required)
+        else:
+            required = ("model.onnx", "tokens.txt", "lexicon.txt")
+        cls._require_assets(model_dir, required)
+        prepare_sherpa_onnx_runtime()
+        import sherpa_onnx
+
+        if engine == "kokoro":
             model = sherpa_onnx.OfflineTtsKokoroModelConfig(
                 model=str(model_dir / "model.int8.onnx"),
                 voices=str(model_dir / "voices.bin"),
@@ -95,9 +105,7 @@ class SherpaOfflineTts:
                 ),
                 max_num_sentences=1,
             )
-        elif engine == "melo":
-            required = ("model.onnx", "tokens.txt", "lexicon.txt")
-            cls._require_assets(model_dir, required)
+        else:
             model = sherpa_onnx.OfflineTtsVitsModelConfig(
                 model=str(model_dir / "model.onnx"),
                 tokens=str(model_dir / "tokens.txt"),
@@ -110,15 +118,15 @@ class SherpaOfflineTts:
                 ),
                 max_num_sentences=1,
             )
-        else:
-            raise ValueError(f"Unsupported TTS engine: {engine}")
         return cls(sherpa_onnx.OfflineTts(config), catalog, engine=engine)
 
     @staticmethod
     def _require_assets(model_dir: Path, names: tuple[str, ...]) -> None:
-        missing = [name for name in names if not (model_dir / name).exists()]
+        missing = [model_dir / name for name in names if not (model_dir / name).exists()]
         if missing:
-            raise FileNotFoundError("Missing TTS model assets: " + ", ".join(missing))
+            raise ModelAssetError(
+                "Missing TTS model assets: " + ", ".join(str(path) for path in missing)
+            )
 
     def synthesize(self, text: str, voice_key: str, speed: float) -> AudioChunk:
         if self._catalog is None:
@@ -191,7 +199,7 @@ def prepare_voice_review(
     engine_comparison: list[dict[str, object]] = []
     for index, (tts, text, voice_id) in enumerate(engine_sources, start=1):
         sample_id = f"engine-{index:03d}"
-        audio = tts.synthesize_native(text, voice_id, 1.0)
+        audio = tts.synthesize_native(text, voice_id, VOICE_REVIEW_SPEED)
         _write_review_wav(destination / f"{sample_id}.wav", audio)
         engine_comparison.append(
             {
@@ -208,7 +216,7 @@ def prepare_voice_review(
         sample_id = f"voice-{index:03d}"
         _write_review_wav(
             destination / f"{sample_id}.wav",
-            kokoro.synthesize_native(VOICE_REVIEW_SENTENCE, voice_id, 1.0),
+            kokoro.synthesize_native(VOICE_REVIEW_SENTENCE, voice_id, VOICE_REVIEW_SPEED),
         )
         voice_style.append(
             {
@@ -240,4 +248,38 @@ def prepare_voice_review(
 def _write_review_wav(path: Path, audio: object) -> None:
     if not isinstance(audio, AudioChunk):
         raise TypeError("voice review synthesis must return AudioChunk")
-    path.write_bytes(audio.wav_bytes)
+    path.write_bytes(_prepare_review_wav(audio))
+
+
+def _prepare_review_wav(audio: AudioChunk) -> bytes:
+    """Validate review audio and alter only silence at its safe duration boundaries."""
+    stream = io.BytesIO(audio.wav_bytes)
+    try:
+        info = soundfile.info(stream)
+        stream.seek(0)
+        samples, sample_rate = soundfile.read(stream, dtype="int16", always_2d=True)
+    except RuntimeError as error:
+        raise ValueError("review WAV must be readable") from error
+    if (
+        info.format != "WAV"
+        or info.subtype != "PCM_16"
+        or info.channels != 1
+        or info.samplerate <= 0
+        or sample_rate != info.samplerate
+        or sample_rate != audio.sample_rate
+    ):
+        raise ValueError("review WAV must be mono PCM16 at its native positive sample rate")
+    duration = samples.shape[0] / sample_rate
+    maximum_samples = round(_MAX_REVIEW_DURATION_SECONDS * sample_rate)
+    minimum_samples = round(_MIN_REVIEW_DURATION_SECONDS * sample_rate)
+    if duration > _MAX_REVIEW_DURATION_SECONDS:
+        non_silent = np.flatnonzero(np.abs(samples[:, 0]) > _SILENCE_THRESHOLD_PCM16)
+        if non_silent.size and non_silent[-1] >= maximum_samples:
+            raise ValueError("review WAV exceeds five seconds with speaking audio at the boundary")
+        samples = samples[:maximum_samples]
+    if samples.shape[0] < minimum_samples:
+        silence = np.zeros((minimum_samples - samples.shape[0], 1), dtype=np.int16)
+        samples = np.concatenate((samples, silence))
+    output = io.BytesIO()
+    soundfile.write(output, samples, sample_rate, format="WAV", subtype="PCM_16")
+    return output.getvalue()

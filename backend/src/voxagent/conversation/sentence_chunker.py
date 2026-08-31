@@ -41,6 +41,6 @@ class SentenceChunker:
         ]
         if comma_positions:
             return comma_positions[-1]
-        if len(self._tail) > _MAX_STREAM_CHARS:
+        if len(self._tail) >= _MAX_STREAM_CHARS:
             return _MAX_STREAM_CHARS
         return None

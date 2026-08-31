@@ -94,3 +94,43 @@ assignment, create the exact four-record production catalog
 (`clear_female`, `warm_female`, `steady_male`, `bright_male`), write
 `tts-voice-style.json`, and transactionally append the selected TTS candidate
 to the baseline.
+
+## Independent review remediation
+
+### RED evidence
+
+The review found that an exactly 30-character unpunctuated streamed delta was
+not emitted because the hard-split comparison was strict (`> 30`). The new
+single-case regression first failed with `feed("x" * 30) == ()`.
+
+It also established that review WAVs were written without parsing or duration
+validation. Two real preview files exceeded the stated five-second limit. New
+tests first failed because the review-normalization helper did not exist; they
+cover durations 2.999, 3, 5, and 5.001 seconds, invalid stereo/PCM24/native
+rate mismatch, and refusal to cut through a speaking tail. The factory-path
+tests likewise first failed because the missing helper/contract was absent.
+
+### GREEN evidence
+
+- The chunker now hard-splits at `>= 30`; terminal punctuation, safe comma,
+  mixed-text, and flush regressions remain covered.
+- Review generation uses the public fixed speed 1.2. It parses every returned
+  WAV and requires a readable mono PCM16 WAV with matching positive native
+  sample rate. It safely pads sub-three-second outputs with silence, removes
+  only a tail that is verified silent after five seconds, and fails explicitly
+  rather than truncating spoken audio at the boundary.
+- `from_model_dir()` checks the caller-supplied path before resolving it and
+  reports every absent model asset as an absolute `ModelAssetError` path.
+
+The regenerated ignored review package was read back after synthesis: all 14
+WAVs are mono PCM16, retain their native 24 kHz (Kokoro) or 44.1 kHz (Melo)
+rate, and have durations within 3.0--5.0 seconds. The measured duration range
+is 3.000000--4.177917 seconds. The `review-template.json` seed remains
+`20260830` and remains anonymous.
+
+Focused remediation verification:
+
+```text
+64 passed
+All checks passed!
+```

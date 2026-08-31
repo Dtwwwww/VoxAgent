@@ -28,3 +28,7 @@ def test_chunker_hard_splits_mixed_text_without_safe_punctuation():
     assert chunks
     assert all(12 <= len(chunk) <= 30 for chunk in chunks)
     assert "".join((*chunks, *chunker.flush())) == text
+
+
+def test_chunker_hard_splits_at_exactly_thirty_characters():
+    assert SentenceChunker().feed("x" * 30) == ("x" * 30,)
