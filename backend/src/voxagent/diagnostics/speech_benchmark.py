@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,6 +21,9 @@ TTS_BENCHMARK_TEXTS = (
     "下午三点提醒我喝水，然后打开记事本。",
     "今天的 meeting 改到晚上八点，请不要忘记。",
 )
+MIN_AUDIO_DURATION_SECONDS = 10.0
+MAX_AUDIO_DURATION_SECONDS = 20.0
+_SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +40,7 @@ def measure_call[T](label: str, operation: Callable[[], T]) -> TimedResult[T]:
     started = perf_counter()
     result = operation()
     finished = perf_counter()
-    return TimedResult(label, round(finished - started, 3), result)
+    return TimedResult(label, finished - started, result)
 
 
 class FixtureChecksumError(ValueError):
@@ -70,7 +74,7 @@ def validate_fixture_checksum(wav: Path, checksums_path: Path) -> str:
         raise FixtureChecksumError(
             f"checksums.json must contain a SHA-256 for {wav.name}"
         ) from error
-    if not isinstance(expected, str) or len(expected) != 64:
+    if not isinstance(expected, str) or _SHA256.fullmatch(expected) is None:
         raise FixtureChecksumError(f"checksums.json has an invalid SHA-256 for {wav.name}")
     actual = _sha256(wav)
     if actual.lower() != expected.lower():
@@ -91,6 +95,49 @@ def _default_read_wav(path: Path) -> tuple[np.ndarray, int]:
     return samples[:, 0], int(sample_rate)
 
 
+def _load_benchmark_audio(
+    wav: Path,
+    checksums_path: Path,
+    read_wav: Callable[[Path], tuple[np.ndarray, int]],
+) -> tuple[np.ndarray, int, str]:
+    fixture_sha256 = validate_fixture_checksum(wav, checksums_path)
+    samples, sample_rate = read_wav(Path(wav))
+    if sample_rate != 16000 or samples.ndim != 1 or samples.dtype != np.float32:
+        raise ValueError("ASR benchmark WAV must be 16 kHz mono float32 audio")
+    if samples.size == 0:
+        raise ValueError("ASR benchmark WAV must contain audio")
+    duration_seconds = samples.size / sample_rate
+    if not MIN_AUDIO_DURATION_SECONDS <= duration_seconds <= MAX_AUDIO_DURATION_SECONDS:
+        raise ValueError("ASR benchmark WAV must be 10 to 20 seconds")
+    if samples.size % 320:
+        raise ValueError("ASR benchmark WAV must contain complete 20 ms frames")
+    return samples, sample_rate, fixture_sha256
+
+
+def run_partial_probe(
+    wav: Path,
+    checksums_path: Path,
+    *,
+    partial_asr: PartialAsrEngine,
+    read_wav: Callable[[Path], tuple[np.ndarray, int]] = _default_read_wav,
+    peak_rss_bytes: Callable[[], int] = lambda: psutil.Process().memory_info().rss,
+) -> tuple[str, float]:
+    samples, _, _ = _load_benchmark_audio(wav, checksums_path, read_wav)
+    latencies: list[float] = []
+    for pass_index in range(6):
+        partial_asr.reset()
+        peak_rss_bytes()
+        for frame in np.split(samples, samples.size // 320):
+            timed = measure_call("partial_asr", lambda frame=frame: partial_asr.accept(frame))
+            peak_rss_bytes()
+            if pass_index and timed.result.updated:
+                latencies.append(timed.elapsed_seconds)
+    return (
+        partial_asr.model_id,
+        _nearest_rank_p95(latencies) if latencies else float("inf"),
+    )
+
+
 def run_asr_benchmark(
     wav: Path,
     checksums_path: Path,
@@ -100,30 +147,27 @@ def run_asr_benchmark(
     read_wav: Callable[[Path], tuple[np.ndarray, int]] = _default_read_wav,
     peak_rss_bytes: Callable[[], int] = lambda: psutil.Process().memory_info().rss,
 ) -> dict[str, object]:
-    fixture_sha256 = validate_fixture_checksum(wav, checksums_path)
-    samples, sample_rate = read_wav(Path(wav))
-    if sample_rate != 16000 or samples.ndim != 1 or samples.dtype != np.float32:
-        raise ValueError("ASR benchmark WAV must be 16 kHz mono float32 audio")
-    if samples.size == 0:
-        raise ValueError("ASR benchmark WAV must contain audio")
-    if samples.size % 320:
-        raise ValueError("ASR benchmark WAV must contain complete 20 ms frames")
+    samples, sample_rate, fixture_sha256 = _load_benchmark_audio(wav, checksums_path, read_wav)
 
     audio_duration = samples.size / sample_rate
     final_latencies: list[float] = []
     partial_latencies: list[float] = []
     rtfs: list[float] = []
     transcript = ""
+    peak_rss = peak_rss_bytes()
     for pass_index in range(6):
         if partial_asr is not None:
             partial_asr.reset()
+            peak_rss = max(peak_rss, peak_rss_bytes())
             for frame in np.split(samples, samples.size // 320):
                 timed_partial = measure_call(
                     "partial_asr", lambda frame=frame: partial_asr.accept(frame)
                 )
+                peak_rss = max(peak_rss, peak_rss_bytes())
                 if pass_index and timed_partial.result.updated:
                     partial_latencies.append(timed_partial.elapsed_seconds)
         timed_final = measure_call("final_asr", lambda: final_asr.transcribe(samples, sample_rate))
+        peak_rss = max(peak_rss, peak_rss_bytes())
         if pass_index:
             final_latencies.append(timed_final.elapsed_seconds)
             rtfs.append(timed_final.elapsed_seconds / audio_duration)
@@ -154,25 +198,26 @@ def run_asr_benchmark(
             "median": round(median(rtfs), 3),
             "p95": round(_nearest_rank_p95(rtfs), 3),
         },
-        "peak_process_rss_bytes": peak_rss_bytes(),
+        "peak_process_rss_bytes": peak_rss,
     }
 
 
-def update_asr_baseline(baseline_path: Path, artifact_path: Path) -> None:
-    baseline_path = Path(baseline_path).resolve()
-    artifact_path = Path(artifact_path).resolve()
-    payload = json.loads(baseline_path.read_text(encoding="utf-8"))
-    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+def _baseline_candidate(
+    baseline_path: Path,
+    artifact_path: Path,
+    artifact: dict[str, object],
+    artifact_sha256: str,
+) -> dict[str, object]:
     try:
         artifact_reference = artifact_path.relative_to(baseline_path.parent.parent).as_posix()
     except ValueError as error:
         raise ValueError(
             "ASR artifact must be stored under the repository benchmarks directory"
         ) from error
-    candidate = {
+    return {
         "model_id": artifact["model_id"],
         "artifact_path": artifact_reference,
-        "artifact_sha256": _sha256(artifact_path),
+        "artifact_sha256": artifact_sha256,
         "run_count": artifact["run_count"],
         "transcript": artifact["transcript"],
         "timing": artifact.get("latency_seconds"),
@@ -180,6 +225,20 @@ def update_asr_baseline(baseline_path: Path, artifact_path: Path) -> None:
         "audio_duration_seconds": artifact.get("audio_duration_seconds"),
         "partial_model_id": artifact.get("partial_model_id"),
     }
+
+
+def prepare_asr_baseline_update(
+    baseline_path: Path,
+    artifact_path: Path,
+    artifact: dict[str, object],
+    artifact_bytes: bytes,
+) -> str:
+    baseline_path = Path(baseline_path).resolve()
+    artifact_path = Path(artifact_path).resolve()
+    payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+    candidate = _baseline_candidate(
+        baseline_path, artifact_path, artifact, hashlib.sha256(artifact_bytes).hexdigest()
+    )
     existing = [
         item
         for item in payload.get("asr_candidates", [])
@@ -187,6 +246,15 @@ def update_asr_baseline(baseline_path: Path, artifact_path: Path) -> None:
     ]
     existing.append(candidate)
     payload["asr_candidates"] = existing
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def update_asr_baseline(baseline_path: Path, artifact_path: Path) -> None:
+    artifact_path = Path(artifact_path).resolve()
+    artifact_bytes = artifact_path.read_bytes()
+    artifact = json.loads(artifact_bytes.decode("utf-8"))
+    baseline_path = Path(baseline_path).resolve()
     baseline_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        prepare_asr_baseline_update(baseline_path, artifact_path, artifact, artifact_bytes),
+        encoding="utf-8",
     )

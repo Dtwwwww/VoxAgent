@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 from voxagent import cli
@@ -126,3 +127,152 @@ def test_benchmark_asr_rejects_an_unverified_fixture_before_model_loading(monkey
     assert "checksums.json" in result.stderr
     assert loaded == []
     assert not output.exists()
+
+
+def test_benchmark_asr_anchors_its_default_baseline_at_repo_root(monkeypatch, tmp_path):
+    fixture = tmp_path / "fixture" / "mandarin-command.wav"
+    fixture.parent.mkdir()
+    fixture.write_bytes(b"verified fixture")
+    (fixture.parent / "checksums.json").write_text(
+        '{"mandarin-command.wav": "'
+        + __import__("hashlib").sha256(fixture.read_bytes()).hexdigest()
+        + '"}',
+        encoding="utf-8",
+    )
+    repo_root = tmp_path / "repo"
+    baseline = repo_root / "benchmarks" / "target-machine-baseline.json"
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text('{"asr_candidates": []}', encoding="utf-8")
+    output = repo_root / "benchmarks" / "sensevoice-int8.json"
+
+    class FakeSenseVoice:
+        @classmethod
+        def from_model_dir(cls, _):
+            return object()
+
+    monkeypatch.setattr(cli, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(cli, "SenseVoiceAsr", FakeSenseVoice)
+    monkeypatch.setattr(cli, "SenseVoiceCandidatePauseAsr", lambda _: object())
+    monkeypatch.setattr(cli, "_speech_model_directory", lambda *_: tmp_path)
+    monkeypatch.setattr(cli, "run_partial_probe", lambda *args, **kwargs: ("sensevoice-int8", 0.1))
+    monkeypatch.setattr(
+        cli,
+        "run_asr_benchmark",
+        lambda *args, **kwargs: {
+            "model_id": "sensevoice-int8",
+            "run_count": 5,
+            "transcript": "打开音乐",
+        },
+    )
+    monkeypatch.chdir(tmp_path / "fixture")
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["benchmark-asr", "--wav", str(fixture), "--output", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert output.is_file()
+    candidate = json.loads(baseline.read_text(encoding="utf-8"))["asr_candidates"][0]
+    assert candidate["artifact_sha256"] == __import__("hashlib").sha256(
+        output.read_bytes()
+    ).hexdigest()
+
+
+def test_benchmark_asr_validates_baseline_before_writing_artifact(monkeypatch, tmp_path):
+    fixture = tmp_path / "mandarin-command.wav"
+    fixture.write_bytes(b"verified fixture")
+    (tmp_path / "checksums.json").write_text(
+        '{"mandarin-command.wav": "'
+        + __import__("hashlib").sha256(fixture.read_bytes()).hexdigest()
+        + '"}',
+        encoding="utf-8",
+    )
+    output = tmp_path / "artifact.json"
+    monkeypatch.setattr(cli, "run_partial_probe", lambda *args, **kwargs: ("sensevoice-int8", 0.1))
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "benchmark-asr",
+            "--wav",
+            str(fixture),
+            "--output",
+            str(output),
+            "--baseline",
+            str(tmp_path / "missing" / "baseline.json"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("candidate_p95", "expected_partial"),
+    [(0.3, "sensevoice"), (0.3004, "paraformer")],
+)
+def test_benchmark_asr_runs_one_final_benchmark_after_partial_selection(
+    monkeypatch, tmp_path, candidate_p95, expected_partial
+):
+    import hashlib
+
+    fixture = tmp_path / "mandarin-command.wav"
+    fixture.write_bytes(b"verified fixture")
+    (tmp_path / "checksums.json").write_text(
+        '{"mandarin-command.wav": "' + hashlib.sha256(fixture.read_bytes()).hexdigest() + '"}',
+        encoding="utf-8",
+    )
+    baseline = tmp_path / "benchmarks" / "target-machine-baseline.json"
+    baseline.parent.mkdir()
+    baseline.write_text('{"asr_candidates": []}', encoding="utf-8")
+    output = tmp_path / "benchmarks" / "result.json"
+    final = object()
+    candidate = object()
+    paraformer = object()
+    created: list[object] = [final, candidate]
+    benchmark_calls: list[tuple[object, object]] = []
+
+    class FakeSenseVoice:
+        @classmethod
+        def from_model_dir(cls, _):
+            return created.pop(0)
+
+    class FakeParaformer:
+        @classmethod
+        def from_model_dir(cls, _):
+            return paraformer
+
+    monkeypatch.setattr(cli, "SenseVoiceAsr", FakeSenseVoice)
+    monkeypatch.setattr(cli, "StreamingParaformerAsr", FakeParaformer)
+    monkeypatch.setattr(cli, "SenseVoiceCandidatePauseAsr", lambda value: ("candidate", value))
+    monkeypatch.setattr(cli, "_speech_model_directory", lambda *_: tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "run_partial_probe",
+        lambda *args, **kwargs: ("sensevoice-int8", candidate_p95),
+    )
+
+    def fake_benchmark(*args, **kwargs):
+        benchmark_calls.append((kwargs["final_asr"], kwargs["partial_asr"]))
+        return {"model_id": "sensevoice-int8", "run_count": 5, "transcript": "打开音乐"}
+
+    monkeypatch.setattr(cli, "run_asr_benchmark", fake_benchmark)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "benchmark-asr",
+            "--wav",
+            str(fixture),
+            "--output",
+            str(output),
+            "--baseline",
+            str(baseline),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert benchmark_calls == [
+        (final, ("candidate", candidate) if expected_partial == "sensevoice" else paraformer)
+    ]

@@ -225,7 +225,7 @@ class StreamingParaformerAsr:
         self._stream.accept_waveform(SAMPLE_RATE, samples)
         while self._recognizer.is_ready(self._stream):
             self._recognizer.decode_stream(self._stream)
-        self._latest_text = str(self._recognizer.get_result(self._stream).text).strip()
+        self._latest_text = self._recognizer.get_result(self._stream).strip()
         now = self._clock()
         is_due = (
             self._last_published_at is None

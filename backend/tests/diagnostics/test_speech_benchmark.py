@@ -113,6 +113,15 @@ def test_measure_call_records_elapsed_and_result(monkeypatch):
     assert timed.result == 24000
 
 
+def test_measure_call_preserves_precision_used_for_partial_selection(monkeypatch):
+    times = iter([5.0, 5.3004])
+    monkeypatch.setattr("voxagent.diagnostics.speech_benchmark.perf_counter", lambda: next(times))
+
+    timed = measure_call("partial", lambda: "text")
+
+    assert timed.elapsed_seconds == pytest.approx(0.3004)
+
+
 def test_benchmark_validates_checksum_before_reading_audio(tmp_path, monkeypatch):
     wav = tmp_path / "mandarin-command.wav"
     wav.write_bytes(b"test fixture bytes")
@@ -170,15 +179,15 @@ def test_benchmark_runs_one_warmup_and_five_measured_passes(tmp_path):
         checksums,
         final_asr=final,
         partial_asr=partial,
-        read_wav=lambda _: (np.zeros(640, dtype=np.float32), 16000),
+        read_wav=lambda _: (np.zeros(160000, dtype=np.float32), 16000),
         peak_rss_bytes=lambda: 1234,
     )
 
     assert final.calls == 6
-    assert partial.calls == 12
+    assert partial.calls == 3000
     assert report["run_count"] == 5
     assert report["transcript"] == "打开音乐"
-    assert report["audio_duration_seconds"] == 0.04
+    assert report["audio_duration_seconds"] == 10.0
     assert report["peak_process_rss_bytes"] == 1234
     assert report["model_id"] == "sensevoice-int8"
     assert report["partial_model_id"] == "streaming-paraformer-bilingual-zh-en"
@@ -187,6 +196,7 @@ def test_benchmark_runs_one_warmup_and_five_measured_passes(tmp_path):
 
 def test_partial_selection_uses_sensevoice_only_when_p95_is_at_most_300ms():
     assert select_partial_asr_model(0.3) == "sensevoice-int8"
+    assert select_partial_asr_model(0.3004) == "streaming-paraformer-bilingual-zh-en"
     assert select_partial_asr_model(0.301) == "streaming-paraformer-bilingual-zh-en"
 
 
@@ -198,6 +208,65 @@ def test_fixture_checksum_requires_named_user_fixture(tmp_path):
 
     with pytest.raises(FixtureChecksumError, match="mandarin-command.wav"):
         validate_fixture_checksum(wav, checksums)
+
+
+def test_fixture_checksum_rejects_non_hex_digest(tmp_path):
+    checksums = tmp_path / "checksums.json"
+    checksums.write_text('{"mandarin-command.wav": "' + "g" * 64 + '"}', encoding="utf-8")
+    wav = tmp_path / "mandarin-command.wav"
+    wav.write_bytes(b"fixture")
+
+    with pytest.raises(FixtureChecksumError, match="invalid SHA-256"):
+        validate_fixture_checksum(wav, checksums)
+
+
+@pytest.mark.parametrize("seconds", [9.999, 20.001])
+def test_benchmark_rejects_fixture_outside_ten_to_twenty_seconds(tmp_path, seconds):
+    wav = tmp_path / "mandarin-command.wav"
+    wav.write_bytes(b"verified test fixture")
+    checksums = tmp_path / "checksums.json"
+    checksums.write_text(
+        '{"mandarin-command.wav": "' + hashlib.sha256(wav.read_bytes()).hexdigest() + '"}',
+        encoding="utf-8",
+    )
+    samples = np.zeros(round(seconds * 16000), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="10 to 20 seconds"):
+        run_asr_benchmark(
+            wav,
+            checksums,
+            final_asr=object(),
+            read_wav=lambda _: (samples, 16000),
+        )
+
+
+def test_benchmark_retains_the_highest_rss_sample(tmp_path):
+    from voxagent.speech.asr import AsrResult
+
+    wav = tmp_path / "mandarin-command.wav"
+    wav.write_bytes(b"verified test fixture")
+    checksums = tmp_path / "checksums.json"
+    checksums.write_text(
+        '{"mandarin-command.wav": "' + hashlib.sha256(wav.read_bytes()).hexdigest() + '"}',
+        encoding="utf-8",
+    )
+    rss_values = iter([10, 100, *([20] * 10_000)])
+
+    class FakeFinalAsr:
+        model_id = "sensevoice-int8"
+
+        def transcribe(self, samples, sample_rate):
+            return AsrResult(text="打开音乐")
+
+    report = run_asr_benchmark(
+        wav,
+        checksums,
+        final_asr=FakeFinalAsr(),
+        read_wav=lambda _: (np.zeros(160000, dtype=np.float32), 16000),
+        peak_rss_bytes=lambda: next(rss_values),
+    )
+
+    assert report["peak_process_rss_bytes"] == 100
 
 
 def test_baseline_update_copies_the_measured_asr_artifact_metadata(tmp_path):

@@ -143,8 +143,8 @@ class FakeOnlineRecognizer:
     def decode_stream(self, stream: FakeOnlineStream) -> None:
         self.decode_calls += 1
 
-    def get_result(self, stream: FakeOnlineStream) -> SimpleNamespace:
-        return SimpleNamespace(text=next(self.texts))
+    def get_result(self, stream: FakeOnlineStream) -> str:
+        return next(self.texts)
 
 
 def test_streaming_paraformer_uses_only_new_frames_and_throttles_public_updates():
