@@ -13,7 +13,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-speech = ["sherpa-onnx>=1.12,<2"]
+speech = [
+  "onnxruntime==1.27.0; sys_platform == 'win32'",
+  "sherpa-onnx==1.13.6",
+]
 dev = [
   "pytest>=8.3,<10",
   "pytest-asyncio>=0.25,<2",
@@ -34,6 +37,9 @@ packages = ["src/voxagent"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "local_vad_smoke: explicitly enabled local Silero VAD integration smoke",
+]
 
 [tool.ruff]
 target-version = "py312"

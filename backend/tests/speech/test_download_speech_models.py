@@ -260,6 +260,30 @@ def test_file_asset_install_is_idempotent_and_stays_within_model_root(tmp_path):
     assert "Present: silero-vad" in second.stdout
 
 
+def _run_script_with_empty_model_name(
+    data_root: Path, manifest: Path
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["VOXAGENT_ALLOW_TEST_PREFLIGHT_BYPASS"] = "1"
+    environment["VOXAGENT_ALLOW_TEST_MODEL_MANIFEST"] = "1"
+    command = (
+        "& '"
+        f"{SCRIPT}"
+        "' -DataRoot '"
+        f"{data_root}"
+        "' -ModelManifestPath '"
+        f"{manifest}"
+        "' -SkipPreflightForTests -AllowCustomManifestForTests -ModelName @()"
+    )
+    return subprocess.run(
+        [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+
 def test_file_asset_checksum_rejection_never_publishes_target(tmp_path):
     source = tmp_path / "silero_vad.onnx"
     source.write_bytes(b"wrong model bytes")
@@ -333,6 +357,46 @@ def test_unknown_model_name_fails_before_any_model_root_write(tmp_path):
 
     assert result.returncode != 0
     assert "Unknown model name: not-in-manifest" in result.stderr
+    assert not (data_root / "models" / "speech").exists()
+
+
+@pytest.mark.parametrize("model_name", ["Silero-VAD", "   "])
+def test_invalid_model_name_selection_fails_before_any_model_root_write(tmp_path, model_name):
+    invalid_archive = tmp_path / "legacy-invalid.tar.bz2"
+    invalid_archive.write_bytes(b"not a tar archive")
+    file_source = tmp_path / "silero_vad.onnx"
+    file_source.write_bytes(b"valid selected file model")
+    manifest = tmp_path / "manifest.json"
+    _write_selection_manifest(
+        manifest,
+        invalid_archive_source=invalid_archive,
+        file_source=file_source,
+    )
+    data_root = tmp_path / "data"
+
+    result = _run_script(data_root, manifest, model_names=(model_name,))
+
+    assert result.returncode != 0
+    assert not (data_root / "models" / "speech").exists()
+
+
+def test_explicit_empty_model_name_array_fails_before_any_model_root_write(tmp_path):
+    invalid_archive = tmp_path / "legacy-invalid.tar.bz2"
+    invalid_archive.write_bytes(b"not a tar archive")
+    file_source = tmp_path / "silero_vad.onnx"
+    file_source.write_bytes(b"valid selected file model")
+    manifest = tmp_path / "manifest.json"
+    _write_selection_manifest(
+        manifest,
+        invalid_archive_source=invalid_archive,
+        file_source=file_source,
+    )
+    data_root = tmp_path / "data"
+
+    result = _run_script_with_empty_model_name(data_root, manifest)
+
+    assert result.returncode != 0
+    assert "ModelName must not be empty" in result.stderr
     assert not (data_root / "models" / "speech").exists()
 
 
