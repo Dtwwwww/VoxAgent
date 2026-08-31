@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
+from typing import Any
 
 import httpx
+
+from voxagent.conversation.history import SYSTEM_INSTRUCTION, ChatMessage
 
 
 class OllamaStreamError(RuntimeError):
@@ -26,11 +29,17 @@ class OllamaClient:
     async def stream_chat(
         self,
         model: str,
-        messages: list[dict[str, str]],
+        messages: Sequence[ChatMessage | Mapping[str, str]],
     ) -> AsyncIterator[str]:
+        serialized: list[dict[str, str]] = []
+        for message in messages:
+            payload = _message_payload(message)
+            if payload["role"] != "system":
+                serialized.append(payload)
+        serialized.insert(0, {"role": "system", "content": SYSTEM_INSTRUCTION})
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": serialized,
             "stream": True,
             "think": False,
             "options": {"num_ctx": 8192, "temperature": 0.7, "top_p": 0.8},
@@ -64,3 +73,13 @@ class OllamaClient:
                 raise OllamaProtocolError(
                     f"Ollama model {model} stream ended without a terminal done frame"
                 )
+
+
+def _message_payload(message: ChatMessage | Mapping[str, str]) -> dict[str, str]:
+    if isinstance(message, ChatMessage):
+        return message.as_payload()
+    role: Any = message.get("role")
+    content: Any = message.get("content")
+    if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+        raise ValueError("Ollama messages require only a valid role and string content")
+    return {"role": role, "content": content}
