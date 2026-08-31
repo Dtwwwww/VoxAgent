@@ -116,6 +116,11 @@ class BlockingPartialAsr(FakePartialAsr):
             self.running = False
 
 
+class FailingPartialAsr(FakePartialAsr):
+    def accept(self, samples: np.ndarray) -> SimpleNamespace:
+        raise RuntimeError("partial recognizer failed")
+
+
 @dataclass
 class LlmCall:
     model: str
@@ -656,7 +661,7 @@ async def test_partial_asr_text_and_clock_drive_endpoint_policy():
 
     await collect_audio_events(orchestrator, [FRAME, FRAME, FRAME])
 
-    assert partial.reset_calls == 1
+    assert partial.reset_calls == 2
     assert endpoint.calls[-1] == (VadDecision.STOPPED, 1234, "我觉得那个")
     await orchestrator.stop()
 
@@ -889,6 +894,92 @@ async def test_raw_audio_limit_errors_at_boundary_and_releases_frames():
 
 def test_raw_audio_default_limit_is_120_seconds():
     assert MAX_UTTERANCE_FRAMES == 6000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked", ["tts", "partial"])
+async def test_stop_publishes_terminal_state_before_waiting_for_native_work(blocked):
+    blocking_tts = FakeTts(block=blocked == "tts")
+    partial = BlockingPartialAsr()
+    if blocked == "tts":
+        orchestrator, _, _ = make_orchestrator(
+            tts=blocking_tts, replies=[["回答。"]]
+        )
+        active = orchestrator.submit_text("问题", True)
+        assert (await anext(active)).type == "assistant.delta"
+        await asyncio.to_thread(blocking_tts.started.wait, 1)
+    else:
+        orchestrator, _, _ = make_orchestrator(
+            vad=FakeVad([VadDecision.STARTED, VadDecision.SPEECH])
+        )
+        orchestrator.partial_asr = partial
+        active = await _start_blocked_partial(orchestrator, partial)
+    old_settings = (orchestrator._voice_key, orchestrator._speed)
+
+    stopping = asyncio.create_task(orchestrator.stop())
+    await asyncio.sleep(0.02)
+    selected = orchestrator.select_voice("steady_male", 1.2)
+
+    assert selected.type == "error" and selected.code == "session_stopped"
+    assert (orchestrator._voice_key, orchestrator._speed) == old_settings
+    if blocked == "tts":
+        blocking_tts.release.set()
+    else:
+        partial.release.set()
+    await active.aclose() if blocked == "tts" else await active
+    await stopping
+    assert orchestrator.state.phase is Phase.STOPPED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["normal", "asr_failed", "asr_empty", "too_long"])
+async def test_voice_turn_end_immediately_resets_partial_state(ending):
+    partial = FakePartialAsr()
+    decisions = [VadDecision.STARTED, VadDecision.SPEECH]
+    max_frames = MAX_UTTERANCE_FRAMES
+    if ending != "too_long":
+        decisions.append(VadDecision.STOPPED)
+    else:
+        max_frames = 2
+    orchestrator, _, _ = make_orchestrator(
+        vad=FakeVad(decisions),
+        asr_texts=["" if ending == "asr_empty" else "问题"],
+        replies=[["回答"]],
+        max_utterance_frames=max_frames,
+    )
+    orchestrator.partial_asr = partial
+    if ending == "asr_failed":
+        orchestrator.asr = FailingAsr([])
+
+    _ = await collect_audio_events(orchestrator, [FRAME] * len(decisions))
+
+    assert partial.reset_calls >= 2
+    assert orchestrator._partial_task is None
+    assert orchestrator._partial_token is None
+    assert orchestrator._partial_text == ""
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_partial_asr_exception_is_recoverable_and_text_remains_usable():
+    partial = FailingPartialAsr()
+    orchestrator, _, _ = make_orchestrator(
+        vad=FakeVad([VadDecision.STARTED, VadDecision.SPEECH]),
+        replies=[["文字回答"]],
+    )
+    orchestrator.partial_asr = partial
+    _ = [item async for item in orchestrator.accept_audio(FRAME)]
+
+    failed = [item async for item in orchestrator.accept_audio(FRAME)]
+    text = [item async for item in orchestrator.submit_text("改用文字", False)]
+
+    assert [item.type for item in failed] == ["vad.stopped", "error"]
+    assert failed[1].code == "partial_asr_failed" and failed[1].recoverable
+    assert orchestrator._audio_frames == []
+    assert orchestrator._partial_text == ""
+    assert orchestrator.state.phase is Phase.IDLE
+    assert text[-1].type == "assistant.done"
+    await orchestrator.stop()
 
 
 async def _collect(iterator):
