@@ -7,7 +7,7 @@ from voxagent.speech.model_manifest import SPEECH_MODELS, SpeechModel
 
 
 def test_speech_manifest_has_unique_names_and_https_urls():
-    assert len({model.name for model in SPEECH_MODELS}) == 3
+    assert len({model.name for model in SPEECH_MODELS}) == 4
     assert all(model.url.startswith("https://github.com/k2-fsa/") for model in SPEECH_MODELS)
 
 
@@ -15,6 +15,7 @@ def test_speech_manifest_has_exact_immutable_slotted_models():
     assert SPEECH_MODELS == (
         SpeechModel(
             name="sensevoice-int8",
+            format="archive",
             archive_name="sensevoice-int8.tar.bz2",
             url=(
                 "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
@@ -28,6 +29,7 @@ def test_speech_manifest_has_exact_immutable_slotted_models():
         ),
         SpeechModel(
             name="kokoro-int8-zh-en",
+            format="archive",
             archive_name="kokoro-int8-multi-lang-v1_1.tar.bz2",
             url=(
                 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
@@ -46,6 +48,7 @@ def test_speech_manifest_has_exact_immutable_slotted_models():
         ),
         SpeechModel(
             name="melo-zh-en",
+            format="archive",
             archive_name="vits-melo-tts-zh_en.tar.bz2",
             url=(
                 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
@@ -56,6 +59,20 @@ def test_speech_manifest_has_exact_immutable_slotted_models():
             source="k2-fsa/sherpa-onnx release tts-models",
             archive_sha256="e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
             required_files=("model.onnx", "tokens.txt", "lexicon.txt"),
+        ),
+        SpeechModel(
+            name="silero-vad",
+            format="file",
+            archive_name="silero_vad.onnx",
+            url=(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+                "silero_vad.onnx"
+            ),
+            directory_name="silero-vad",
+            version="silero_vad.onnx",
+            source="k2-fsa/sherpa-onnx release asr-models (MIT)",
+            archive_sha256="9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+            required_files=("silero_vad.onnx",),
         ),
     )
     assert not hasattr(SPEECH_MODELS[0], "__dict__")

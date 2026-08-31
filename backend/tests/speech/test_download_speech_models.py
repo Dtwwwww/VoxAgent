@@ -53,6 +53,33 @@ def _write_manifest(
     )
 
 
+def _write_file_manifest(
+    path: Path,
+    *,
+    source: Path,
+    archive_sha256: str,
+    directory: str = "silero-vad",
+    filename: str = "silero_vad.onnx",
+) -> None:
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "Name": "silero-vad",
+                    "Format": "file",
+                    "Archive": filename,
+                    "Directory": directory,
+                    "Url": source.as_uri(),
+                    "Version": "test-v1",
+                    "ArchiveSha256": archive_sha256,
+                    "RequiredFiles": [filename],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def _run_script(
     data_root: Path,
     manifest: Path,
@@ -167,6 +194,65 @@ def test_archive_missing_required_files_is_not_published(tmp_path):
     assert result.returncode != 0
     assert "one or more required files are missing" in result.stderr
     assert not (data_root / "models" / "speech" / "fixture-model-v1").exists()
+
+
+def test_file_asset_install_is_idempotent_and_stays_within_model_root(tmp_path):
+    source = tmp_path / "silero_vad.onnx"
+    source.write_bytes(b"valid local file model")
+    manifest = tmp_path / "manifest.json"
+    _write_file_manifest(
+        manifest,
+        source=source,
+        archive_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+    data_root = tmp_path / "data"
+
+    first = _run_script(data_root, manifest)
+
+    assert first.returncode == 0, first.stderr
+    installed = data_root / "models" / "speech" / "silero-vad" / "silero_vad.onnx"
+    assert installed.read_bytes() == source.read_bytes()
+    assert not (tmp_path / "silero-vad" / "silero_vad.onnx").exists()
+
+    source.unlink()
+    second = _run_script(data_root, manifest)
+
+    assert second.returncode == 0, second.stderr
+    assert "Present: silero-vad" in second.stdout
+
+
+def test_file_asset_checksum_rejection_never_publishes_target(tmp_path):
+    source = tmp_path / "silero_vad.onnx"
+    source.write_bytes(b"wrong model bytes")
+    manifest = tmp_path / "manifest.json"
+    _write_file_manifest(manifest, source=source, archive_sha256="0" * 64)
+
+    result = _run_script(tmp_path / "data", manifest)
+
+    assert result.returncode != 0
+    assert "Checksum mismatch for silero-vad" in result.stderr
+    assert not (tmp_path / "data" / "models" / "speech" / "silero-vad").exists()
+
+
+def test_file_asset_replaces_corrupt_completed_target(tmp_path):
+    source = tmp_path / "silero_vad.onnx"
+    source.write_bytes(b"valid local file model")
+    expected_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest = tmp_path / "manifest.json"
+    _write_file_manifest(manifest, source=source, archive_sha256=expected_hash)
+    data_root = tmp_path / "data"
+    installed = data_root / "models" / "speech" / "silero-vad"
+    installed.mkdir(parents=True)
+    (installed / "silero_vad.onnx").write_bytes(b"corrupt completed model")
+    (installed / ".voxagent-complete").write_text(
+        json.dumps({"version": "test-v1", "archive_sha256": expected_hash}),
+        encoding="utf-8",
+    )
+
+    result = _run_script(data_root, manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert (installed / "silero_vad.onnx").read_bytes() == source.read_bytes()
 
 
 def test_custom_manifest_requires_explicit_double_test_gate(tmp_path):
@@ -284,7 +370,21 @@ def test_shared_manifest_is_the_only_speech_model_inventory():
     payload = json.loads(SHARED_MANIFEST.read_text(encoding="utf-8"))
     script = SCRIPT.read_text(encoding="utf-8-sig")
 
-    assert len(payload) == 3
+    assert len(payload) == 4
     assert all(len(model["ArchiveSha256"]) == 64 for model in payload)
+    assert payload[-1] == {
+        "Name": "silero-vad",
+        "Format": "file",
+        "Archive": "silero_vad.onnx",
+        "Url": (
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+            "silero_vad.onnx"
+        ),
+        "Directory": "silero-vad",
+        "Version": "silero_vad.onnx",
+        "Source": "k2-fsa/sherpa-onnx release asr-models (MIT)",
+        "ArchiveSha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+        "RequiredFiles": ["silero_vad.onnx"],
+    }
     assert "models.json" in script
     assert "sensevoice-int8" not in script

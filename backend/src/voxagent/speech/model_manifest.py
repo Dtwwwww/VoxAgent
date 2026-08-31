@@ -6,6 +6,7 @@ from importlib.resources import files
 @dataclass(frozen=True, slots=True)
 class SpeechModel:
     name: str
+    format: str
     archive_name: str
     url: str
     directory_name: str
@@ -21,6 +22,7 @@ def _load_models() -> tuple[SpeechModel, ...]:
     return tuple(
         SpeechModel(
             name=item["Name"],
+            format=item.get("Format", "archive"),
             archive_name=item["Archive"],
             url=item["Url"],
             directory_name=item["Directory"],

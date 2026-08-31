@@ -28,5 +28,16 @@
     "Source": "k2-fsa/sherpa-onnx release tts-models",
     "ArchiveSha256": "e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
     "RequiredFiles": ["model.onnx", "tokens.txt", "lexicon.txt"]
+  },
+  {
+    "Name": "silero-vad",
+    "Format": "file",
+    "Archive": "silero_vad.onnx",
+    "Url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+    "Directory": "silero-vad",
+    "Version": "silero_vad.onnx",
+    "Source": "k2-fsa/sherpa-onnx release asr-models (MIT)",
+    "ArchiveSha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+    "RequiredFiles": ["silero_vad.onnx"]
   }
 ]

@@ -140,10 +140,30 @@ function Test-CompletedModel {
     }
     try {
         $marker = Get-Content -Raw -LiteralPath $markerPath | ConvertFrom-Json
-        return (
+        $markerMatches = (
             ([string]$marker.version -eq [string]$Model.Version) -and
             ([string]$marker.archive_sha256 -eq ([string]$Model.ArchiveSha256).ToLowerInvariant())
         )
+        if (-not $markerMatches) {
+            return $false
+        }
+        $modelFormat = if ([string]::IsNullOrWhiteSpace([string]$Model.Format)) {
+            'archive'
+        }
+        else {
+            [string]$Model.Format
+        }
+        if ($modelFormat -eq 'file') {
+            $assetPath = Resolve-ManifestPath `
+                -Root $Target `
+                -RelativePath ([string]$Model.Archive) `
+                -Label 'completed file asset'
+            return (
+                (Test-Path -LiteralPath $assetPath -PathType Leaf) -and
+                ((Get-ArchiveSha256 -Path $assetPath) -eq ([string]$Model.ArchiveSha256).ToLowerInvariant())
+            )
+        }
+        return $true
     }
     catch {
         return $false
@@ -234,6 +254,15 @@ foreach ($model in $models) {
     Assert-SafeLeafName -Value ([string]$model.Name) -Label 'Name'
     Assert-SafeLeafName -Value ([string]$model.Archive) -Label 'Archive'
     Assert-SafeLeafName -Value ([string]$model.Directory) -Label 'Directory'
+    $modelFormat = if ([string]::IsNullOrWhiteSpace([string]$model.Format)) {
+        'archive'
+    }
+    else {
+        [string]$model.Format
+    }
+    if ($modelFormat -notin @('archive', 'file')) {
+        throw "Invalid Format for $($model.Name): $modelFormat"
+    }
     if (-not ([string]$model.ArchiveSha256 -match '^[0-9a-fA-F]{64}$')) {
         throw "Invalid ArchiveSha256 for $($model.Name)"
     }
@@ -297,17 +326,27 @@ foreach ($model in $models) {
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     $published = $false
     try {
-        Assert-SafeArchive -ArchivePath $archive -ExtractionRoot $staging
-        & tar.exe -xjf $archive -C $staging
-        if ($LASTEXITCODE -ne 0) {
-            throw "tar.exe exited with code $LASTEXITCODE"
-        }
         $extractedTarget = Resolve-ManifestPath `
             -Root $staging `
             -RelativePath ([string]$model.Directory) `
-            -Label 'extracted model'
-        if (-not (Test-Path -LiteralPath $extractedTarget -PathType Container)) {
-            throw "archive did not contain $($model.Directory)"
+            -Label 'staged model'
+        if ($modelFormat -eq 'archive') {
+            Assert-SafeArchive -ArchivePath $archive -ExtractionRoot $staging
+            & tar.exe -xjf $archive -C $staging
+            if ($LASTEXITCODE -ne 0) {
+                throw "tar.exe exited with code $LASTEXITCODE"
+            }
+            if (-not (Test-Path -LiteralPath $extractedTarget -PathType Container)) {
+                throw "archive did not contain $($model.Directory)"
+            }
+        }
+        else {
+            New-Item -ItemType Directory -Force -Path $extractedTarget | Out-Null
+            $stagedAsset = Resolve-ManifestPath `
+                -Root $extractedTarget `
+                -RelativePath ([string]$model.Archive) `
+                -Label 'staged file asset'
+            Copy-Item -LiteralPath $archive -Destination $stagedAsset
         }
         if (-not (Test-RequiredFiles -Root $extractedTarget -RequiredFiles $model.RequiredFiles)) {
             throw 'one or more required files are missing'
