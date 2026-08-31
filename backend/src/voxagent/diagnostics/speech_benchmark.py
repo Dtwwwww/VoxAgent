@@ -17,6 +17,7 @@ import psutil
 import soundfile
 
 from voxagent.speech.asr import AsrEngine, PartialAsrEngine
+from voxagent.speech.tts import AudioChunk
 
 TTS_BENCHMARK_TEXTS = (
     "你好，我是声灵，很高兴陪你聊聊天。",
@@ -204,6 +205,66 @@ def run_asr_benchmark(
     }
 
 
+def run_tts_benchmark(
+    tts: object,
+    *,
+    native_voice_id: int,
+    texts: tuple[str, ...] = TTS_BENCHMARK_TEXTS,
+    peak_rss_bytes: Callable[[], int] = lambda: psutil.Process().memory_info().rss,
+) -> dict[str, object]:
+    """Measure one warm-up and five native-rate TTS runs for each fixed text."""
+    engine = getattr(tts, "engine", None)
+    synthesize_native = getattr(tts, "synthesize_native", None)
+    if engine not in {"kokoro", "melo"} or not callable(synthesize_native):
+        raise TypeError("tts must expose an engine and synthesize_native()")
+    if not texts:
+        raise ValueError("TTS benchmark requires fixed texts")
+    peak_rss = peak_rss_bytes()
+    reports: list[dict[str, object]] = []
+    for text in texts:
+        latencies: list[float] = []
+        durations: list[float] = []
+        rtfs: list[float] = []
+        for pass_index in range(6):
+            timed = measure_call(
+                "tts_first_audio",
+                lambda text=text: synthesize_native(text, native_voice_id, 1.0),
+            )
+            peak_rss = max(peak_rss, peak_rss_bytes())
+            audio = timed.result
+            if not isinstance(audio, AudioChunk):
+                raise TypeError("TTS benchmark must receive AudioChunk results")
+            if pass_index:
+                latencies.append(timed.elapsed_seconds)
+                durations.append(audio.duration_seconds)
+                rtfs.append(timed.elapsed_seconds / audio.duration_seconds)
+        reports.append(
+            {
+                "text": text,
+                "first_audio_latency_seconds": {
+                    "p50": round(median(latencies), 3),
+                    "p95": round(_nearest_rank_p95(latencies), 3),
+                },
+                "generated_duration_seconds": {
+                    "p50": round(median(durations), 3),
+                    "p95": round(_nearest_rank_p95(durations), 3),
+                },
+                "synthesis_real_time_factor": {
+                    "p50": round(median(rtfs), 3),
+                    "p95": round(_nearest_rank_p95(rtfs), 3),
+                },
+            }
+        )
+    return {
+        "schema_version": 1,
+        "engine": engine,
+        "native_voice_id": native_voice_id,
+        "run_count": 5,
+        "texts": reports,
+        "peak_process_rss_bytes": peak_rss,
+    }
+
+
 def _baseline_candidate(
     baseline_path: Path,
     artifact_path: Path,
@@ -370,4 +431,22 @@ def update_asr_baseline(baseline_path: Path, artifact_path: Path) -> None:
     baseline_path.write_text(
         prepare_asr_baseline_update(baseline_path, artifact_path, artifact, artifact_bytes),
         encoding="utf-8",
+    )
+
+
+def publish_tts_benchmark(
+    artifact_path: Path,
+    artifact_bytes: bytes,
+    baseline_path: Path,
+    baseline_bytes: bytes,
+    *,
+    replace: Callable[[Path, Path], None] | None = None,
+) -> None:
+    """Publish a TTS artifact and selected baseline together, or restore both."""
+    publish_asr_benchmark(
+        artifact_path,
+        artifact_bytes,
+        baseline_path,
+        baseline_bytes,
+        replace=replace,
     )

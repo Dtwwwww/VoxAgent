@@ -276,3 +276,59 @@ def test_benchmark_asr_runs_one_final_benchmark_after_partial_selection(
     assert benchmark_calls == [
         (final, ("candidate", candidate) if expected_partial == "sensevoice" else paraformer)
     ]
+
+
+def test_benchmark_tts_loads_requested_engine_and_writes_report(monkeypatch, tmp_path):
+    from voxagent import cli
+
+    calls: list[tuple[object, ...]] = []
+
+    class FakeTts:
+        engine = "kokoro"
+
+    def fake_from_model_dir(path, voice_id, *, engine, catalog=None):
+        calls.append((path, voice_id, engine, catalog))
+        return FakeTts()
+
+    monkeypatch.setattr(cli.SherpaOfflineTts, "from_model_dir", fake_from_model_dir)
+    monkeypatch.setattr(
+        cli,
+        "run_tts_benchmark",
+        lambda tts, native_voice_id: {
+            "engine": tts.engine,
+            "native_voice_id": native_voice_id,
+            "run_count": 5,
+        },
+    )
+    output = tmp_path / "kokoro.json"
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["benchmark-tts", "--engine", "kokoro", "--voice-id", "3", "--output", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[0][1:3] == (3, "kokoro")
+    assert json.loads(output.read_text(encoding="utf-8"))["run_count"] == 5
+
+
+def test_prepare_voice_review_uses_local_engines_without_a_catalog(monkeypatch, tmp_path):
+    from voxagent import cli
+
+    created: list[tuple[str, object]] = []
+
+    def fake_from_model_dir(path, voice_id, *, engine, catalog=None):
+        created.append((engine, catalog))
+        return object()
+
+    monkeypatch.setattr(cli.SherpaOfflineTts, "from_model_dir", fake_from_model_dir)
+    monkeypatch.setattr(
+        cli,
+        "prepare_voice_review",
+        lambda output_dir, *, kokoro, melo: {"review_dir": str(output_dir)},
+    )
+
+    result = CliRunner().invoke(cli.app, ["prepare-voice-review", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert created == [("kokoro", None), ("melo", None)]

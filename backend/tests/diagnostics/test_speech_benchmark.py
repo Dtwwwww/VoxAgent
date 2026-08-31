@@ -9,12 +9,66 @@ from voxagent.diagnostics.speech_benchmark import (
     FixtureChecksumError,
     measure_call,
     publish_asr_benchmark,
+    publish_tts_benchmark,
     run_asr_benchmark,
+    run_tts_benchmark,
     select_partial_asr_model,
     update_asr_baseline,
     validate_fixture_checksum,
 )
 from voxagent.speech.model_manifest import SPEECH_MODELS, SpeechModel
+from voxagent.speech.tts import AudioChunk
+
+
+class _FakeTts:
+    engine = "kokoro"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, float]] = []
+
+    def synthesize_native(self, text: str, native_voice_id: int, speed: float) -> AudioChunk:
+        self.calls.append((text, native_voice_id, speed))
+        return AudioChunk(wav_bytes=b"valid wav bytes", sample_rate=24000, duration_seconds=1.5)
+
+
+def test_tts_benchmark_runs_one_warmup_and_five_measured_passes_and_keeps_peak_rss():
+    tts = _FakeTts()
+    rss = iter([10, 100, *([20] * 18)])
+
+    report = run_tts_benchmark(tts, native_voice_id=3, peak_rss_bytes=lambda: next(rss))
+
+    assert len(tts.calls) == 18
+    assert {speed for _, _, speed in tts.calls} == {1.0}
+    assert report["engine"] == "kokoro"
+    assert report["native_voice_id"] == 3
+    assert report["run_count"] == 5
+    assert report["peak_process_rss_bytes"] == 100
+    assert len(report["texts"]) == 3
+    assert all(item["first_audio_latency_seconds"]["p95"] >= 0 for item in report["texts"])
+
+
+def test_tts_publication_restores_the_artifact_when_baseline_publication_fails(tmp_path):
+    artifact = tmp_path / "kokoro.json"
+    baseline = tmp_path / "baseline.json"
+    artifact.write_bytes(b"old artifact")
+    baseline.write_bytes(b"old baseline")
+
+    def fail_second_write(source, destination):
+        if destination == baseline and source.name.endswith(".voxagent-tmp"):
+            raise OSError("second write failed")
+        os.replace(source, destination)
+
+    with pytest.raises(OSError, match="second write failed"):
+        publish_tts_benchmark(
+            artifact,
+            b"new artifact",
+            baseline,
+            b"new baseline",
+            replace=fail_second_write,
+        )
+
+    assert artifact.read_bytes() == b"old artifact"
+    assert baseline.read_bytes() == b"old baseline"
 
 
 def test_speech_manifest_has_unique_names_and_https_urls():

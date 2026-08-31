@@ -19,6 +19,7 @@ from voxagent.diagnostics.speech_benchmark import (
     publish_asr_benchmark,
     run_asr_benchmark,
     run_partial_probe,
+    run_tts_benchmark,
     select_partial_asr_model,
     validate_fixture_checksum,
 )
@@ -29,6 +30,7 @@ from voxagent.speech.asr import (
     StreamingParaformerAsr,
 )
 from voxagent.speech.model_manifest import SPEECH_MODELS
+from voxagent.speech.tts import SherpaOfflineTts, prepare_voice_review
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -153,6 +155,46 @@ def benchmark_asr(
         baseline_path,
         baseline_text.encode("utf-8"),
     )
+
+
+@app.command("benchmark-tts")
+def benchmark_tts(
+    engine: Annotated[str, typer.Option("--engine")],
+    voice_id: Annotated[int, typer.Option("--voice-id")],
+    output: Annotated[Path, typer.Option("--output", dir_okay=False)],
+    data_root: Annotated[Path | None, typer.Option("--data-root", dir_okay=True)] = None,
+) -> None:
+    model_names = {"kokoro": "kokoro-int8-zh-en", "melo": "melo-zh-en"}
+    if engine not in model_names:
+        raise typer.BadParameter("--engine must be kokoro or melo")
+    if voice_id < 0:
+        raise typer.BadParameter("--voice-id must be non-negative")
+    root = resolve_data_root(data_root)
+    tts = SherpaOfflineTts.from_model_dir(
+        _speech_model_directory(root, model_names[engine]),
+        voice_id,
+        engine=engine,
+    )
+    report = run_tts_benchmark(tts, native_voice_id=voice_id)
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+@app.command("prepare-voice-review")
+def prepare_voice_review_command(
+    output_dir: Annotated[Path, typer.Option("--output-dir", file_okay=False)],
+    data_root: Annotated[Path | None, typer.Option("--data-root", dir_okay=True)] = None,
+) -> None:
+    root = resolve_data_root(data_root)
+    kokoro = SherpaOfflineTts.from_model_dir(
+        _speech_model_directory(root, "kokoro-int8-zh-en"), 3, engine="kokoro"
+    )
+    melo = SherpaOfflineTts.from_model_dir(
+        _speech_model_directory(root, "melo-zh-en"), 0, engine="melo"
+    )
+    template = prepare_voice_review(output_dir, kokoro=kokoro, melo=melo)
+    typer.echo(json.dumps(template, ensure_ascii=False, indent=2))
 
 
 @app.command("validate-baseline")
