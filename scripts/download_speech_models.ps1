@@ -6,6 +6,9 @@ param(
     [string]$ModelManifestPath,
 
     [Parameter(Mandatory = $false)]
+    [string[]]$ModelName,
+
+    [Parameter(Mandatory = $false)]
     [switch]$SkipPreflightForTests,
 
     [Parameter(Mandatory = $false)]
@@ -42,7 +45,6 @@ else {
 }
 
 $runtimeBootstrap = Join-Path $PSScriptRoot 'voxagent_runtime.ps1'
-& $runtimeBootstrap -DataRoot $DataRoot -Quiet -SkipPreflightForTests:$SkipPreflightForTests
 
 function Get-ArchiveSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -240,7 +242,40 @@ function Assert-SafeArchive {
     }
 }
 
-$models = @(Get-Content -Raw -LiteralPath $ModelManifestPath | ConvertFrom-Json)
+$manifestModels = Get-Content -Raw -LiteralPath $ModelManifestPath | ConvertFrom-Json
+$allModels = [System.Collections.Generic.List[object]]::new()
+foreach ($manifestModel in $manifestModels) {
+    $allModels.Add($manifestModel)
+}
+if ($PSBoundParameters.ContainsKey('ModelName')) {
+    if (@($ModelName).Count -eq 0) {
+        throw 'ModelName must not be empty.'
+    }
+    $models = [System.Collections.Generic.List[object]]::new()
+    foreach ($requestedModelName in $ModelName) {
+        if ([string]::IsNullOrWhiteSpace($requestedModelName)) {
+            throw 'ModelName must not be blank.'
+        }
+        $matchedModel = $null
+        foreach ($candidateModel in $allModels) {
+            if (([string]$candidateModel.Name) -ceq ([string]$requestedModelName)) {
+                if ($matchedModel) {
+                    throw "Model manifest contains duplicate name: $requestedModelName"
+                }
+                $matchedModel = $candidateModel
+            }
+        }
+        if ($null -eq $matchedModel) {
+            throw "Unknown model name: $requestedModelName"
+        }
+        $models.Add($matchedModel)
+    }
+}
+else {
+    $models = $allModels
+}
+
+& $runtimeBootstrap -DataRoot $DataRoot -Quiet -SkipPreflightForTests:$SkipPreflightForTests
 
 $modelRoot = [IO.Path]::GetFullPath((Join-Path $DataRoot 'models\speech'))
 $stagingRoot = Assert-ContainedPath `

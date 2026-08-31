@@ -253,7 +253,7 @@ The wrapper requires the absolute `silero_vad.onnx` path and raises `ModelAssetE
 - [ ] **Step 5: Install the asset, run tests, and commit**
 
 ```powershell
-& .\scripts\download_speech_models.ps1 -DataRoot 'D:\VoxAgentData'
+& .\scripts\download_speech_models.ps1 -DataRoot 'D:\VoxAgentData' -ModelName 'silero-vad'
 cd backend
 uv run pytest tests/speech/test_vad.py tests/speech/test_endpoint.py tests/speech/test_download_speech_models.py -v
 uv run ruff check src tests

@@ -80,11 +80,48 @@ def _write_file_manifest(
     )
 
 
+def _write_selection_manifest(
+    path: Path,
+    *,
+    invalid_archive_source: Path,
+    file_source: Path,
+) -> None:
+    invalid_archive_sha256 = hashlib.sha256(invalid_archive_source.read_bytes()).hexdigest()
+    file_sha256 = hashlib.sha256(file_source.read_bytes()).hexdigest()
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "Name": "legacy-invalid",
+                    "Archive": "legacy-invalid.tar.bz2",
+                    "Directory": "legacy-invalid",
+                    "Url": str(invalid_archive_source),
+                    "Version": "test-v1",
+                    "ArchiveSha256": invalid_archive_sha256,
+                    "RequiredFiles": ["model.onnx"],
+                },
+                {
+                    "Name": "silero-vad",
+                    "Format": "file",
+                    "Archive": "silero_vad.onnx",
+                    "Directory": "silero-vad",
+                    "Url": file_source.as_uri(),
+                    "Version": "test-v1",
+                    "ArchiveSha256": file_sha256,
+                    "RequiredFiles": ["silero_vad.onnx"],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def _run_script(
     data_root: Path,
     manifest: Path,
     *,
     authorize_custom_manifest: bool = True,
+    model_names: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["VOXAGENT_ALLOW_TEST_PREFLIGHT_BYPASS"] = "1"
@@ -104,6 +141,8 @@ def _run_script(
     if authorize_custom_manifest:
         environment["VOXAGENT_ALLOW_TEST_MODEL_MANIFEST"] = "1"
         command.append("-AllowCustomManifestForTests")
+    if model_names:
+        command.extend(("-ModelName", *model_names))
     return subprocess.run(
         command,
         check=False,
@@ -253,6 +292,48 @@ def test_file_asset_replaces_corrupt_completed_target(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert (installed / "silero_vad.onnx").read_bytes() == source.read_bytes()
+
+
+def test_model_name_selects_only_requested_file_asset(tmp_path):
+    invalid_archive = tmp_path / "legacy-invalid.tar.bz2"
+    invalid_archive.write_bytes(b"not a tar archive")
+    file_source = tmp_path / "silero_vad.onnx"
+    file_source.write_bytes(b"valid selected file model")
+    manifest = tmp_path / "manifest.json"
+    _write_selection_manifest(
+        manifest,
+        invalid_archive_source=invalid_archive,
+        file_source=file_source,
+    )
+    data_root = tmp_path / "data"
+
+    result = _run_script(data_root, manifest, model_names=("silero-vad",))
+
+    assert result.returncode == 0, result.stderr
+    model_root = data_root / "models" / "speech"
+    assert (model_root / "silero-vad" / "silero_vad.onnx").read_bytes() == file_source.read_bytes()
+    assert not (model_root / "legacy-invalid").exists()
+    assert not (model_root / "legacy-invalid.tar.bz2").exists()
+
+
+def test_unknown_model_name_fails_before_any_model_root_write(tmp_path):
+    invalid_archive = tmp_path / "legacy-invalid.tar.bz2"
+    invalid_archive.write_bytes(b"not a tar archive")
+    file_source = tmp_path / "silero_vad.onnx"
+    file_source.write_bytes(b"valid selected file model")
+    manifest = tmp_path / "manifest.json"
+    _write_selection_manifest(
+        manifest,
+        invalid_archive_source=invalid_archive,
+        file_source=file_source,
+    )
+    data_root = tmp_path / "data"
+
+    result = _run_script(data_root, manifest, model_names=("not-in-manifest",))
+
+    assert result.returncode != 0
+    assert "Unknown model name: not-in-manifest" in result.stderr
+    assert not (data_root / "models" / "speech").exists()
 
 
 def test_custom_manifest_requires_explicit_double_test_gate(tmp_path):
