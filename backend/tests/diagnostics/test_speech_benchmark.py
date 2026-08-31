@@ -1,4 +1,5 @@
 import hashlib
+import os
 from dataclasses import FrozenInstanceError
 
 import numpy as np
@@ -7,6 +8,7 @@ import pytest
 from voxagent.diagnostics.speech_benchmark import (
     FixtureChecksumError,
     measure_call,
+    publish_asr_benchmark,
     run_asr_benchmark,
     select_partial_asr_model,
     update_asr_baseline,
@@ -287,3 +289,68 @@ def test_baseline_update_copies_the_measured_asr_artifact_metadata(tmp_path):
     assert candidate["run_count"] == 5
     assert candidate["transcript"] == "打开音乐"
     assert len(candidate["artifact_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    ("artifact_original", "baseline_original"),
+    [
+        (b"old artifact", b"old baseline"),
+        (None, b"old baseline"),
+        (b"old artifact", None),
+        (None, None),
+    ],
+)
+def test_atomic_publish_restores_both_targets_when_second_publication_replace_fails(
+    tmp_path,
+    artifact_original,
+    baseline_original,
+):
+    artifact = tmp_path / "artifacts" / "sensevoice-int8.json"
+    baseline = tmp_path / "baselines" / "target-machine-baseline.json"
+    artifact.parent.mkdir()
+    baseline.parent.mkdir()
+    if artifact_original is not None:
+        artifact.write_bytes(artifact_original)
+    if baseline_original is not None:
+        baseline.write_bytes(baseline_original)
+
+    def fail_baseline_publication(source, destination):
+        if source.name.endswith(".voxagent-tmp") and destination == baseline:
+            raise OSError("simulated second publication failure")
+        os.replace(source, destination)
+
+    with pytest.raises(OSError, match="simulated second publication failure"):
+        publish_asr_benchmark(
+            artifact,
+            b"new artifact",
+            baseline,
+            b"new baseline",
+            replace=fail_baseline_publication,
+        )
+
+    if artifact_original is None:
+        assert not artifact.exists()
+    else:
+        assert artifact.read_bytes() == artifact_original
+    if baseline_original is None:
+        assert not baseline.exists()
+    else:
+        assert baseline.read_bytes() == baseline_original
+    assert not list(tmp_path.rglob("*.voxagent-tmp"))
+    assert not list(tmp_path.rglob("*.voxagent-backup"))
+
+
+def test_atomic_publish_writes_both_targets_and_cleans_owned_files(tmp_path):
+    artifact = tmp_path / "artifacts" / "sensevoice-int8.json"
+    baseline = tmp_path / "baselines" / "target-machine-baseline.json"
+    artifact.parent.mkdir()
+    baseline.parent.mkdir()
+    artifact.write_bytes(b"old artifact")
+    baseline.write_bytes(b"old baseline")
+
+    publish_asr_benchmark(artifact, b"new artifact", baseline, b"new baseline")
+
+    assert artifact.read_bytes() == b"new artifact"
+    assert baseline.read_bytes() == b"new baseline"
+    assert not list(tmp_path.rglob("*.voxagent-tmp"))
+    assert not list(tmp_path.rglob("*.voxagent-backup"))

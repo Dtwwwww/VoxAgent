@@ -16,6 +16,7 @@ from voxagent.diagnostics.resource_probe import ProbeConfig, run_resource_probe
 from voxagent.diagnostics.speech_benchmark import (
     FixtureChecksumError,
     prepare_asr_baseline_update,
+    publish_asr_benchmark,
     run_asr_benchmark,
     run_partial_probe,
     select_partial_asr_model,
@@ -146,8 +147,12 @@ def benchmark_asr(
         raise typer.BadParameter(
             f"Invalid baseline: {baseline_path}", param_hint="--baseline"
         ) from error
-    output.write_bytes(artifact_text.encode("utf-8"))
-    baseline_path.write_text(baseline_text, encoding="utf-8")
+    publish_asr_benchmark(
+        output,
+        artifact_text.encode("utf-8"),
+        baseline_path,
+        baseline_text.encode("utf-8"),
+    )
 
 
 @app.command("validate-baseline")

@@ -216,3 +216,42 @@ The artifact is non-empty and `target-machine-baseline.json` now has a matching
 non-empty `asr_candidates` entry with the same artifact SHA-256. The transcript
 is `你好，森林，请检查本地模型，并告诉我今天的日期。`; it preserves the command
 intent and full request but recognizes the name `声灵` phonetically as `森林`.
+
+## Atomic benchmark publication repair
+
+### RED
+
+Code review correctly identified that the CLI wrote the measured artifact
+before the baseline. A baseline ACL, disk, or I/O failure could therefore
+leave the new artifact next to the old baseline. A new injected-replace
+regression test first failed at import because the dual-file transaction did
+not exist. The test injects an `OSError` precisely on the second publication
+replacement (the temporary baseline file to the baseline target), then checks
+the byte-for-byte pre-call state for four cases: both targets existed, either
+target was absent, and both targets were absent.
+
+An added success-path cleanup test also initially failed: successful
+publication left the old `.voxagent-backup` files behind. This exposed a real
+completion-path defect before the final cleanup change.
+
+### GREEN
+
+`publish_asr_benchmark()` now writes each complete payload to a unique,
+same-directory `.voxagent-tmp` file and calls `flush()` plus `fsync()` before
+any target changes. Existing targets are atomically moved to unique,
+same-directory `.voxagent-backup` files; the artifact and baseline are then
+published with `os.replace()`. If either publication replacement fails, the
+owned backups restore the original bytes, and a newly-created target that did
+not previously exist is removed. Only explicitly-created temporary/backup
+paths and the controlled caller-supplied newly-created target are removed.
+Successful publication removes all owned temporary and backup files.
+
+Focused verification after the final cleanup repair:
+
+```text
+27 passed in 1.37s
+All checks passed!
+```
+
+No user fixture, measured artifact, or baseline metric was regenerated or
+changed during this repair.

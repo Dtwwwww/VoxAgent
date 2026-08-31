@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -247,6 +249,117 @@ def prepare_asr_baseline_update(
     existing.append(candidate)
     payload["asr_candidates"] = existing
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+@dataclass(slots=True)
+class _PublicationTarget:
+    target: Path
+    contents: bytes
+    existed: bool
+    temporary: Path | None = None
+    backup: Path | None = None
+    backup_contains_original: bool = False
+    published: bool = False
+
+
+def _write_publication_temporary(target: Path, contents: bytes) -> Path:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".voxagent-tmp",
+        dir=target.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
+def _reserve_publication_backup(target: Path) -> Path:
+    descriptor, backup_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".voxagent-backup",
+        dir=target.parent,
+    )
+    os.close(descriptor)
+    return Path(backup_name)
+
+
+def _remove_owned_publication_file(path: Path | None) -> None:
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
+def publish_asr_benchmark(
+    artifact_path: Path,
+    artifact_bytes: bytes,
+    baseline_path: Path,
+    baseline_bytes: bytes,
+    *,
+    replace: Callable[[Path, Path], None] | None = None,
+) -> None:
+    """Publish ASR artifact and baseline together, restoring both on failure."""
+    artifact_path = Path(artifact_path).resolve()
+    baseline_path = Path(baseline_path).resolve()
+    if artifact_path == baseline_path:
+        raise ValueError("ASR artifact and baseline paths must be distinct")
+    for target in (artifact_path, baseline_path):
+        if not target.parent.is_dir():
+            raise ValueError(f"ASR publication directory does not exist: {target.parent}")
+        if target.exists() and not target.is_file():
+            raise ValueError(f"ASR publication target must be a file: {target}")
+
+    replace_file = replace or (lambda source, destination: os.replace(source, destination))
+    targets = [
+        _PublicationTarget(artifact_path, artifact_bytes, artifact_path.exists()),
+        _PublicationTarget(baseline_path, baseline_bytes, baseline_path.exists()),
+    ]
+    rollback_errors: list[OSError] = []
+    try:
+        for publication in targets:
+            publication.temporary = _write_publication_temporary(
+                publication.target, publication.contents
+            )
+        for publication in targets:
+            if publication.existed:
+                publication.backup = _reserve_publication_backup(publication.target)
+        for publication in targets:
+            if publication.backup is not None:
+                replace_file(publication.target, publication.backup)
+                publication.backup_contains_original = True
+        for publication in targets:
+            assert publication.temporary is not None
+            replace_file(publication.temporary, publication.target)
+            publication.temporary = None
+            publication.published = True
+    except BaseException as error:
+        for publication in reversed(targets):
+            try:
+                if publication.backup_contains_original:
+                    assert publication.backup is not None
+                    replace_file(publication.backup, publication.target)
+                    publication.backup_contains_original = False
+                elif not publication.existed and publication.published:
+                    _remove_owned_publication_file(publication.target)
+            except OSError as rollback_error:
+                rollback_errors.append(rollback_error)
+        if rollback_errors:
+            raise RuntimeError("ASR benchmark publication rollback failed") from error
+        raise
+    else:
+        for publication in targets:
+            _remove_owned_publication_file(publication.backup)
+            publication.backup = None
+    finally:
+        for publication in targets:
+            _remove_owned_publication_file(publication.temporary)
+            if not publication.backup_contains_original:
+                _remove_owned_publication_file(publication.backup)
 
 
 def update_asr_baseline(baseline_path: Path, artifact_path: Path) -> None:
