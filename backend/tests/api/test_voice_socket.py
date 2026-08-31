@@ -90,7 +90,7 @@ def test_healthz_contains_only_public_status():
     assert "qwen" not in serialized
 
 
-@pytest.mark.parametrize("query", ["", "?token=wrong"])
+@pytest.mark.parametrize("query", ["", "?token=wrong", "?token=中文"])
 def test_missing_or_wrong_token_closes_4401(query: str):
     client, factory = _client()
 
@@ -265,3 +265,5 @@ async def test_writer_failure_while_full_shutdown_cannot_block_slot_release():
     socket.release.set()
 
     await asyncio.wait_for(closing, timeout=0.1)
+    assert writer._queue.empty()
+    await asyncio.wait_for(writer._queue.join(), timeout=0.1)

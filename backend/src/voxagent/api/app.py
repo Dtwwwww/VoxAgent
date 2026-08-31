@@ -88,6 +88,13 @@ class _SocketWriter:
             pass
         except Exception:
             pass
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._queue.task_done()
 
 
 def _public_voices(orchestrator: Orchestrator) -> VoicesAvailable:
@@ -121,6 +128,7 @@ async def _forward_outputs(
 
 def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) -> FastAPI:
     expected_token = _validate_session_token(session_token)
+    expected_token_bytes = expected_token.encode("ascii")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     slot_lock = asyncio.Lock()
     session_active = False
@@ -133,7 +141,13 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
     async def voice_socket(socket: WebSocket) -> None:
         nonlocal session_active
         candidate = socket.query_params.get("token", "")
-        if not hmac.compare_digest(candidate, expected_token):
+        try:
+            candidate_bytes = candidate.encode("ascii")
+        except UnicodeEncodeError:
+            authenticated = False
+        else:
+            authenticated = hmac.compare_digest(candidate_bytes, expected_token_bytes)
+        if not authenticated:
             await socket.close(code=4401)
             return
         async with slot_lock:
