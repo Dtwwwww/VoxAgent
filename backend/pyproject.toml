@@ -4,12 +4,14 @@ version = "0.1.0"
 description = "Local-first Windows voice companion"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "numpy>=2.0,<3",
-  "pydantic>=2.10,<3",
+  "pydantic>=2.11,<3",
   "psutil>=6.1,<8",
   "soundfile>=0.13,<1",
   "typer>=0.15,<1",
+  "uvicorn[standard]>=0.35,<1",
 ]
 
 [project.optional-dependencies]
