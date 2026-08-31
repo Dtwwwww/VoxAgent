@@ -88,15 +88,22 @@ class ServerMessage(Message):
 class InputAudioFormat(Message):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    encoding: Literal[INPUT_AUDIO_ENCODING] = INPUT_AUDIO_ENCODING
-    sample_rate: Literal[INPUT_AUDIO_SAMPLE_RATE] = INPUT_AUDIO_SAMPLE_RATE
-    channels: Literal[INPUT_AUDIO_CHANNELS] = INPUT_AUDIO_CHANNELS
-    frame_duration_ms: Literal[INPUT_AUDIO_FRAME_DURATION_MS] = INPUT_AUDIO_FRAME_DURATION_MS
-    frame_samples: Literal[INPUT_AUDIO_FRAME_SAMPLES] = INPUT_AUDIO_FRAME_SAMPLES
-    frame_bytes: Literal[INPUT_AUDIO_FRAME_BYTES] = INPUT_AUDIO_FRAME_BYTES
+    encoding: Literal[INPUT_AUDIO_ENCODING]
+    sample_rate: Literal[INPUT_AUDIO_SAMPLE_RATE]
+    channels: Literal[INPUT_AUDIO_CHANNELS]
+    frame_duration_ms: Literal[INPUT_AUDIO_FRAME_DURATION_MS]
+    frame_samples: Literal[INPUT_AUDIO_FRAME_SAMPLES]
+    frame_bytes: Literal[INPUT_AUDIO_FRAME_BYTES]
 
 
-INPUT_AUDIO_FORMAT = InputAudioFormat()
+INPUT_AUDIO_FORMAT = InputAudioFormat(
+    encoding=INPUT_AUDIO_ENCODING,
+    sample_rate=INPUT_AUDIO_SAMPLE_RATE,
+    channels=INPUT_AUDIO_CHANNELS,
+    frame_duration_ms=INPUT_AUDIO_FRAME_DURATION_MS,
+    frame_samples=INPUT_AUDIO_FRAME_SAMPLES,
+    frame_bytes=INPUT_AUDIO_FRAME_BYTES,
+)
 
 
 class SessionReady(ServerMessage):

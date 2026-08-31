@@ -53,3 +53,24 @@ def test_session_ready_publishes_fixed_microphone_contract_and_validates_frames(
     tts_chunk = next(message for message in messages if message.type == "tts.chunk")
     assert preview_chunk.sample_rate == 24000
     assert tts_chunk.sample_rate == 24000
+
+
+def test_input_audio_contract_rejects_empty_and_partial_wire_objects():
+    fixtures = json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))
+    incomplete_contracts = [
+        payload["input_audio"]
+        for payload in fixtures["invalid_server"]
+        if payload.get("type") == "session.ready" and "input_audio" in payload
+    ]
+
+    assert incomplete_contracts == [{}, {"encoding": "pcm_s16le"}]
+    for input_audio in incomplete_contracts:
+        payload = {
+            "type": "session.ready",
+            "session_id": "00000000-0000-4000-8000-000000000001",
+            "model_id": "qwen2.5:7b",
+            "offline": True,
+            "input_audio": input_audio,
+        }
+        with pytest.raises(ValidationError):
+            parse_server_message(payload)

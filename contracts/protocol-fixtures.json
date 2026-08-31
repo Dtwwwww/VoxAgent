@@ -35,6 +35,8 @@
   "invalid_server": [
     {"type": "unknown.event"},
     {"type": "session.ready", "session_id": "00000000-0000-4000-8000-000000000001", "model_id": "qwen2.5:7b", "offline": true},
+    {"type": "session.ready", "session_id": "00000000-0000-4000-8000-000000000001", "model_id": "qwen2.5:7b", "offline": true, "input_audio": {}},
+    {"type": "session.ready", "session_id": "00000000-0000-4000-8000-000000000001", "model_id": "qwen2.5:7b", "offline": true, "input_audio": {"encoding": "pcm_s16le"}},
     {"type": "session.ready", "session_id": "00000000-0000-4000-8000-000000000001", "model_id": "qwen2.5:7b", "offline": true, "model_path": "D:/private"},
     {"type": "voices.available", "voices": [{"voice_key": "clear_female", "display_name": "Clear female", "description": "Clear Mandarin voice", "gender": "female", "is_default": true, "previewable": true, "native_voice_id": 3}]},
     {"type": "vad.started", "session_id": "00000000-0000-4000-8000-000000000001"},
