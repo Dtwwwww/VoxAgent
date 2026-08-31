@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from voxagent.api.app import _SocketWriter, create_app
+from voxagent.api.app import _forward_outputs, _SocketWriter, create_app
 from voxagent.conversation.events import ErrorMessage
 
 SESSION_TOKEN = base64.urlsafe_b64encode(b"x" * 32).decode("ascii").rstrip("=")
@@ -226,14 +226,14 @@ async def test_failed_writer_shutdown_never_enqueues_into_dead_queue():
             raise RuntimeError("send failed")
 
     writer = _SocketWriter(FailingSocket())
-    task = asyncio.create_task(writer.run())
-    await writer.send(
-        ErrorMessage(type="error", code="test", message="test", recoverable=True)
-    )
+    task = writer.start()
     with pytest.raises(RuntimeError, match="send failed"):
-        await task
+        await writer.send(
+            ErrorMessage(type="error", code="test", message="test", recoverable=True)
+        )
+    assert task.done()
 
-    await asyncio.wait_for(writer.close(task), timeout=0.1)
+    await asyncio.wait_for(writer.close(), timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -253,17 +253,47 @@ async def test_writer_failure_while_full_shutdown_cannot_block_slot_release():
 
     socket = BlockingFailSocket()
     writer = _SocketWriter(socket)
-    task = asyncio.create_task(writer.run())
+    writer.start()
     payload = ErrorMessage(type="error", code="test", message="test", recoverable=True)
     await writer.send(payload)
     await socket.entered.wait()
     for _ in range(32):
         await writer.send(payload)
 
-    closing = asyncio.create_task(writer.close(task))
+    closing = asyncio.create_task(writer.close())
     await asyncio.sleep(0)
     socket.release.set()
 
     await asyncio.wait_for(closing, timeout=0.1)
+    assert writer._queue.empty()
+    await asyncio.wait_for(writer._queue.join(), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_failed_writer_wakes_producer_before_more_than_queue_capacity_hangs():
+    class FailingSocket:
+        async def send_json(self, _payload: object) -> None:
+            raise RuntimeError("first send failed")
+
+        async def send_bytes(self, _payload: bytes) -> None:
+            raise AssertionError("unexpected bytes")
+
+    async def many_outputs():
+        for index in range(40):
+            yield ErrorMessage(
+                type="error",
+                code=f"test-{index}",
+                message="test",
+                recoverable=True,
+            )
+
+    writer = _SocketWriter(FailingSocket())
+    writer.start()
+    try:
+        with pytest.raises(RuntimeError, match="first send failed"):
+            await asyncio.wait_for(_forward_outputs(many_outputs(), writer), timeout=0.1)
+    finally:
+        await writer.close()
+
     assert writer._queue.empty()
     await asyncio.wait_for(writer._queue.join(), timeout=0.1)

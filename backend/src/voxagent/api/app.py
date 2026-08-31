@@ -64,6 +64,13 @@ class _SocketWriter:
     def __init__(self, socket: WebSocket) -> None:
         self._socket = socket
         self._queue: asyncio.Queue[tuple[_Output, ...]] = asyncio.Queue(maxsize=32)
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> asyncio.Task[None]:
+        if self._task is not None:
+            raise RuntimeError("socket writer already started")
+        self._task = asyncio.create_task(self.run(), name="voice-socket-writer")
+        return self._task
 
     async def run(self) -> None:
         while True:
@@ -78,16 +85,47 @@ class _SocketWriter:
                 self._queue.task_done()
 
     async def send(self, *items: _Output) -> None:
-        await self._queue.put(tuple(items))
+        task = self._task
+        if task is None:
+            raise RuntimeError("socket writer has not started")
+        if task.done():
+            await self._raise_writer_result(task)
+        pending_put = asyncio.create_task(self._queue.put(tuple(items)))
+        try:
+            done, _ = await asyncio.wait(
+                (pending_put, task), return_when=asyncio.FIRST_COMPLETED
+            )
+        except BaseException:
+            pending_put.cancel()
+            await asyncio.gather(pending_put, return_exceptions=True)
+            raise
+        if task in done:
+            if not pending_put.done():
+                pending_put.cancel()
+                await asyncio.gather(pending_put, return_exceptions=True)
+            await self._raise_writer_result(task)
+        await pending_put
+        if task.done():
+            await self._raise_writer_result(task)
 
-    async def close(self, task: asyncio.Task[None]) -> None:
-        task.cancel()
+    @staticmethod
+    async def _raise_writer_result(task: asyncio.Task[None]) -> None:
         try:
             await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
+        except asyncio.CancelledError as error:
+            raise RuntimeError("socket writer stopped") from error
+        raise RuntimeError("socket writer stopped unexpectedly")
+
+    async def close(self) -> None:
+        task = self._task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         while True:
             try:
                 self._queue.get_nowait()
@@ -158,12 +196,11 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
 
         orchestrator: Orchestrator | None = None
         writer: _SocketWriter | None = None
-        writer_task: asyncio.Task[None] | None = None
         try:
             orchestrator = orchestrator_factory()
             await socket.accept()
             writer = _SocketWriter(socket)
-            writer_task = asyncio.create_task(writer.run(), name="voice-socket-writer")
+            writer.start()
             while True:
                 message = await socket.receive()
                 if message["type"] == "websocket.disconnect":
@@ -218,8 +255,8 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
                 except Exception:
                     pass
                 finally:
-                    if writer is not None and writer_task is not None:
-                        await writer.close(writer_task)
+                    if writer is not None:
+                        await writer.close()
             finally:
                 async with slot_lock:
                     session_active = False
