@@ -63,14 +63,12 @@ def _validate_session_token(token: str) -> str:
 class _SocketWriter:
     def __init__(self, socket: WebSocket) -> None:
         self._socket = socket
-        self._queue: asyncio.Queue[tuple[_Output, ...] | None] = asyncio.Queue(maxsize=32)
+        self._queue: asyncio.Queue[tuple[_Output, ...]] = asyncio.Queue(maxsize=32)
 
     async def run(self) -> None:
         while True:
             batch = await self._queue.get()
             try:
-                if batch is None:
-                    return
                 for item in batch:
                     if isinstance(item, bytes):
                         await self._socket.send_bytes(item)
@@ -83,10 +81,11 @@ class _SocketWriter:
         await self._queue.put(tuple(items))
 
     async def close(self, task: asyncio.Task[None]) -> None:
-        if not task.done():
-            await self._queue.put(None)
+        task.cancel()
         try:
             await task
+        except asyncio.CancelledError:
+            pass
         except Exception:
             pass
 

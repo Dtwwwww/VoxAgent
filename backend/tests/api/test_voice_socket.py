@@ -234,3 +234,34 @@ async def test_failed_writer_shutdown_never_enqueues_into_dead_queue():
         await task
 
     await asyncio.wait_for(writer.close(task), timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_writer_failure_while_full_shutdown_cannot_block_slot_release():
+    class BlockingFailSocket:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def send_json(self, _payload: object) -> None:
+            self.entered.set()
+            await self.release.wait()
+            raise RuntimeError("send failed after close started")
+
+        async def send_bytes(self, _payload: bytes) -> None:
+            raise AssertionError("unexpected bytes")
+
+    socket = BlockingFailSocket()
+    writer = _SocketWriter(socket)
+    task = asyncio.create_task(writer.run())
+    payload = ErrorMessage(type="error", code="test", message="test", recoverable=True)
+    await writer.send(payload)
+    await socket.entered.wait()
+    for _ in range(32):
+        await writer.send(payload)
+
+    closing = asyncio.create_task(writer.close(task))
+    await asyncio.sleep(0)
+    socket.release.set()
+
+    await asyncio.wait_for(closing, timeout=0.1)
