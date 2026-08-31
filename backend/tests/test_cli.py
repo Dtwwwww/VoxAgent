@@ -108,3 +108,21 @@ def test_benchmark_llm_disables_environment_proxy(monkeypatch, tmp_path):
     assert created_client["trust_env"] is False
     assert output.exists()
     assert json.loads(output.read_text(encoding="utf-8")) == {"model": "test-model", "runs": []}
+
+
+def test_benchmark_asr_rejects_an_unverified_fixture_before_model_loading(monkeypatch, tmp_path):
+    wav = tmp_path / "mandarin-command.wav"
+    wav.write_bytes(b"not a verified fixture")
+    output = tmp_path / "result.json"
+    loaded: list[object] = []
+    monkeypatch.setattr(cli, "SenseVoiceAsr", lambda *args: loaded.append(args))
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["benchmark-asr", "--wav", str(wav), "--output", str(output)],
+    )
+
+    assert result.exit_code != 0
+    assert "checksums.json" in result.stderr
+    assert loaded == []
+    assert not output.exists()

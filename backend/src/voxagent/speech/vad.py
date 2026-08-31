@@ -38,7 +38,7 @@ class VadEngine(Protocol):
         ...
 
 
-def _configure_windows_onnxruntime() -> None:
+def prepare_sherpa_onnx_runtime() -> None:
     """Ensure sherpa resolves the pinned ONNX Runtime instead of a System32 DLL."""
     if sys.platform != "win32":
         return
@@ -72,7 +72,7 @@ class SherpaVadEngine:
     """Small adapter that keeps sherpa-onnx out of the detector state machine."""
 
     def __init__(self, model_path: Path, sample_rate: int) -> None:
-        _configure_windows_onnxruntime()
+        prepare_sherpa_onnx_runtime()
         import sherpa_onnx
 
         config = sherpa_onnx.VadModelConfig(

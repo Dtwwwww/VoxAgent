@@ -301,6 +301,18 @@ foreach ($model in $models) {
     if (-not ([string]$model.ArchiveSha256 -match '^[0-9a-fA-F]{64}$')) {
         throw "Invalid ArchiveSha256 for $($model.Name)"
     }
+    $expectedArchiveBytes = $null
+    if ($model.PSObject.Properties.Name -contains 'ArchiveBytes') {
+        try {
+            $expectedArchiveBytes = [Int64]$model.ArchiveBytes
+        }
+        catch {
+            throw "Invalid ArchiveBytes for $($model.Name)"
+        }
+        if ($expectedArchiveBytes -lt 1) {
+            throw "Invalid ArchiveBytes for $($model.Name)"
+        }
+    }
     if (@($model.RequiredFiles).Count -eq 0) {
         throw "RequiredFiles must not be empty for $($model.Name)"
     }
@@ -341,9 +353,20 @@ foreach ($model in $models) {
         ((Get-ArchiveSha256 -Path $archive) -ne $expectedHash)) {
         Move-ToQuarantine -Root $modelRoot -Path $archive -Reason 'checksum'
     }
+    if ((Test-Path -LiteralPath $archive -PathType Leaf) -and
+        ($null -ne $expectedArchiveBytes) -and
+        ((Get-Item -LiteralPath $archive).Length -ne $expectedArchiveBytes)) {
+        Move-ToQuarantine -Root $modelRoot -Path $archive -Reason 'size'
+    }
 
     if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
         Copy-ArchiveSource -Source ([string]$model.Url) -Destination $partialArchive
+        if (($null -ne $expectedArchiveBytes) -and
+            ((Get-Item -LiteralPath $partialArchive).Length -ne $expectedArchiveBytes)) {
+            $actualArchiveBytes = (Get-Item -LiteralPath $partialArchive).Length
+            Move-ToQuarantine -Root $modelRoot -Path $partialArchive -Reason 'size'
+            throw "Archive size mismatch for $($model.Name): expected $expectedArchiveBytes, got $actualArchiveBytes"
+        }
         $downloadedHash = Get-ArchiveSha256 -Path $partialArchive
         if ($downloadedHash -ne $expectedHash) {
             Move-ToQuarantine -Root $modelRoot -Path $partialArchive -Reason 'download'

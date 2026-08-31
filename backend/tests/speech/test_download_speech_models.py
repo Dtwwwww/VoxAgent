@@ -515,8 +515,22 @@ def test_shared_manifest_is_the_only_speech_model_inventory():
     payload = json.loads(SHARED_MANIFEST.read_text(encoding="utf-8"))
     script = SCRIPT.read_text(encoding="utf-8-sig")
 
-    assert len(payload) == 4
+    assert len(payload) == 5
     assert all(len(model["ArchiveSha256"]) == 64 for model in payload)
+    assert payload[1] == {
+        "Name": "streaming-paraformer-bilingual-zh-en",
+        "Archive": "sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
+        "Url": (
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+            "sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2"
+        ),
+        "Directory": "sherpa-onnx-streaming-paraformer-bilingual-zh-en",
+        "Version": "2024-03-10",
+        "Source": "k2-fsa/sherpa-onnx release asr-models",
+        "ArchiveBytes": 1047319737,
+        "ArchiveSha256": "5462a1fce42693deae572af1e8c4687124b12aa85fe61ff4d3168bb5280e205f",
+        "RequiredFiles": ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"],
+    }
     assert payload[-1] == {
         "Name": "silero-vad",
         "Format": "file",
@@ -533,3 +547,24 @@ def test_shared_manifest_is_the_only_speech_model_inventory():
     }
     assert "models.json" in script
     assert "sensevoice-int8" not in script
+
+
+def test_archive_size_mismatch_is_rejected_before_publication(tmp_path):
+    source = tmp_path / "fixture.tar.bz2"
+    _make_archive(source, "fixture-model-v1", ("model.onnx",))
+    manifest = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest,
+        source=source,
+        archive_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        required_files=("model.onnx",),
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload[0]["ArchiveBytes"] = source.stat().st_size + 1
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _run_script(tmp_path / "data", manifest)
+
+    assert result.returncode != 0
+    assert "Archive size mismatch for fixture-model" in result.stderr
+    assert not (tmp_path / "data" / "models" / "speech" / "fixture-model-v1").exists()

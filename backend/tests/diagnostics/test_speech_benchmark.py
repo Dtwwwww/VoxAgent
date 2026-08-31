@@ -1,13 +1,22 @@
+import hashlib
 from dataclasses import FrozenInstanceError
 
+import numpy as np
 import pytest
 
-from voxagent.diagnostics.speech_benchmark import measure_call
+from voxagent.diagnostics.speech_benchmark import (
+    FixtureChecksumError,
+    measure_call,
+    run_asr_benchmark,
+    select_partial_asr_model,
+    update_asr_baseline,
+    validate_fixture_checksum,
+)
 from voxagent.speech.model_manifest import SPEECH_MODELS, SpeechModel
 
 
 def test_speech_manifest_has_unique_names_and_https_urls():
-    assert len({model.name for model in SPEECH_MODELS}) == 4
+    assert len({model.name for model in SPEECH_MODELS}) == 5
     assert all(model.url.startswith("https://github.com/k2-fsa/") for model in SPEECH_MODELS)
 
 
@@ -26,6 +35,21 @@ def test_speech_manifest_has_exact_immutable_slotted_models():
             source="k2-fsa/sherpa-onnx release asr-models",
             archive_sha256="7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
             required_files=("model.int8.onnx", "tokens.txt"),
+        ),
+        SpeechModel(
+            name="streaming-paraformer-bilingual-zh-en",
+            format="archive",
+            archive_name="sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
+            url=(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+                "sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2"
+            ),
+            directory_name="sherpa-onnx-streaming-paraformer-bilingual-zh-en",
+            version="2024-03-10",
+            source="k2-fsa/sherpa-onnx release asr-models",
+            archive_sha256="5462a1fce42693deae572af1e8c4687124b12aa85fe61ff4d3168bb5280e205f",
+            required_files=("encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"),
+            archive_size_bytes=1047319737,
         ),
         SpeechModel(
             name="kokoro-int8-zh-en",
@@ -87,3 +111,110 @@ def test_measure_call_records_elapsed_and_result(monkeypatch):
     assert timed.label == "tts"
     assert timed.elapsed_seconds == 0.25
     assert timed.result == 24000
+
+
+def test_benchmark_validates_checksum_before_reading_audio(tmp_path, monkeypatch):
+    wav = tmp_path / "mandarin-command.wav"
+    wav.write_bytes(b"test fixture bytes")
+    checksums = tmp_path / "checksums.json"
+    checksums.write_text('{"mandarin-command.wav": "' + "0" * 64 + '"}', encoding="utf-8")
+    monkeypatch.setattr(
+        "voxagent.diagnostics.speech_benchmark.soundfile.read",
+        lambda *args, **kwargs: pytest.fail("audio must not load before checksum validation"),
+    )
+
+    with pytest.raises(FixtureChecksumError, match="SHA-256"):
+        run_asr_benchmark(wav, checksums, final_asr=object())
+
+
+def test_benchmark_runs_one_warmup_and_five_measured_passes(tmp_path):
+    from voxagent.speech.asr import AsrResult
+
+    wav = tmp_path / "mandarin-command.wav"
+    wav.write_bytes(b"verified test fixture")
+    checksums = tmp_path / "checksums.json"
+    checksums.write_text(
+        '{"mandarin-command.wav": "' + hashlib.sha256(wav.read_bytes()).hexdigest() + '"}',
+        encoding="utf-8",
+    )
+
+    class FakeFinalAsr:
+        model_id = "sensevoice-int8"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def transcribe(self, samples, sample_rate):
+            self.calls += 1
+            return AsrResult(text="打开音乐", language="zh")
+
+    class FakePartialAsr:
+        model_id = "streaming-paraformer-bilingual-zh-en"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def reset(self):
+            return None
+
+        def accept(self, samples):
+            self.calls += 1
+            from voxagent.speech.asr import PartialAsrResult
+
+            return PartialAsrResult(text="打开", updated=True)
+
+    final = FakeFinalAsr()
+    partial = FakePartialAsr()
+    report = run_asr_benchmark(
+        wav,
+        checksums,
+        final_asr=final,
+        partial_asr=partial,
+        read_wav=lambda _: (np.zeros(640, dtype=np.float32), 16000),
+        peak_rss_bytes=lambda: 1234,
+    )
+
+    assert final.calls == 6
+    assert partial.calls == 12
+    assert report["run_count"] == 5
+    assert report["transcript"] == "打开音乐"
+    assert report["audio_duration_seconds"] == 0.04
+    assert report["peak_process_rss_bytes"] == 1234
+    assert report["model_id"] == "sensevoice-int8"
+    assert report["partial_model_id"] == "streaming-paraformer-bilingual-zh-en"
+    assert report["latency_seconds"]["partial_update_p95"] is not None
+
+
+def test_partial_selection_uses_sensevoice_only_when_p95_is_at_most_300ms():
+    assert select_partial_asr_model(0.3) == "sensevoice-int8"
+    assert select_partial_asr_model(0.301) == "streaming-paraformer-bilingual-zh-en"
+
+
+def test_fixture_checksum_requires_named_user_fixture(tmp_path):
+    checksums = tmp_path / "checksums.json"
+    checksums.write_text("{}", encoding="utf-8")
+    wav = tmp_path / "wrong.wav"
+    wav.write_bytes(b"fixture")
+
+    with pytest.raises(FixtureChecksumError, match="mandarin-command.wav"):
+        validate_fixture_checksum(wav, checksums)
+
+
+def test_baseline_update_copies_the_measured_asr_artifact_metadata(tmp_path):
+    baseline = tmp_path / "benchmarks" / "target-machine-baseline.json"
+    baseline.parent.mkdir()
+    baseline.write_text('{"asr_candidates": []}', encoding="utf-8")
+    artifact = baseline.parent / "sensevoice-int8.json"
+    artifact.write_text(
+        '{"model_id": "sensevoice-int8", "run_count": 5, "transcript": "打开音乐"}',
+        encoding="utf-8",
+    )
+
+    update_asr_baseline(baseline, artifact)
+
+    candidate = __import__("json").loads(baseline.read_text(encoding="utf-8"))["asr_candidates"][0]
+    assert candidate["model_id"] == "sensevoice-int8"
+    assert candidate["artifact_path"] == "benchmarks/sensevoice-int8.json"
+    assert candidate["run_count"] == 5
+    assert candidate["transcript"] == "打开音乐"
+    assert len(candidate["artifact_sha256"]) == 64

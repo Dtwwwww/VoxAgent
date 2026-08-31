@@ -14,6 +14,7 @@ class SpeechModel:
     source: str
     archive_sha256: str
     required_files: tuple[str, ...]
+    archive_size_bytes: int | None = None
 
 
 def _load_models() -> tuple[SpeechModel, ...]:
@@ -30,6 +31,7 @@ def _load_models() -> tuple[SpeechModel, ...]:
             source=item["Source"],
             archive_sha256=item["ArchiveSha256"],
             required_files=tuple(item["RequiredFiles"]),
+            archive_size_bytes=item.get("ArchiveBytes"),
         )
         for item in payload
     )

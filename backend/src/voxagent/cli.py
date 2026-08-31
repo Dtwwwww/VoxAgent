@@ -13,7 +13,20 @@ from voxagent.diagnostics.hardware import collect_hardware, evaluate_preflight
 from voxagent.diagnostics.llm_benchmark import LLM_BENCHMARK_PROMPTS, run_llm_benchmark
 from voxagent.diagnostics.ollama_runtime import verify_ollama_runtime
 from voxagent.diagnostics.resource_probe import ProbeConfig, run_resource_probe
+from voxagent.diagnostics.speech_benchmark import (
+    FixtureChecksumError,
+    run_asr_benchmark,
+    select_partial_asr_model,
+    update_asr_baseline,
+    validate_fixture_checksum,
+)
 from voxagent.llm.ollama import OllamaClient
+from voxagent.speech.asr import (
+    SenseVoiceAsr,
+    SenseVoiceCandidatePauseAsr,
+    StreamingParaformerAsr,
+)
+from voxagent.speech.model_manifest import SPEECH_MODELS
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -67,6 +80,56 @@ def benchmark_llm(
     output.write_text(
         json.dumps(asyncio.run(execute()), ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+def _speech_model_directory(data_root: Path, model_name: str) -> Path:
+    model = next(item for item in SPEECH_MODELS if item.name == model_name)
+    return (data_root / "models" / "speech" / model.directory_name).resolve()
+
+
+@app.command("benchmark-asr")
+def benchmark_asr(
+    wav: Annotated[Path, typer.Option("--wav", dir_okay=False)],
+    output: Annotated[Path, typer.Option("--output", dir_okay=False)],
+    data_root: Annotated[Path | None, typer.Option("--data-root", dir_okay=True)] = None,
+    baseline: Annotated[Path, typer.Option("--baseline", dir_okay=False)] = Path(
+        "benchmarks/target-machine-baseline.json"
+    ),
+) -> None:
+    wav = wav.resolve()
+    try:
+        validate_fixture_checksum(wav, wav.parent / "checksums.json")
+    except FixtureChecksumError as error:
+        raise typer.BadParameter(str(error), param_hint="--wav") from error
+    root = resolve_data_root(data_root)
+    final_asr = SenseVoiceAsr.from_model_dir(_speech_model_directory(root, "sensevoice-int8"))
+    candidate_report = run_asr_benchmark(
+        wav,
+        wav.parent / "checksums.json",
+        final_asr=final_asr,
+        partial_asr=SenseVoiceCandidatePauseAsr(final_asr),
+    )
+    candidate_p95 = candidate_report["latency_seconds"]["partial_update_p95"]
+    uses_sensevoice_partials = (
+        candidate_p95 is not None
+        and select_partial_asr_model(float(candidate_p95)) == "sensevoice-int8"
+    )
+    if uses_sensevoice_partials:
+        report = candidate_report
+    else:
+        partial_asr = StreamingParaformerAsr.from_model_dir(
+            _speech_model_directory(root, "streaming-paraformer-bilingual-zh-en")
+        )
+        report = run_asr_benchmark(
+            wav,
+            wav.parent / "checksums.json",
+            final_asr=final_asr,
+            partial_asr=partial_asr,
+        )
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    update_asr_baseline(baseline, output)
 
 
 @app.command("validate-baseline")
