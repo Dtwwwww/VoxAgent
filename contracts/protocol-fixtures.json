@@ -19,7 +19,7 @@
     {"type": "voice.select", "voice_key": "clear_female", "speed": 1.5}
   ],
   "valid_server": [
-    {"type": "session.ready", "session_id": "00000000-0000-4000-8000-000000000001", "model_id": "qwen2.5:7b", "offline": true},
+    {"type": "session.ready", "session_id": "00000000-0000-4000-8000-000000000001", "model_id": "qwen2.5:7b", "offline": true, "input_audio": {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1, "frame_duration_ms": 20, "frame_samples": 320, "frame_bytes": 640}},
     {"type": "voices.available", "voices": [{"voice_key": "clear_female", "display_name": "Clear female", "description": "Clear Mandarin voice", "gender": "female", "is_default": true, "previewable": true}]},
     {"type": "voice.selected", "voice_key": "clear_female", "speed": 1.0},
     {"type": "voice.preview.chunk", "preview_id": 1, "sample_rate": 24000, "mime_type": "audio/wav", "byte_length": 128},
@@ -34,6 +34,7 @@
   ],
   "invalid_server": [
     {"type": "unknown.event"},
+    {"type": "session.ready", "session_id": "00000000-0000-4000-8000-000000000001", "model_id": "qwen2.5:7b", "offline": true},
     {"type": "session.ready", "session_id": "00000000-0000-4000-8000-000000000001", "model_id": "qwen2.5:7b", "offline": true, "model_path": "D:/private"},
     {"type": "voices.available", "voices": [{"voice_key": "clear_female", "display_name": "Clear female", "description": "Clear Mandarin voice", "gender": "female", "is_default": true, "previewable": true, "native_voice_id": 3}]},
     {"type": "vad.started", "session_id": "00000000-0000-4000-8000-000000000001"},

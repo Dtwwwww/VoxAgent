@@ -186,7 +186,13 @@ Plan 2 只保留当前 WebSocket 会话内的有界历史。会话停止、连�
 ## 音频和停顿行为
 
 - 浏览器只在用户点击麦克风后申请权限。
-- 传输格式固定为 16 kHz、单声道、PCM16、20 ms 帧。
+- 浏览器上行麦克风传输固定为 signed little-endian PCM16（`pcm_s16le`）、单声道、
+  16 kHz、20 ms；每帧恰为 320 samples / 640 bytes。该格式由 `session.ready` 的
+  `input_audio` 公共合同声明；无头 raw bytes 不携带端序或声道头信息，服务端仅按此
+  固定解释并验证帧长度。
+- 服务端下行 TTS 与试听继续发送 `audio/wav`；其采样率保持引擎原生值（例如 Kokoro
+  24 kHz、Melo 44.1 kHz），并由每个 `tts.chunk` 或 `voice.preview.chunk` 的
+  `sample_rate` 元数据声明，不强制重采样为 16 kHz。
 - 停顿档位为 `fast=0.8s`、`natural=1.35s`、`patient=2.0s`，默认 `natural`。
 - 普通话未完整结尾和填充词在自然档延长至 2.0 秒。
 - 不以 0.9 秒作为默认停顿阈值。

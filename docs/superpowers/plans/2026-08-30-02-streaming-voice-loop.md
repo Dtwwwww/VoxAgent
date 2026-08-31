@@ -4,7 +4,7 @@
 
 **Goal:** Deliver a local Web client where text and continuous Mandarin voice share one conversation, local Qwen replies stream into an interruptible selected voice, and Agent/user messages remain visually distinct.
 
-**Architecture:** FastAPI exposes one authenticated WebSocket for typed events and 16 kHz mono PCM frames. A session-scoped conversation orchestrator coordinates text submission, VAD, adaptive endpointing, SenseVoice ASR, bounded shared history, Ollama streaming, sentence chunking, a server-owned voice catalog, and sherpa-onnx TTS. Every conversation turn and preview has an independent cancellation identity so new text, speech, or preview work atomically stops stale generation and browser audio.
+**Architecture:** FastAPI exposes one authenticated WebSocket for typed events and fixed 16 kHz mono microphone PCM frames. A session-scoped conversation orchestrator coordinates text submission, VAD, adaptive endpointing, SenseVoice ASR, bounded shared history, Ollama streaming, sentence chunking, a server-owned voice catalog, and sherpa-onnx TTS. Every conversation turn and preview has an independent cancellation identity so new text, speech, or preview work atomically stops stale generation and browser audio. TTS and preview WAV output retain each engine's native sample rate, declared in event metadata.
 
 **Tech Stack:** Python 3.12, FastAPI, Uvicorn, Pydantic, sherpa-onnx, sounddevice, httpx, React 19.2.8, TypeScript 7.0.2, Vite 8.2.2, Vitest 4.1.11, Web Audio API, native WebSocket.
 
@@ -13,7 +13,8 @@
 - Complete Plan 01 first and use its selected LLM and verified speech-model folders.
 - Frontend tooling requires Node.js 20.19+ or 22.12+; the target machine already has Node.js 24.11.1.
 - Localhost is the only bind address; no cloud API is called.
-- Audio transport is signed little-endian PCM16, mono, 16 kHz, 20 ms frames.
+- Browser microphone transport is signed little-endian PCM16 (`pcm_s16le`), mono, 16 kHz, fixed 20 ms frames: 320 samples / 640 bytes. `session.ready.input_audio` publishes this contract; raw bytes have no header, so validation checks the fixed frame length rather than attempting to detect endianness or channel count.
+- Server-to-browser TTS and preview transport is `audio/wav` at the engine's native positive sample rate (for example, Kokoro 24 kHz or Melo 44.1 kHz), declared by each `tts.chunk` or `voice.preview.chunk`; it is not resampled to 16 kHz.
 - Raw audio exists only in bounded session memory and is released immediately after final recognition or its bounded retry completes.
 - The renderer must require a click before microphone capture and display recording state continuously.
 - Endpoint profiles are `fast=0.8s`, `natural=1.35s`, and `patient=2.0s`; `natural` is the default.
@@ -90,9 +91,9 @@ frontend/
 
 **Interfaces:**
 - Client JSON: `session.start`, `text.submit`, `assistant.speak`, `voice.select`, `voice.preview`, `turn.cancel`, `audio.commit`, `session.stop`
-- Client binary: raw PCM16 audio frame
+- Client binary: raw fixed-size 640-byte `pcm_s16le`, mono, 16 kHz, 20 ms microphone frame
 - Server JSON: `session.ready`, `voices.available`, `voice.selected`, `voice.preview.chunk`, `vad.started`, `vad.stopped`, `asr.final`, `assistant.delta`, `assistant.done`, `tts.chunk`, `turn.cancelled`, `error`
-- Server binary: WAV bytes referenced by the immediately preceding `tts.chunk` or `voice.preview.chunk`
+- Server binary: WAV bytes at the immediately preceding `tts.chunk` or `voice.preview.chunk` native `sample_rate`
 - Produces: `TurnState(session_id: UUID).begin_user_speech()`, `begin_reply()`, `cancel_active_turn()`
 
 - [ ] **Step 1: Write state-transition tests**
@@ -173,7 +174,7 @@ class TurnCancel(ClientMessage):
     type: Literal["turn.cancel"]
 ```
 
-`text.submit` strips surrounding whitespace and rejects zero or more than 4000 Unicode code points. `session.ready` contains only `session_id`, public `model_id`, and `offline=true`. `voices.available` exposes only `voice_key`, `display_name`, `description`, `gender`, `is_default`, and `previewable`. `voice.preview.chunk` uses `preview_id` rather than `turn_id` and contains `sample_rate`, `mime_type="audio/wav"`, and `byte_length`. Reject unknown or extra JSON fields.
+`text.submit` strips surrounding whitespace and rejects zero or more than 4000 Unicode code points. `session.ready` contains only `session_id`, public `model_id`, `offline=true`, and the public fixed `input_audio` contract (`pcm_s16le`, 16 kHz, mono, 20 ms, 320 samples / 640 bytes); it exposes neither paths nor tokens. `voices.available` exposes only `voice_key`, `display_name`, `description`, `gender`, `is_default`, and `previewable`. `voice.preview.chunk` uses `preview_id` rather than `turn_id` and contains `sample_rate`, `mime_type="audio/wav"`, and `byte_length`. Reject unknown or extra JSON fields.
 
 Write one root fixture file with arrays named `valid_client`, `invalid_client`, `valid_server`, and `invalid_server`. Include at least one object for every JSON event type plus unknown-type, extra-field, missing-ID, 4001-character text, unsupported-speed, and private-voice-field failures. Python tests parse every array now; Task 7 imports the same JSON file in Vitest.
 
@@ -535,7 +536,7 @@ Mock `getUserMedia`, `AudioContext`, `localStorage`, and WebSocket. Assert `conn
 
 - [ ] **Step 4: Implement PCM capture and queued WAV playback**
 
-Capture with `AudioWorkletNode`, downsample to 16 kHz, packetize exactly 320 samples per frame, and send only when the socket is open. Playback reads each `tts.chunk` or `voice.preview.chunk` metadata event followed by one binary WAV payload. Queue conversation audio by sequence and tag its source node with `turn_id`; tag preview audio with `preview_id` and replace any older preview source.
+Capture with `AudioWorkletNode`, downsample to 16 kHz, packetize exactly 320 signed little-endian PCM16 mono samples (640 bytes) per frame, and send only when the socket is open. Playback reads each `tts.chunk` or `voice.preview.chunk` metadata event followed by one binary WAV payload; preserve its declared native `sample_rate` rather than resampling it to 16 kHz. Queue conversation audio by sequence and tag its source node with `turn_id`; tag preview audio with `preview_id` and replace any older preview source.
 
 - [ ] **Step 5: Implement the unified session hook**
 

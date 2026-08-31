@@ -5,6 +5,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
+INPUT_AUDIO_ENCODING = "pcm_s16le"
+INPUT_AUDIO_SAMPLE_RATE = 16000
+INPUT_AUDIO_CHANNELS = 1
+INPUT_AUDIO_FRAME_DURATION_MS = 20
+INPUT_AUDIO_FRAME_SAMPLES = 320
+INPUT_AUDIO_FRAME_BYTES = 640
+
 
 class Message(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -78,11 +85,26 @@ class ServerMessage(Message):
     type: str
 
 
+class InputAudioFormat(Message):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    encoding: Literal[INPUT_AUDIO_ENCODING] = INPUT_AUDIO_ENCODING
+    sample_rate: Literal[INPUT_AUDIO_SAMPLE_RATE] = INPUT_AUDIO_SAMPLE_RATE
+    channels: Literal[INPUT_AUDIO_CHANNELS] = INPUT_AUDIO_CHANNELS
+    frame_duration_ms: Literal[INPUT_AUDIO_FRAME_DURATION_MS] = INPUT_AUDIO_FRAME_DURATION_MS
+    frame_samples: Literal[INPUT_AUDIO_FRAME_SAMPLES] = INPUT_AUDIO_FRAME_SAMPLES
+    frame_bytes: Literal[INPUT_AUDIO_FRAME_BYTES] = INPUT_AUDIO_FRAME_BYTES
+
+
+INPUT_AUDIO_FORMAT = InputAudioFormat()
+
+
 class SessionReady(ServerMessage):
     type: Literal["session.ready"]
     session_id: UUID
     model_id: str
     offline: Literal[True]
+    input_audio: InputAudioFormat
 
 
 class VoiceInfo(Message):
