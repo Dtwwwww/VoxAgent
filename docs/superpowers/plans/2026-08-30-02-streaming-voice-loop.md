@@ -198,11 +198,17 @@ Expected: Python tests pass and Ruff reports no errors.
 - Create: `backend/src/voxagent/speech/endpoint.py`
 - Create: `backend/tests/speech/test_vad.py`
 - Create: `backend/tests/speech/test_endpoint.py`
+- Modify: `backend/src/voxagent/speech/model_manifest.py`
+- Modify: `backend/src/voxagent/speech/models.json`
+- Modify: `scripts/download_speech_models.ps1`
+- Modify: `backend/tests/speech/test_download_speech_models.py`
 
 **Interfaces:**
 - Produces: `VadDetector.accept(frame: bytes) -> VadDecision`
+- Produces: `VadDetector.from_model_path(path: Path, sample_rate: int = 16000)`
 - Produces: `EndpointDetector.accept(decision, now_ms, partial_text) -> EndpointDecision`
 - Produces: `EndpointProfile` values `fast`, `natural`, `patient`
+- Installs: `D:\VoxAgentData\models\speech\silero-vad\silero_vad.onnx`
 
 - [ ] **Step 1: Write failing endpoint tests for the approved timing behavior**
 
@@ -234,20 +240,29 @@ Also test that at least 200 ms of voiced audio is required and that continuous s
 
 Use a frozen threshold mapping `{fast: 800, natural: 1350, patient: 2000}` milliseconds. Compile one anchored regular expression for filler/incomplete endings: `(?:嗯+|呃+|就是|然后|然后呢|那个|我觉得|因为|所以|但是|还有|的话)$`. Natural mode returns 2000 ms when that expression matches the normalized partial transcript; all other cases use the profile threshold.
 
-- [ ] **Step 3: Wrap sherpa-onnx Silero VAD**
+- [ ] **Step 3: Add the pinned single-file Silero VAD asset**
 
-The wrapper owns a 16 kHz VAD config, converts PCM16 to float32 in `[-1, 1]`, and returns `STARTED`, `SPEECH`, `STOPPED`, or `SILENCE`. Keep the sherpa object behind a `VadEngine` protocol so unit tests inject a deterministic fake.
+Add a manifest entry named `silero-vad` with `Format="file"`, filename `silero_vad.onnx`, directory `silero-vad`, URL `https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx`, and SHA-256 `9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6`. The official asset is 643854 bytes; SHA-256 remains the authoritative integrity check. The source is the official k2-fsa `asr-models` release and the model license is MIT.
 
-- [ ] **Step 4: Run tests and commit**
+Extend the downloader's manifest handling with `Format="archive"|"file"`; missing `Format` remains `archive` for existing test manifests. For a file asset, reuse the existing `.part`, SHA-256, containment, quarantine, marker, backup, and atomic-publish rules, but copy the verified file into the staged target directory instead of calling `tar.exe`. Add PowerShell integration tests using a local fake file URL that prove idempotent installation, checksum rejection, corrupt completed-target replacement, and that no file is published outside the selected model root.
+
+- [ ] **Step 4: Wrap sherpa-onnx Silero VAD**
+
+The wrapper requires the absolute `silero_vad.onnx` path and raises `ModelAssetError` naming that path when it is missing. Configure sherpa-onnx with sample rate 16000, one CPU thread, provider `cpu`, threshold `0.5`, minimum speech duration `0.2` seconds, and debug disabled. Convert each validated 640-byte PCM16 little-endian frame to exactly 320 float32 samples in `[-1, 1]`, and return `STARTED`, `SPEECH`, `STOPPED`, or `SILENCE`. Keep the sherpa object behind a `VadEngine` protocol so unit tests inject a deterministic fake and never load weights.
+
+- [ ] **Step 5: Install the asset, run tests, and commit**
 
 ```powershell
+& .\scripts\download_speech_models.ps1 -DataRoot 'D:\VoxAgentData'
 cd backend
-uv run pytest tests/speech/test_vad.py tests/speech/test_endpoint.py -v
+uv run pytest tests/speech/test_vad.py tests/speech/test_endpoint.py tests/speech/test_download_speech_models.py -v
 uv run ruff check src tests
 cd ..
-git add backend/src/voxagent/speech backend/tests/speech
+git add backend/src/voxagent/speech backend/tests/speech scripts/download_speech_models.ps1
 git commit -m "feat: add adaptive Mandarin endpointing"
 ```
+
+Expected: the script reports `Present: silero-vad` on its second run, the installed file hash matches the pinned SHA-256, focused tests pass, and Ruff reports no errors.
 
 ### Task 3: Offline ASR and measured speech baseline
 
