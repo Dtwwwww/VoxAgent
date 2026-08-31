@@ -10,10 +10,12 @@ from collections.abc import AsyncIterator, Callable
 from typing import Protocol
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
 from voxagent.api.protocol import parse_client_message, validate_audio_frame
 from voxagent.conversation.events import (
     INPUT_AUDIO_FORMAT,
+    ErrorMessage,
     SessionReady,
     TtsChunk,
     VoiceInfo,
@@ -80,8 +82,13 @@ class _SocketWriter:
     async def send(self, *items: _Output) -> None:
         await self._queue.put(tuple(items))
 
-    async def close(self) -> None:
-        await self._queue.put(None)
+    async def close(self, task: asyncio.Task[None]) -> None:
+        if not task.done():
+            await self._queue.put(None)
+        try:
+            await task
+        except Exception:
+            pass
 
 
 def _public_voices(orchestrator: Orchestrator) -> VoicesAvailable:
@@ -160,10 +167,22 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
                         await _forward_outputs(accept_audio(raw), writer)
                     continue
                 try:
-                    event = parse_client_message(json.loads(message.get("text") or ""))
-                except (json.JSONDecodeError, ValueError, TypeError):
+                    decoded = json.loads(message.get("text") or "")
+                except (json.JSONDecodeError, TypeError):
                     await socket.close(code=4400)
                     break
+                try:
+                    event = parse_client_message(decoded)
+                except (ValidationError, ValueError, TypeError):
+                    await writer.send(
+                        ErrorMessage(
+                            type="error",
+                            code="invalid_event",
+                            message="请求内容无效，请修改后重试",
+                            recoverable=True,
+                        )
+                    )
+                    continue
                 if event.type == "session.start":
                     ready = SessionReady(
                         type="session.ready",
@@ -179,12 +198,17 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
         except WebSocketDisconnect:
             pass
         finally:
-            if orchestrator is not None:
-                await orchestrator.stop()
-            if writer is not None and writer_task is not None:
-                await writer.close()
-                await writer_task
-            async with slot_lock:
-                session_active = False
+            try:
+                try:
+                    if orchestrator is not None:
+                        await orchestrator.stop()
+                except Exception:
+                    pass
+                finally:
+                    if writer is not None and writer_task is not None:
+                        await writer.close(writer_task)
+            finally:
+                async with slot_lock:
+                    session_active = False
 
     return app

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -8,7 +9,8 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from voxagent.api.app import create_app
+from voxagent.api.app import _SocketWriter, create_app
+from voxagent.conversation.events import ErrorMessage
 
 SESSION_TOKEN = base64.urlsafe_b64encode(b"x" * 32).decode("ascii").rstrip("=")
 
@@ -44,6 +46,19 @@ class Factory:
 
     def __call__(self) -> FakeOrchestrator:
         instance = FakeOrchestrator()
+        self.instances.append(instance)
+        return instance
+
+
+class FailingStopOrchestrator(FakeOrchestrator):
+    async def stop(self) -> None:
+        await super().stop()
+        raise RuntimeError("stop failed")
+
+
+class FailFirstStopFactory(Factory):
+    def __call__(self) -> FakeOrchestrator:
+        instance = FailingStopOrchestrator() if not self.instances else FakeOrchestrator()
         self.instances.append(instance)
         return instance
 
@@ -160,3 +175,62 @@ def test_invalid_binary_frame_closes_4400_and_releases_slot():
     assert factory.instances[0].stop_calls == 1
     with client.websocket_connect(url):
         pass
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "text.submit", "text": "   ", "speak_response": False},
+        {"type": "text.submit", "text": "字" * 4001, "speak_response": False},
+        {"type": "voice.select", "voice_key": "clear_female", "speed": 0.9},
+        {"type": "voice.preview", "voice_key": "clear_female", "speed": 0.9},
+    ],
+)
+def test_recoverable_validation_error_does_not_close_socket(payload: dict[str, object]):
+    client, _ = _client()
+    url = f"/v1/voice?token={SESSION_TOKEN}"
+
+    with client.websocket_connect(url) as socket:
+        socket.send_json(payload)
+        error = socket.receive_json()
+        socket.send_json({"type": "session.start"})
+        ready = socket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["code"] == "invalid_event"
+    assert error["recoverable"] is True
+    assert ready["type"] == "session.ready"
+
+
+def test_stop_exception_cannot_strand_single_session_slot():
+    factory = FailFirstStopFactory()
+    client, _ = _client(factory)
+    url = f"/v1/voice?token={SESSION_TOKEN}"
+
+    with client.websocket_connect(url):
+        pass
+    with client.websocket_connect(url) as replacement:
+        replacement.send_json({"type": "session.start"})
+        assert replacement.receive_json()["type"] == "session.ready"
+
+    assert len(factory.instances) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_writer_shutdown_never_enqueues_into_dead_queue():
+    class FailingSocket:
+        async def send_json(self, _payload: object) -> None:
+            raise RuntimeError("send failed")
+
+        async def send_bytes(self, _payload: bytes) -> None:
+            raise RuntimeError("send failed")
+
+    writer = _SocketWriter(FailingSocket())
+    task = asyncio.create_task(writer.run())
+    await writer.send(
+        ErrorMessage(type="error", code="test", message="test", recoverable=True)
+    )
+    with pytest.raises(RuntimeError, match="send failed"):
+        await task
+
+    await asyncio.wait_for(writer.close(task), timeout=0.1)
