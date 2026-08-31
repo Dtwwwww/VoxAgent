@@ -9,10 +9,13 @@ import pytest
 
 from voxagent.conversation.events import ErrorMessage
 from voxagent.conversation.history import SYSTEM_INSTRUCTION, ChatMessage
-from voxagent.conversation.orchestrator import ConversationOrchestrator
+from voxagent.conversation.orchestrator import (
+    MAX_UTTERANCE_FRAMES,
+    ConversationOrchestrator,
+)
 from voxagent.conversation.state import Phase
 from voxagent.speech.asr import AsrResult
-from voxagent.speech.endpoint import EndpointDecision
+from voxagent.speech.endpoint import EndpointDecision, EndpointDetector
 from voxagent.speech.tts import AudioChunk
 from voxagent.speech.vad import VadDecision
 from voxagent.speech.voice_catalog import VoiceCatalog, VoiceProfile
@@ -88,6 +91,29 @@ class FakePartialAsr:
     def accept(self, samples: np.ndarray) -> SimpleNamespace:
         assert samples.shape == (320,)
         return SimpleNamespace(text="我觉得那个", updated=True)
+
+
+class BlockingPartialAsr(FakePartialAsr):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self.running = False
+        self.reset_while_running = False
+
+    def reset(self) -> None:
+        if self.running:
+            self.reset_while_running = True
+        super().reset()
+
+    def accept(self, samples: np.ndarray) -> SimpleNamespace:
+        self.running = True
+        self.started.set()
+        try:
+            assert self.release.wait(timeout=2)
+            return SimpleNamespace(text="不应写回", updated=True)
+        finally:
+            self.running = False
 
 
 @dataclass
@@ -199,6 +225,7 @@ def make_orchestrator(
     asr_texts: list[str] | None = None,
     replies: list[list[str]] | None = None,
     tts: FakeTts | None = None,
+    max_utterance_frames: int = MAX_UTTERANCE_FRAMES,
 ) -> tuple[ConversationOrchestrator, FakeLlm, FakeTts]:
     llm = FakeLlm(replies or [["回答。"]])
     tts = tts or FakeTts()
@@ -211,6 +238,7 @@ def make_orchestrator(
         tts=tts,
         voice_catalog=catalog(),
         clock_ms=lambda: 1234,
+        max_utterance_frames=max_utterance_frames,
     )
     return orchestrator, llm, tts
 
@@ -685,6 +713,182 @@ async def test_more_than_queue_capacity_barge_ins_do_not_leave_terminal_batches(
         await generator.aclose()
     await asyncio.wait_for(orchestrator._outputs.join(), timeout=0.2)
     await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_vad_stopped_suppresses_direct_asr_final():
+    orchestrator, _, _ = make_orchestrator(
+        vad=FakeVad([VadDecision.STARTED, VadDecision.STOPPED]),
+        asr_texts=["旧语音"],
+        replies=[["旧回答"], ["新回答"]],
+    )
+    _ = [item async for item in orchestrator.accept_audio(FRAME)]
+    old = orchestrator.accept_audio(FRAME)
+    stopped = await anext(old)
+    assert stopped.type == "vad.stopped"
+
+    replacement = [item async for item in orchestrator.submit_text("文字接管", False)]
+    remaining_old = [item async for item in old]
+
+    assert replacement[0].type == "turn.cancelled"
+    assert all(getattr(item, "type", None) != "asr.final" for item in remaining_old)
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_between_old_turn_cancelled_and_new_vad_started_suppresses_start():
+    blocking_tts = FakeTts(block=True)
+    orchestrator, _, _ = make_orchestrator(
+        vad=FakeVad([VadDecision.STARTED]),
+        replies=[["旧回答。"], ["文字回答"]],
+        tts=blocking_tts,
+    )
+    old = orchestrator.submit_text("旧问题", True)
+    assert (await anext(old)).type == "assistant.delta"
+    await asyncio.to_thread(blocking_tts.started.wait, 1)
+    audio = orchestrator.accept_audio(FRAME)
+    first_audio = asyncio.create_task(anext(audio))
+    blocking_tts.release.set()
+    assert (await first_audio).type == "turn.cancelled"
+
+    _ = [item async for item in orchestrator.submit_text("文字接管", False)]
+    remaining_audio = [item async for item in audio]
+
+    assert all(getattr(item, "type", None) != "vad.started" for item in remaining_audio)
+    assert [item async for item in old] == []
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_is_terminal_before_or_after_task_group_start():
+    never_started, _, _ = make_orchestrator(vad=FakeVad([]))
+    await never_started.stop()
+    before_phase = never_started.state.phase
+    before_history = never_started.history.messages_for_model()
+
+    assert [item async for item in never_started.submit_text("不能提交", False)][0].code == (
+        "session_stopped"
+    )
+    assert [item async for item in never_started.submit_text("   ", False)][0].code == (
+        "session_stopped"
+    )
+    assert [item async for item in never_started.accept_audio(FRAME)][0].code == "session_stopped"
+    assert [item async for item in never_started.speak_message(1)][0].code == "session_stopped"
+    assert [item async for item in never_started.preview_voice("clear_female", 1.0)][0].code == (
+        "session_stopped"
+    )
+    assert [item async for item in never_started.preview_voice("missing", 0.9)][0].code == (
+        "session_stopped"
+    )
+    assert never_started.select_voice("steady_male", 1.2).code == "session_stopped"
+    assert await never_started.cancel_active() is None
+    assert never_started.state.phase is before_phase is Phase.STOPPED
+    assert never_started.history.messages_for_model() == before_history
+
+    started, _, _ = make_orchestrator(replies=[["完成"]])
+    _ = [item async for item in started.submit_text("问题", False)]
+    await started.stop()
+    assert [item async for item in started.submit_text("不能重启", False)][0].code == (
+        "session_stopped"
+    )
+    assert started.state.phase is Phase.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_vad_restart_before_endpoint_threshold_continues_same_turn_and_audio():
+    clock = iter([0, 500, 600, 2000])
+    asr = FakeAsr(["连续问题"])
+    llm = FakeLlm([["回答"]])
+    tts = FakeTts()
+    orchestrator = ConversationOrchestrator(
+        model_id="qwen-local",
+        vad=FakeVad(
+            [
+                VadDecision.STARTED,
+                VadDecision.STOPPED,
+                VadDecision.STARTED,
+                VadDecision.STOPPED,
+            ]
+        ),
+        endpoint=EndpointDetector("natural"),
+        asr=asr,
+        llm=llm,
+        tts=tts,
+        voice_catalog=catalog(),
+        clock_ms=lambda: next(clock),
+    )
+
+    outputs = await collect_audio_events(orchestrator, [FRAME, FRAME, FRAME, FRAME])
+
+    assert [item.type if hasattr(item, "type") else "binary" for item in outputs].count(
+        "vad.started"
+    ) == 1
+    assert "turn.cancelled" not in [getattr(item, "type", None) for item in outputs]
+    assert asr.calls[0][0].shape == (640,)
+    await orchestrator.stop()
+
+
+async def _start_blocked_partial(orchestrator, partial):
+    _ = [item async for item in orchestrator.accept_audio(FRAME)]
+    pending = asyncio.create_task(_collect(orchestrator.accept_audio(FRAME)))
+    await asyncio.to_thread(partial.started.wait, 1)
+    return pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("takeover", ["text", "voice", "stop"])
+async def test_partial_asr_is_awaited_before_reset_on_takeover(takeover):
+    decisions = [VadDecision.STARTED, VadDecision.SPEECH]
+    if takeover == "voice":
+        decisions.append(VadDecision.STARTED)
+    partial = BlockingPartialAsr()
+    orchestrator, _, _ = make_orchestrator(
+        vad=FakeVad(decisions), replies=[["回答"]]
+    )
+    orchestrator.partial_asr = partial
+    pending_partial = await _start_blocked_partial(orchestrator, partial)
+
+    if takeover == "text":
+        takeover_task = asyncio.create_task(_collect(orchestrator.submit_text("接管", False)))
+    elif takeover == "voice":
+        takeover_task = asyncio.create_task(_collect(orchestrator.accept_audio(FRAME)))
+    else:
+        takeover_task = asyncio.create_task(orchestrator.stop())
+    await asyncio.sleep(0.02)
+    assert not takeover_task.done()
+    partial.release.set()
+    await pending_partial
+    result = await takeover_task
+
+    assert partial.reset_while_running is False
+    assert orchestrator._partial_text != "不应写回"
+    if takeover != "stop":
+        assert result[0].type == "turn.cancelled"
+        await orchestrator.stop()
+    else:
+        assert orchestrator.state.phase is Phase.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_raw_audio_limit_errors_at_boundary_and_releases_frames():
+    orchestrator, _, _ = make_orchestrator(
+        vad=FakeVad([VadDecision.STARTED, VadDecision.SPEECH]),
+        max_utterance_frames=2,
+    )
+    first = [item async for item in orchestrator.accept_audio(FRAME)]
+    boundary = [item async for item in orchestrator.accept_audio(FRAME)]
+
+    assert first[0].type == "vad.started"
+    assert [item.type for item in boundary] == ["vad.stopped", "error"]
+    assert boundary[-1].code == "utterance_too_long"
+    assert boundary[-1].recoverable is True
+    assert orchestrator._audio_frames == []
+    assert orchestrator.state.phase is Phase.IDLE
+    await orchestrator.stop()
+
+
+def test_raw_audio_default_limit_is_120_seconds():
+    assert MAX_UTTERANCE_FRAMES == 6000
 
 
 async def _collect(iterator):

@@ -65,6 +65,11 @@ class TurnState:
             self._active = None
         self.phase = Phase.IDLE
 
+    def complete_turn(self, token: TurnToken) -> None:
+        self._require_active(token)
+        self._active = None
+        self.phase = Phase.IDLE
+
     def stop(self) -> None:
         self.cancel_active_turn()
         self.phase = Phase.STOPPED

@@ -31,3 +31,14 @@ def test_text_submission_cancels_active_reply_and_starts_thinking():
     assert voice_turn.cancelled.is_set()
     assert text_turn.turn_id == voice_turn.turn_id + 1
     assert state.phase is Phase.THINKING
+
+
+def test_completed_turn_becomes_idle_without_marking_token_cancelled():
+    state = TurnState()
+    token = state.begin_text_turn()
+
+    state.complete_turn(token)
+
+    assert state.active_turn is None
+    assert state.phase is Phase.IDLE
+    assert token.cancelled.is_set() is False

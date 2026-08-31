@@ -32,6 +32,7 @@ from voxagent.speech.vad import SAMPLE_RATE, VadDecision, VadDetector
 from voxagent.speech.voice_catalog import VoiceCatalog, VoiceCatalogError
 
 PREVIEW_TEXT = "你好，我是声灵，很高兴陪你一起聊天。"
+MAX_UTTERANCE_FRAMES = 6000
 Output = ServerMessage | bytes
 _Owner = tuple[str, int]
 _T = TypeVar("_T")
@@ -61,7 +62,12 @@ class ConversationOrchestrator:
         state: TurnState | None = None,
         history: ConversationHistory | None = None,
         clock_ms: Callable[[], int] | None = None,
+        max_utterance_frames: int = MAX_UTTERANCE_FRAMES,
     ) -> None:
+        if not 2 <= max_utterance_frames <= MAX_UTTERANCE_FRAMES:
+            raise ValueError(
+                f"max_utterance_frames must be between 2 and {MAX_UTTERANCE_FRAMES}"
+            )
         self.model_id = model_id
         self.vad = vad
         self.endpoint = endpoint
@@ -78,6 +84,10 @@ class ConversationOrchestrator:
         self._speed = 1.0
         self._audio_frames: list[bytes] = []
         self._partial_text = ""
+        self._waiting_silence = False
+        self._max_utterance_frames = max_utterance_frames
+        self._partial_task: asyncio.Task[object] | None = None
+        self._partial_token: TurnToken | None = None
 
         self._outputs: asyncio.Queue[_OutputBatch] = asyncio.Queue(maxsize=32)
         self._output_changed = asyncio.Condition()
@@ -94,53 +104,120 @@ class ConversationOrchestrator:
         self._stopped = False
 
     async def accept_audio(self, frame: bytes) -> AsyncIterator[Output]:
-        if self._stopped:
-            yield self._error("session_stopped", "会话已经结束")
+        async with self._action_lock:
+            stopped = self._stopped
+            decision = None if stopped else self.vad.accept(frame)
+        if stopped:
+            yield self._stopped_error()
             return
-        decision = self.vad.accept(frame)
+        assert decision is not None
         if decision is VadDecision.STARTED:
             async with self._action_lock:
-                cancelled = await self._cancel_conversation()
-                await self._cancel_preview()
-                token = self.state.begin_user_speech()
-                self._audio_frames = [frame]
-                self._partial_text = ""
-                if self.partial_asr is not None:
-                    self.partial_asr.reset()
-                self.endpoint.accept(decision, self._clock_ms(), self._partial_text)
-                self._active_token = token
-                self._active_task = None
-                self._active_has_pending_history = False
+                if self._stopped:
+                    stopped = True
+                    continuation = False
+                    cancelled = None
+                    token = None
+                    partial_task = None
+                    too_long = False
+                elif (
+                    self._active_token is not None
+                    and self.state.phase is Phase.LISTENING
+                    and self._waiting_silence
+                ):
+                    stopped = False
+                    continuation = True
+                    cancelled = None
+                    token = self._active_token
+                    self._waiting_silence = False
+                    self._audio_frames.append(frame)
+                    self.endpoint.accept(decision, self._clock_ms(), self._partial_text)
+                    too_long = len(self._audio_frames) >= self._max_utterance_frames
+                    partial_task = await self._start_partial_locked(token, frame)
+                else:
+                    stopped = False
+                    continuation = False
+                    cancelled = await self._cancel_conversation()
+                    await self._cancel_preview()
+                    token = self.state.begin_user_speech()
+                    self._audio_frames = [frame]
+                    self._partial_text = ""
+                    self._waiting_silence = False
+                    if self.partial_asr is not None:
+                        self.partial_asr.reset()
+                    self.endpoint.accept(decision, self._clock_ms(), self._partial_text)
+                    self._active_token = token
+                    self._active_task = None
+                    self._active_has_pending_history = False
+                    partial_task = None
+                    too_long = False
+            if stopped or token is None:
+                yield self._stopped_error()
+                return
+            if continuation:
+                if partial_task is not None and not await self._finish_partial(
+                    token, partial_task
+                ):
+                    return
+                if too_long:
+                    async for output in self._limit_utterance(token):
+                        yield output
+                return
             if cancelled is not None:
                 yield cancelled
+            if not self._owns_live_turn(token):
+                return
             yield VadStarted(
                 type="vad.started", session_id=token.session_id, turn_id=token.turn_id
             )
             return
 
-        token = self._active_token
-        if token is None or self.state.phase is not Phase.LISTENING:
+        async with self._action_lock:
+            if self._stopped:
+                stopped = True
+                token = None
+                partial_task = None
+                too_long = False
+                endpoint = EndpointDecision.CONTINUE
+            else:
+                stopped = False
+                token = self._active_token
+                if token is None or self.state.phase is not Phase.LISTENING:
+                    return
+                if decision is VadDecision.SPEECH:
+                    self._audio_frames.append(frame)
+                    too_long = len(self._audio_frames) >= self._max_utterance_frames
+                    partial_task = await self._start_partial_locked(token, frame)
+                else:
+                    too_long = False
+                    partial_task = None
+                endpoint = self.endpoint.accept(
+                    decision, self._clock_ms(), self._partial_text
+                )
+                self._waiting_silence = (
+                    decision in {VadDecision.STOPPED, VadDecision.SILENCE}
+                    and endpoint is EndpointDecision.CONTINUE
+                )
+        if stopped or token is None:
+            yield self._stopped_error()
             return
-        if decision is VadDecision.SPEECH:
-            self._audio_frames.append(frame)
-            if self.partial_asr is not None:
-                samples = self._frame_samples(frame)
-                partial = await self._await_sync(self.partial_asr.accept, samples)
-                self._partial_text = partial.text
-        endpoint = self.endpoint.accept(decision, self._clock_ms(), self._partial_text)
+        if partial_task is not None and not await self._finish_partial(token, partial_task):
+            return
+        if too_long:
+            async for output in self._limit_utterance(token):
+                yield output
+            return
         if endpoint is not EndpointDecision.COMMIT:
             return
 
         async with self._action_lock:
-            if self._active_token is not token or token.cancelled.is_set():
+            if not self._owns_live_turn(token):
                 return
             self.state.finish_user_speech(token)
             samples = self._all_samples()
             try:
                 result = await self._await_sync(self.asr.transcribe, samples, SAMPLE_RATE)
             except Exception:
-                self.state.cancel_active_turn()
-                self._active_token = None
                 yield_error = self._error(
                     "asr_failed", "语音识别失败，请重试或改用文字输入"
                 )
@@ -157,8 +234,6 @@ class ConversationOrchestrator:
             else:
                 text = result.text.strip()
                 if not text:
-                    self.state.cancel_active_turn()
-                    self._active_token = None
                     prefix = (
                         VadStopped(
                             type="vad.stopped",
@@ -185,10 +260,14 @@ class ConversationOrchestrator:
                         ),
                     )
         for item in prefix:
+            if not self._owns_live_turn(token):
+                return
             yield item
-        if self._active_token is not token:
-            return
         if len(prefix) < 2 or not isinstance(prefix[1], AsrFinal):
+            async with self._action_lock:
+                if self._owns_live_turn(token):
+                    self.state.complete_turn(token)
+                    self._active_token = None
             return
         async for output in self._drain(("turn", token.turn_id), token.cancelled):
             yield output
@@ -196,15 +275,27 @@ class ConversationOrchestrator:
 
     async def submit_text(self, text: str, speak_response: bool) -> AsyncIterator[Output]:
         normalized = text.strip()
-        if not normalized:
-            yield self._error("invalid_text", "文字内容不能为空")
-            return
         async with self._action_lock:
-            cancelled = await self._cancel_conversation()
-            await self._cancel_preview()
-            token = self.state.begin_text_turn()
-            self.history.add_user(token.turn_id, normalized, "text")
-            await self._start_reply(token, speak_response=speak_response, pending_history=True)
+            if self._stopped:
+                error = self._stopped_error()
+                cancelled = None
+                token = None
+            elif not normalized:
+                error = self._error("invalid_text", "文字内容不能为空")
+                cancelled = None
+                token = None
+            else:
+                error = None
+                cancelled = await self._cancel_conversation()
+                await self._cancel_preview()
+                token = self.state.begin_text_turn()
+                self.history.add_user(token.turn_id, normalized, "text")
+                await self._start_reply(
+                    token, speak_response=speak_response, pending_history=True
+                )
+        if error is not None or token is None:
+            yield error or self._stopped_error()
+            return
         if cancelled is not None:
             yield cancelled
         async for output in self._drain(("turn", token.turn_id), token.cancelled):
@@ -212,6 +303,8 @@ class ConversationOrchestrator:
         self._finish_active(token)
 
     def select_voice(self, voice_key: str, speed: float) -> VoiceSelected | ErrorMessage:
+        if self._stopped:
+            return self._stopped_error()
         error = self._validate_voice(voice_key, speed, require_previewable=False)
         if error is not None:
             return error
@@ -220,22 +313,36 @@ class ConversationOrchestrator:
         return VoiceSelected(type="voice.selected", voice_key=voice_key, speed=float(speed))
 
     async def speak_message(self, turn_id: int) -> AsyncIterator[Output]:
-        try:
-            text = self.history.assistant_text(turn_id)
-        except KeyError:
-            yield self._error("assistant_not_completed", "只能朗读当前会话中已完成的助手消息")
-            return
         async with self._action_lock:
-            cancelled = await self._cancel_conversation()
-            await self._cancel_preview()
-            token = TurnToken(self.state.session_id, turn_id)
-            await self._ensure_task_group()
-            self._active_token = token
-            self._active_has_pending_history = False
-            self.state.phase = Phase.SPEAKING
-            self._active_task = self._task_group.create_task(
-                self._speech_worker(token, text), name=f"replay-{turn_id}"
-            )
+            if self._stopped:
+                error = self._stopped_error()
+                token = None
+                cancelled = None
+            else:
+                try:
+                    text = self.history.assistant_text(turn_id)
+                except KeyError:
+                    error = self._error(
+                        "assistant_not_completed",
+                        "只能朗读当前会话中已完成的助手消息",
+                    )
+                    token = None
+                    cancelled = None
+                else:
+                    error = None
+                    cancelled = await self._cancel_conversation()
+                    await self._cancel_preview()
+                    token = TurnToken(self.state.session_id, turn_id)
+                    await self._ensure_task_group()
+                    self._active_token = token
+                    self._active_has_pending_history = False
+                    self.state.phase = Phase.SPEAKING
+                    self._active_task = self._task_group.create_task(
+                        self._speech_worker(token, text), name=f"replay-{turn_id}"
+                    )
+        if error is not None or token is None:
+            yield error or self._stopped_error()
+            return
         if cancelled is not None:
             yield cancelled
         async for output in self._drain(("turn", turn_id), token.cancelled):
@@ -243,25 +350,38 @@ class ConversationOrchestrator:
         self._finish_active(token)
 
     async def preview_voice(self, voice_key: str, speed: float) -> AsyncIterator[Output]:
-        error = self._validate_voice(voice_key, speed, require_previewable=True)
+        busy = False
+        async with self._action_lock:
+            if self._stopped:
+                stopped = True
+                error = None
+            else:
+                stopped = False
+                error = self._validate_voice(
+                    voice_key, speed, require_previewable=True
+                )
+                if error is None:
+                    if self._active_token is not None:
+                        busy = True
+                    else:
+                        await self._cancel_preview()
+                        await self._ensure_task_group()
+                        self._preview_id += 1
+                        preview_id = self._preview_id
+                        cancel = asyncio.Event()
+                        self._preview_cancel = cancel
+                        self._preview_task = self._task_group.create_task(
+                            self._preview_worker(
+                                preview_id, cancel, voice_key, float(speed)
+                            ),
+                            name=f"preview-{preview_id}",
+                        )
+        if stopped:
+            yield self._stopped_error()
+            return
         if error is not None:
             yield error
             return
-        busy = False
-        async with self._action_lock:
-            if self._active_token is not None:
-                busy = True
-            else:
-                await self._cancel_preview()
-                await self._ensure_task_group()
-                self._preview_id += 1
-                preview_id = self._preview_id
-                cancel = asyncio.Event()
-                self._preview_cancel = cancel
-                self._preview_task = self._task_group.create_task(
-                    self._preview_worker(preview_id, cancel, voice_key, float(speed)),
-                    name=f"preview-{preview_id}",
-                )
         if busy:
             yield self._error("conversation_busy", "正在回答或朗读，请稍后再试听")
             return
@@ -273,6 +393,8 @@ class ConversationOrchestrator:
 
     async def cancel_active(self) -> TurnCancelled | None:
         async with self._action_lock:
+            if self._stopped:
+                return None
             cancelled = await self._cancel_conversation()
             await self._cancel_preview()
             return cancelled
@@ -281,12 +403,15 @@ class ConversationOrchestrator:
         if self._stopped:
             return
         async with self._action_lock:
+            if self._stopped:
+                return
             await self._cancel_conversation()
             await self._cancel_preview()
             self.state.stop()
             self.history.clear()
             self._audio_frames.clear()
             self._partial_text = ""
+            self._waiting_silence = False
             self._stopped = True
             await self._clear_all_outputs()
         if self._task_group_entered:
@@ -451,6 +576,72 @@ class ConversationOrchestrator:
                 )
             )
 
+    async def _start_partial_locked(
+        self, token: TurnToken, frame: bytes
+    ) -> asyncio.Task[object] | None:
+        if self.partial_asr is None:
+            return None
+        await self._ensure_task_group()
+        samples = self._frame_samples(frame)
+        task = self._task_group.create_task(
+            self._await_sync(self.partial_asr.accept, samples),
+            name=f"partial-asr-{token.turn_id}",
+        )
+        self._partial_task = task
+        self._partial_token = token
+        return task
+
+    async def _finish_partial(
+        self, token: TurnToken, task: asyncio.Task[object]
+    ) -> bool:
+        try:
+            partial = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if token.cancelled.is_set() or self._stopped:
+                return False
+            raise
+        async with self._action_lock:
+            if self._partial_task is task:
+                self._partial_task = None
+                self._partial_token = None
+            if not self._owns_live_turn(token):
+                return False
+            self._partial_text = str(getattr(partial, "text", ""))
+            return True
+
+    async def _limit_utterance(self, token: TurnToken) -> AsyncIterator[Output]:
+        async with self._action_lock:
+            if not self._owns_live_turn(token):
+                return
+            self._audio_frames.clear()
+            self._partial_text = ""
+            prefix: tuple[Output, ...] = (
+                VadStopped(
+                    type="vad.stopped",
+                    session_id=token.session_id,
+                    turn_id=token.turn_id,
+                ),
+                self._error(
+                    "utterance_too_long",
+                    "单次语音已达到两分钟上限，请分成更短的问题重试",
+                ),
+            )
+        for item in prefix:
+            if not self._owns_live_turn(token):
+                return
+            yield item
+        async with self._action_lock:
+            if self._owns_live_turn(token):
+                self.state.complete_turn(token)
+                self._active_token = None
+
+    def _owns_live_turn(self, token: TurnToken) -> bool:
+        return (
+            not self._stopped
+            and not token.cancelled.is_set()
+            and self._active_token is token
+        )
+
     async def _cancel_conversation(self) -> TurnCancelled | None:
         task = self._active_task
         token = self._active_token
@@ -460,6 +651,16 @@ class ConversationOrchestrator:
             return None
         token.cancelled.set()
         self.state.cancel_active_turn()
+        partial_task = self._partial_task if self._partial_token is token else None
+        if partial_task is not None and not partial_task.done():
+            partial_task.cancel()
+            try:
+                await partial_task
+            except asyncio.CancelledError:
+                pass
+        if self._partial_task is partial_task:
+            self._partial_task = None
+            self._partial_token = None
         if task is not None and not task.done():
             task.cancel()
             try:
@@ -470,6 +671,7 @@ class ConversationOrchestrator:
             self.history.cancel_turn(token.turn_id)
         self._audio_frames.clear()
         self._partial_text = ""
+        self._waiting_silence = False
         if self.partial_asr is not None:
             self.partial_asr.reset()
         owner = ("turn", token.turn_id)
@@ -605,7 +807,10 @@ class ConversationOrchestrator:
             self._active_task = None
             self._active_token = None
             self._active_has_pending_history = False
-            self.state.cancel_active_turn()
+            if self.state.active_turn is token:
+                self.state.complete_turn(token)
+            else:
+                self.state.phase = Phase.IDLE
 
     def _validate_voice(
         self, voice_key: str, speed: float, *, require_previewable: bool
@@ -630,3 +835,7 @@ class ConversationOrchestrator:
     @staticmethod
     def _error(code: str, message: str) -> ErrorMessage:
         return ErrorMessage(type="error", code=code, message=message, recoverable=True)
+
+    @staticmethod
+    def _stopped_error() -> ErrorMessage:
+        return ConversationOrchestrator._error("session_stopped", "会话已经结束")
