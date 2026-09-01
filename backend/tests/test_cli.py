@@ -1,3 +1,4 @@
+import base64
 import json
 
 import pytest
@@ -5,6 +6,9 @@ from typer.testing import CliRunner
 
 from voxagent import cli
 from voxagent.diagnostics.hardware import DiskSnapshot, HardwareSnapshot
+from voxagent.speech.voice_catalog import VoiceCatalogError
+
+SESSION_TOKEN = base64.urlsafe_b64encode(b"x" * 32).decode("ascii").rstrip("=")
 
 
 def test_preflight_outputs_json_and_blocks_when_gpu_is_unavailable(monkeypatch, tmp_path):
@@ -332,3 +336,71 @@ def test_prepare_voice_review_uses_local_engines_without_a_catalog(monkeypatch, 
 
     assert result.exit_code == 0, result.output
     assert created == [("kokoro", None), ("melo", None)]
+
+
+def test_serve_uses_localhost_message_limit_and_no_access_log(monkeypatch):
+    application = object()
+    created: list[str] = []
+    run_calls: list[tuple[object, dict[str, object]]] = []
+    monkeypatch.setattr(
+        cli,
+        "_create_production_app",
+        lambda token: created.append(token) or application,
+    )
+    monkeypatch.setattr(
+        cli.uvicorn,
+        "run",
+        lambda app, **kwargs: run_calls.append((app, kwargs)),
+    )
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["serve", "--port", "8765", "--session-token", SESSION_TOKEN],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert created == [SESSION_TOKEN]
+    assert run_calls == [
+        (
+            application,
+            {
+                "host": "127.0.0.1",
+                "port": 8765,
+                "ws_max_size": 64 * 1024,
+                "access_log": False,
+            },
+        )
+    ]
+
+
+def test_serve_fails_clearly_when_blind_scored_voice_catalog_is_absent(monkeypatch):
+    started: list[object] = []
+
+    def missing_catalog(_token):
+        raise VoiceCatalogError(
+            "Production voice catalog requires scored blind voice review"
+        )
+
+    monkeypatch.setattr(cli, "_create_production_app", missing_catalog)
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *args, **kwargs: started.append(args))
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["serve", "--port", "8765", "--session-token", SESSION_TOKEN],
+    )
+
+    assert result.exit_code != 0
+    assert "scored blind voice review" in result.stderr
+    assert started == []
+
+
+def test_production_app_rejects_bad_token_before_loading_private_assets(monkeypatch):
+    catalog_loads: list[object] = []
+    monkeypatch.setattr(
+        cli, "load_production_catalog", lambda: catalog_loads.append(object())
+    )
+
+    with pytest.raises(ValueError, match="32-byte URL-safe"):
+        cli._create_production_app("short")
+
+    assert catalog_loads == []

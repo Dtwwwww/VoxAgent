@@ -6,8 +6,11 @@ from typing import Annotated
 
 import httpx
 import typer
+import uvicorn
 
+from voxagent.api.app import _validate_session_token, create_app
 from voxagent.config import AppPaths, resolve_data_root
+from voxagent.conversation.orchestrator import ConversationOrchestrator
 from voxagent.diagnostics.baseline_validator import validate_baseline
 from voxagent.diagnostics.hardware import collect_hardware, evaluate_preflight
 from voxagent.diagnostics.llm_benchmark import LLM_BENCHMARK_PROMPTS, run_llm_benchmark
@@ -29,8 +32,14 @@ from voxagent.speech.asr import (
     SenseVoiceCandidatePauseAsr,
     StreamingParaformerAsr,
 )
+from voxagent.speech.endpoint import EndpointDetector
 from voxagent.speech.model_manifest import SPEECH_MODELS
 from voxagent.speech.tts import SherpaOfflineTts, prepare_voice_review
+from voxagent.speech.vad import VadDetector
+from voxagent.speech.voice_catalog import (
+    VoiceCatalog,
+    load_production_catalog,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -91,6 +100,114 @@ def benchmark_llm(
 def _speech_model_directory(data_root: Path, model_name: str) -> Path:
     model = next(item for item in SPEECH_MODELS if item.name == model_name)
     return (data_root / "models" / "speech" / model.directory_name).resolve()
+
+
+class _CatalogTts:
+    def __init__(
+        self,
+        catalog: VoiceCatalog,
+        engines: dict[str, SherpaOfflineTts],
+    ) -> None:
+        self._catalog = catalog
+        self._engines = engines
+
+    def synthesize(self, text: str, voice_key: str, speed: float):
+        profile = self._catalog.get(voice_key)
+        return self._engines[profile.engine].synthesize(text, voice_key, speed)
+
+
+def _create_production_app(session_token: str):
+    _validate_session_token(session_token)
+    catalog = load_production_catalog()
+    root = resolve_data_root(None)
+    try:
+        baseline = json.loads(
+            (REPO_ROOT / "benchmarks" / "target-machine-baseline.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        model_id = baseline["selection"]["selected_model"]
+        partial_model_id = baseline["asr_candidates"][0]["partial_model_id"]
+    except (KeyError, IndexError, OSError, TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Committed runtime model selection is missing or invalid") from error
+    if not isinstance(model_id, str) or not model_id:
+        raise RuntimeError("Committed runtime LLM selection is missing or invalid")
+    if partial_model_id not in {
+        "sensevoice-int8",
+        "streaming-paraformer-bilingual-zh-en",
+    }:
+        raise RuntimeError("Committed partial ASR selection is missing or invalid")
+
+    http = httpx.AsyncClient(base_url="http://127.0.0.1:11434", trust_env=False)
+
+    def orchestrator_factory() -> ConversationOrchestrator:
+        final_asr = SenseVoiceAsr.from_model_dir(
+            _speech_model_directory(root, "sensevoice-int8")
+        )
+        if partial_model_id == "sensevoice-int8":
+            partial_asr = SenseVoiceCandidatePauseAsr(
+                SenseVoiceAsr.from_model_dir(
+                    _speech_model_directory(root, "sensevoice-int8")
+                )
+            )
+        else:
+            partial_asr = StreamingParaformerAsr.from_model_dir(
+                _speech_model_directory(
+                    root, "streaming-paraformer-bilingual-zh-en"
+                )
+            )
+        tts = _CatalogTts(
+            catalog,
+            {
+                "kokoro": SherpaOfflineTts.from_model_dir(
+                    _speech_model_directory(root, "kokoro-int8-zh-en"),
+                    0,
+                    engine="kokoro",
+                    catalog=catalog,
+                ),
+                "melo": SherpaOfflineTts.from_model_dir(
+                    _speech_model_directory(root, "melo-zh-en"),
+                    0,
+                    engine="melo",
+                    catalog=catalog,
+                ),
+            },
+        )
+        return ConversationOrchestrator(
+            model_id=model_id,
+            vad=VadDetector.from_model_path(
+                _speech_model_directory(root, "silero-vad") / "silero_vad.onnx"
+            ),
+            endpoint=EndpointDetector("natural"),
+            asr=final_asr,
+            partial_asr=partial_asr,
+            llm=OllamaClient(http),
+            tts=tts,
+            voice_catalog=catalog,
+        )
+
+    application = create_app(orchestrator_factory, session_token)
+    application.state.ollama_http = http
+    return application
+
+
+@app.command("serve")
+def serve(
+    session_token: Annotated[str, typer.Option("--session-token")],
+    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8765,
+) -> None:
+    try:
+        application = _create_production_app(session_token)
+    except Exception as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    uvicorn.run(
+        application,
+        host="127.0.0.1",
+        port=port,
+        ws_max_size=64 * 1024,
+        access_log=False,
+    )
 
 
 @app.command("benchmark-asr")

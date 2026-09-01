@@ -9,8 +9,14 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from voxagent.api.app import _forward_outputs, _SocketWriter, create_app
-from voxagent.conversation.events import ErrorMessage
+from voxagent.api.app import _dispatch_event, _forward_outputs, _SocketWriter, create_app
+from voxagent.api.protocol import parse_client_message
+from voxagent.conversation.events import (
+    ErrorMessage,
+    TtsChunk,
+    TurnCancelled,
+    VoicePreviewChunk,
+)
 
 SESSION_TOKEN = base64.urlsafe_b64encode(b"x" * 32).decode("ascii").rstrip("=")
 
@@ -34,6 +40,51 @@ class FakeOrchestrator:
         )
         self.stop_calls = 0
         self.history = ["private conversation"]
+        self.calls: list[tuple[object, ...]] = []
+
+    async def accept_audio(self, frame: bytes):
+        self.calls.append(("accept_audio", frame))
+        yield ErrorMessage(
+            type="error", code="accepted_audio", message="test", recoverable=True
+        )
+
+    async def submit_text(self, text: str, speak_response: bool):
+        self.calls.append(("submit_text", text, speak_response))
+        yield ErrorMessage(
+            type="error", code="submitted_text", message="test", recoverable=True
+        )
+
+    async def speak_message(self, turn_id: int):
+        self.calls.append(("speak_message", turn_id))
+        yield ErrorMessage(
+            type="error", code="spoke_message", message="test", recoverable=True
+        )
+
+    def select_voice(self, voice_key: str, speed: float):
+        self.calls.append(("select_voice", voice_key, speed))
+        return ErrorMessage(
+            type="error", code="selected_voice", message="test", recoverable=True
+        )
+
+    async def preview_voice(self, voice_key: str, speed: float):
+        self.calls.append(("preview_voice", voice_key, speed))
+        yield ErrorMessage(
+            type="error", code="previewed_voice", message="test", recoverable=True
+        )
+
+    async def cancel_active(self):
+        self.calls.append(("cancel_active",))
+        return TurnCancelled(
+            type="turn.cancelled",
+            session_id=self.state.session_id,
+            turn_id=7,
+        )
+
+    async def commit_audio(self):
+        self.calls.append(("commit_audio",))
+        yield ErrorMessage(
+            type="error", code="committed_audio", message="test", recoverable=True
+        )
 
     async def stop(self) -> None:
         self.stop_calls += 1
@@ -200,6 +251,126 @@ def test_recoverable_validation_error_does_not_close_socket(payload: dict[str, o
     assert error["code"] == "invalid_event"
     assert error["recoverable"] is True
     assert ready["type"] == "session.ready"
+
+
+@pytest.mark.asyncio
+async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operation():
+    class RecordingSocket:
+        def __init__(self) -> None:
+            self.frames: list[tuple[str, object]] = []
+
+        async def send_json(self, payload: dict[str, object]) -> None:
+            self.frames.append(("json", payload))
+
+        async def send_bytes(self, payload: bytes) -> None:
+            self.frames.append(("bytes", payload))
+
+    orchestrator = FakeOrchestrator()
+    socket = RecordingSocket()
+    writer = _SocketWriter(socket)
+    writer.start()
+    frame = b"\x00" * 640
+
+    payloads = (
+        {"type": "session.start"},
+        {"type": "text.submit", "text": "  你好  ", "speak_response": True},
+        {"type": "assistant.speak", "turn_id": 3},
+        {"type": "voice.select", "voice_key": "clear_female", "speed": 1.2},
+        {"type": "voice.preview", "voice_key": "clear_female", "speed": 0.8},
+        {"type": "turn.cancel"},
+        {"type": "audio.commit"},
+    )
+    for payload in payloads:
+        should_stop = await _dispatch_event(
+            parse_client_message(payload), orchestrator, writer
+        )
+        assert should_stop is False
+    await _forward_outputs(orchestrator.accept_audio(frame), writer)
+    should_stop = await _dispatch_event(
+        parse_client_message({"type": "session.stop"}), orchestrator, writer
+    )
+    await writer._queue.join()
+    await writer.close()
+
+    assert should_stop is True
+    assert orchestrator.calls == [
+        ("submit_text", "你好", True),
+        ("speak_message", 3),
+        ("select_voice", "clear_female", 1.2),
+        ("preview_voice", "clear_female", 0.8),
+        ("cancel_active",),
+        ("commit_audio",),
+        ("accept_audio", frame),
+    ]
+    assert orchestrator.stop_calls == 1
+    assert [
+        payload["type"] for kind, payload in socket.frames if kind == "json"
+    ][:2] == ["session.ready", "voices.available"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reply_and_preview_producers_keep_each_wav_pair_adjacent():
+    class RecordingSocket:
+        def __init__(self) -> None:
+            self.frames: list[tuple[str, object]] = []
+
+        async def send_json(self, payload: dict[str, object]) -> None:
+            self.frames.append(("json", payload))
+            await asyncio.sleep(0)
+
+        async def send_bytes(self, payload: bytes) -> None:
+            self.frames.append(("bytes", payload))
+            await asyncio.sleep(0)
+
+    release = asyncio.Event()
+    session_id = uuid4()
+
+    async def reply_outputs():
+        yield TtsChunk(
+            type="tts.chunk",
+            session_id=session_id,
+            turn_id=1,
+            sequence=0,
+            sample_rate=24000,
+            mime_type="audio/wav",
+            byte_length=9,
+        )
+        await release.wait()
+        yield b"reply-wav"
+
+    async def preview_outputs():
+        yield VoicePreviewChunk(
+            type="voice.preview.chunk",
+            preview_id=1,
+            sample_rate=44100,
+            mime_type="audio/wav",
+            byte_length=11,
+        )
+        await release.wait()
+        yield b"preview-wav"
+
+    socket = RecordingSocket()
+    writer = _SocketWriter(socket)
+    writer.start()
+    producers = [
+        asyncio.create_task(_forward_outputs(reply_outputs(), writer)),
+        asyncio.create_task(_forward_outputs(preview_outputs(), writer)),
+    ]
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(*producers)
+    await writer._queue.join()
+    await writer.close()
+
+    assert len(socket.frames) == 4
+    pairs = [socket.frames[index : index + 2] for index in (0, 2)]
+    assert {
+        (pair[0][1]["type"], pair[1][1])
+        for pair in pairs
+    } == {
+        ("tts.chunk", b"reply-wav"),
+        ("voice.preview.chunk", b"preview-wav"),
+    }
 
 
 def test_stop_exception_cannot_strand_single_session_slot():

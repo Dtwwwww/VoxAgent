@@ -982,5 +982,43 @@ async def test_partial_asr_exception_is_recoverable_and_text_remains_usable():
     await orchestrator.stop()
 
 
+@pytest.mark.asyncio
+async def test_commit_audio_without_live_voice_is_noop():
+    orchestrator, _, _ = make_orchestrator()
+
+    outputs = [item async for item in orchestrator.commit_audio()]
+
+    assert outputs == []
+    assert orchestrator.state.phase is Phase.IDLE
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_commit_audio_finishes_buffered_turn_through_normal_reply_path():
+    orchestrator, llm, _ = make_orchestrator(
+        vad=FakeVad([VadDecision.STARTED]),
+        asr_texts=["手动停止录音"],
+        replies=[["已收到"]],
+    )
+    started = [item async for item in orchestrator.accept_audio(FRAME)]
+
+    outputs = [item async for item in orchestrator.commit_audio()]
+
+    assert [item.type for item in started] == ["vad.started"]
+    assert [getattr(item, "type", "binary") for item in outputs] == [
+        "vad.stopped",
+        "asr.final",
+        "assistant.delta",
+        "tts.chunk",
+        "binary",
+        "assistant.done",
+    ]
+    assert outputs[1].text == "手动停止录音"
+    assert llm.calls[0].messages[-1] == {"role": "user", "content": "手动停止录音"}
+    assert orchestrator._audio_frames == []
+    assert orchestrator.state.phase is Phase.IDLE
+    await orchestrator.stop()
+
+
 async def _collect(iterator):
     return [item async for item in iterator]

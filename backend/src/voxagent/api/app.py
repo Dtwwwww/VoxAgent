@@ -39,6 +39,20 @@ class Orchestrator(Protocol):
     state: _State
     voice_catalog: _VoiceCatalog
 
+    def accept_audio(self, frame: bytes) -> AsyncIterator[_Output]: ...
+
+    def submit_text(self, text: str, speak_response: bool) -> AsyncIterator[_Output]: ...
+
+    def speak_message(self, turn_id: int) -> AsyncIterator[_Output]: ...
+
+    def select_voice(self, voice_key: str, speed: float) -> _Output: ...
+
+    def preview_voice(self, voice_key: str, speed: float) -> AsyncIterator[_Output]: ...
+
+    async def cancel_active(self) -> _Output | None: ...
+
+    def commit_audio(self) -> AsyncIterator[_Output]: ...
+
     async def stop(self) -> None: ...
 
 
@@ -164,6 +178,45 @@ async def _forward_outputs(
             await writer.send(item)
 
 
+async def _dispatch_event(
+    event: object, orchestrator: Orchestrator, writer: _SocketWriter
+) -> bool:
+    event_type = getattr(event, "type", None)
+    if event_type == "session.start":
+        ready = SessionReady(
+            type="session.ready",
+            session_id=orchestrator.state.session_id,
+            model_id=orchestrator.model_id,
+            offline=True,
+            input_audio=INPUT_AUDIO_FORMAT,
+        )
+        await writer.send(ready, _public_voices(orchestrator))
+    elif event_type == "text.submit":
+        await _forward_outputs(
+            orchestrator.submit_text(event.text, event.speak_response), writer
+        )
+    elif event_type == "assistant.speak":
+        await _forward_outputs(orchestrator.speak_message(event.turn_id), writer)
+    elif event_type == "voice.select":
+        await writer.send(orchestrator.select_voice(event.voice_key, event.speed))
+    elif event_type == "voice.preview":
+        await _forward_outputs(
+            orchestrator.preview_voice(event.voice_key, event.speed), writer
+        )
+    elif event_type == "turn.cancel":
+        cancelled = await orchestrator.cancel_active()
+        if cancelled is not None:
+            await writer.send(cancelled)
+    elif event_type == "audio.commit":
+        await _forward_outputs(orchestrator.commit_audio(), writer)
+    elif event_type == "session.stop":
+        await orchestrator.stop()
+        return True
+    else:
+        raise RuntimeError(f"unsupported validated client event: {event_type}")
+    return False
+
+
 def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) -> FastAPI:
     expected_token = _validate_session_token(session_token)
     expected_token_bytes = expected_token.encode("ascii")
@@ -196,13 +249,30 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
 
         orchestrator: Orchestrator | None = None
         writer: _SocketWriter | None = None
+        receive_task: asyncio.Task[dict[str, object]] | None = None
+        producers: set[asyncio.Task[bool]] = set()
+        orchestrator_stopped = False
         try:
             orchestrator = orchestrator_factory()
             await socket.accept()
             writer = _SocketWriter(socket)
             writer.start()
             while True:
-                message = await socket.receive()
+                if receive_task is None:
+                    receive_task = asyncio.create_task(
+                        socket.receive(), name="voice-socket-receive"
+                    )
+                done, _ = await asyncio.wait(
+                    {receive_task, *producers}, return_when=asyncio.FIRST_COMPLETED
+                )
+                completed_producers = done.intersection(producers)
+                for producer in completed_producers:
+                    producers.remove(producer)
+                    await producer
+                if receive_task not in done:
+                    continue
+                message = receive_task.result()
+                receive_task = None
                 if message["type"] == "websocket.disconnect":
                     break
                 raw = message.get("bytes")
@@ -212,9 +282,11 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
                     except (TypeError, ValueError):
                         await socket.close(code=4400)
                         break
-                    accept_audio = getattr(orchestrator, "accept_audio", None)
-                    if accept_audio is not None:
-                        await _forward_outputs(accept_audio(raw), writer)
+                    producer = asyncio.create_task(
+                        _forward_outputs(orchestrator.accept_audio(raw), writer),
+                        name="voice-socket-audio",
+                    )
+                    producers.add(producer)
                     continue
                 try:
                     decoded = json.loads(message.get("text") or "")
@@ -233,16 +305,19 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
                         )
                     )
                     continue
-                if event.type == "session.start":
-                    ready = SessionReady(
-                        type="session.ready",
-                        session_id=orchestrator.state.session_id,
-                        model_id=orchestrator.model_id,
-                        offline=True,
-                        input_audio=INPUT_AUDIO_FORMAT,
+                if event.type in {
+                    "text.submit",
+                    "assistant.speak",
+                    "voice.preview",
+                    "audio.commit",
+                }:
+                    producer = asyncio.create_task(
+                        _dispatch_event(event, orchestrator, writer),
+                        name=f"voice-socket-{event.type}",
                     )
-                    await writer.send(ready, _public_voices(orchestrator))
-                elif event.type == "session.stop":
+                    producers.add(producer)
+                elif await _dispatch_event(event, orchestrator, writer):
+                    orchestrator_stopped = True
                     await socket.close(code=1000)
                     break
         except WebSocketDisconnect:
@@ -250,7 +325,14 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
         finally:
             try:
                 try:
-                    if orchestrator is not None:
+                    pending = [*producers]
+                    if receive_task is not None:
+                        pending.append(receive_task)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    if orchestrator is not None and not orchestrator_stopped:
                         await orchestrator.stop()
                 except Exception:
                     pass

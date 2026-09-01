@@ -223,6 +223,31 @@ class ConversationOrchestrator:
         if endpoint is not EndpointDecision.COMMIT:
             return
 
+        async for output in self._commit_voice_token(token):
+            yield output
+
+    async def commit_audio(self) -> AsyncIterator[Output]:
+        async with self._action_lock:
+            token = self._active_token
+            if (
+                self._is_closed()
+                or token is None
+                or self.state.phase is not Phase.LISTENING
+                or not self._audio_frames
+            ):
+                return
+            partial_task = self._partial_task if self._partial_token is token else None
+        if partial_task is not None:
+            partial_outcome = await self._finish_partial(token, partial_task)
+            if partial_outcome is not True:
+                if isinstance(partial_outcome, ErrorMessage):
+                    async for output in self._terminate_voice_turn(token, partial_outcome):
+                        yield output
+                return
+        async for output in self._commit_voice_token(token):
+            yield output
+
+    async def _commit_voice_token(self, token: TurnToken) -> AsyncIterator[Output]:
         async with self._action_lock:
             if not self._owns_live_turn(token):
                 return
