@@ -6,3 +6,5 @@ __pycache__/
 .ruff_cache/
 .pytest-tmp/
 benchmarks/voice-review/
+frontend/node_modules/
+frontend/dist/
