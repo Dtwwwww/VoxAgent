@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import fixtureSource from "../../../contracts/protocol-fixtures.json?raw";
-import { PcmFramePacketizer } from "../audio/capture";
+import { MicrophoneCapture, PcmFramePacketizer } from "../audio/capture";
 import { AudioPlayback } from "../audio/playback";
 import { parseClientEvent, parseClientEventJson, parseServerEvent, parseServerEventJson } from "../protocol";
 import { useVoiceSession } from "../useVoiceSession";
@@ -71,12 +71,15 @@ class MockBufferSource {
 
 class MockAudioContext {
   static instances: MockAudioContext[] = [];
-  static nextSampleRate = 24_000;
+  static nextSampleRate = 48_000;
   static decoder: (() => Promise<AudioBuffer>) | null = null;
+  static workletFailure: Error | null = null;
   readonly sampleRate = 48_000;
   readonly currentTime = 0;
   readonly destination = {} as AudioDestinationNode;
-  readonly audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
+  readonly audioWorklet = { addModule: vi.fn(async () => {
+    if (MockAudioContext.workletFailure) throw MockAudioContext.workletFailure;
+  }) };
   readonly sources: MockBufferSource[] = [];
   close = vi.fn().mockResolvedValue(undefined);
   resume = vi.fn().mockResolvedValue(undefined);
@@ -122,6 +125,26 @@ function readyEvent() {
   };
 }
 
+function wavBytes(sampleRate = 24_000): ArrayBuffer {
+  const bytes = new ArrayBuffer(46);
+  const view = new DataView(bytes);
+  const write = (offset: number, value: string) => [...value].forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)));
+  write(0, "RIFF");
+  view.setUint32(4, 38, true);
+  write(8, "WAVE");
+  write(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  write(36, "data");
+  view.setUint32(40, 2, true);
+  return bytes;
+}
+
 function emit(socket: MockWebSocket, event: object) {
   act(() => socket.receive(JSON.stringify(event)));
 }
@@ -139,6 +162,8 @@ beforeEach(() => {
   MockWebSocket.instances = [];
   MockAudioContext.instances = [];
   MockAudioContext.decoder = null;
+  MockAudioContext.workletFailure = null;
+  MockAudioContext.nextSampleRate = 48_000;
   vi.stubGlobal("WebSocket", MockWebSocket);
   vi.stubGlobal("AudioContext", MockAudioContext);
   vi.stubGlobal("AudioWorkletNode", MockAudioWorkletNode);
@@ -163,6 +188,8 @@ describe("the frozen WebSocket protocol", () => {
     expect(parseServerEventJson(`{"type":"vad.started","session_id":"${SESSION_ID}","turn_id":1}`)).toEqual({ type: "vad.started", session_id: SESSION_ID, turn_id: 1 });
     expect(() => parseClientEventJson('{"type":"assistant.speak","turn_id":7.0}')).toThrow();
     expect(() => parseServerEventJson(`{"type":"vad.started","session_id":"${SESSION_ID}","turn_id":1e0}`)).toThrow();
+    expect(() => parseClientEventJson('{"type":"assistant.speak","turn_id":7.0e0}')).toThrow();
+    expect(() => parseServerEventJson(`{"type":"tts.chunk","session_id":"${SESSION_ID}","turn_id":1,"sequence":0.0e0,"sample_rate":24000,"mime_type":"audio/wav","byte_length":46}`)).toThrow();
   });
 });
 
@@ -193,24 +220,24 @@ describe("PCM microphone framing", () => {
 });
 
 describe("queued native-rate playback", () => {
-  it("queues conversation audio by sequence at its declared sample rate", async () => {
+  it("validates the WAV native rate while allowing browser decode resampling", async () => {
     const playback = new AudioPlayback();
-    await playback.enqueue({ kind: "turn", turnId: 3, sequence: 1, sampleRate: 24_000 }, new ArrayBuffer(8));
+    await playback.enqueue({ kind: "turn", turnId: 3, sequence: 1, sampleRate: 24_000 }, wavBytes());
     expect(MockAudioContext.instances[0].sources).toHaveLength(0);
 
-    await playback.enqueue({ kind: "turn", turnId: 3, sequence: 0, sampleRate: 24_000 }, new ArrayBuffer(8));
+    await playback.enqueue({ kind: "turn", turnId: 3, sequence: 0, sampleRate: 24_000 }, wavBytes());
     const sources = MockAudioContext.instances[0].sources;
     expect(sources).toHaveLength(2);
-    expect(sources[0].buffer?.sampleRate).toBe(24_000);
+    expect(sources[0].buffer?.sampleRate).toBe(48_000);
     expect(sources[0].start).toHaveBeenCalledWith(0);
     expect(sources[1].start).toHaveBeenCalledWith(0.1);
   });
 
   it("replaces an older preview immediately", async () => {
     const playback = new AudioPlayback();
-    await playback.enqueue({ kind: "preview", previewId: 1, sampleRate: 24_000 }, new ArrayBuffer(8));
+    await playback.enqueue({ kind: "preview", previewId: 1, sampleRate: 24_000 }, wavBytes());
     const first = MockAudioContext.instances[0].sources[0];
-    await playback.enqueue({ kind: "preview", previewId: 2, sampleRate: 24_000 }, new ArrayBuffer(8));
+    await playback.enqueue({ kind: "preview", previewId: 2, sampleRate: 24_000 }, wavBytes());
     expect(first.stop).toHaveBeenCalledOnce();
   });
 
@@ -218,7 +245,7 @@ describe("queued native-rate playback", () => {
     const playback = new AudioPlayback();
     playback.stopTurn(1);
     await playback.close();
-    await playback.enqueue({ kind: "turn", turnId: 1, sequence: 0, sampleRate: 24_000 }, new ArrayBuffer(8));
+    await playback.enqueue({ kind: "turn", turnId: 1, sequence: 0, sampleRate: 24_000 }, wavBytes());
     expect(MockAudioContext.instances[0].sources).toHaveLength(1);
   });
 
@@ -226,11 +253,17 @@ describe("queued native-rate playback", () => {
     let finishDecode!: (buffer: AudioBuffer) => void;
     MockAudioContext.decoder = () => new Promise((resolve) => { finishDecode = resolve; });
     const playback = new AudioPlayback();
-    const pending = playback.enqueue({ kind: "turn", turnId: 2, sequence: 0, sampleRate: 24_000 }, new ArrayBuffer(8));
+    const pending = playback.enqueue({ kind: "turn", turnId: 2, sequence: 0, sampleRate: 24_000 }, wavBytes());
     playback.stopConversation();
     finishDecode({ duration: 0.1, sampleRate: 24_000 } as AudioBuffer);
     await pending;
     expect(MockAudioContext.instances[0].sources).toHaveLength(0);
+  });
+
+  it("rejects WAV bytes whose header disagrees with metadata", async () => {
+    const playback = new AudioPlayback();
+    await expect(playback.enqueue({ kind: "turn", turnId: 1, sequence: 0, sampleRate: 24_000 }, wavBytes(44_100))).rejects.toThrow();
+    expect(MockAudioContext.instances).toHaveLength(0);
   });
 });
 
@@ -274,10 +307,58 @@ describe("useVoiceSession", () => {
     expect(hook.result.current.isMicrophoneActive).toBe(false);
   });
 
+  it("makes microphone start single-flight and prevents a capture appearing after disconnect", async () => {
+    let resolveMedia!: (stream: MediaStream) => void;
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockImplementation(() => new Promise((resolve) => { resolveMedia = resolve; }));
+    const { hook } = openSession();
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = hook.result.current.startMicrophone();
+      second = hook.result.current.startMicrophone();
+    });
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce();
+    await act(async () => hook.result.current.disconnect());
+    resolveMedia({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    await act(async () => Promise.all([first, second]));
+
+    expect(stop).toHaveBeenCalledOnce();
+    expect(hook.result.current.isMicrophoneActive).toBe(false);
+  });
+
+  it("disposes a microphone whose permission resolves after unmount", async () => {
+    let resolveMedia!: (stream: MediaStream) => void;
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockImplementation(() => new Promise((resolve) => { resolveMedia = resolve; }));
+    const hook = renderHook(() => useVoiceSession({ url: "ws://localhost/v1/voice" }));
+    let pending!: Promise<void>;
+    act(() => { pending = hook.result.current.startMicrophone(); });
+    hook.unmount();
+    resolveMedia({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    await pending;
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("cleans a local audio context and worklet URL when microphone setup fails", async () => {
+    const stop = vi.fn();
+    MockAudioContext.workletFailure = new Error("worklet failed");
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    const capture = new MicrophoneCapture(vi.fn());
+
+    await expect(capture.start()).rejects.toThrow("worklet failed");
+
+    expect(stop).toHaveBeenCalledOnce();
+    expect(MockAudioContext.instances[0].close).toHaveBeenCalledOnce();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:worklet");
+  });
+
   it("submits typed text silently by default and stops active playback", async () => {
     const { hook, socket } = openSession();
-    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 8, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: 8 });
-    await act(async () => socket.receive(new ArrayBuffer(8)));
+    const wav = wavBytes();
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 8, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
     const source = MockAudioContext.instances[0].sources[0];
 
     act(() => hook.result.current.submitText(" hello "));
@@ -295,8 +376,9 @@ describe("useVoiceSession", () => {
 
   it("stops active conversation playback as soon as speech starts", async () => {
     const { socket } = openSession();
-    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 8, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: 8 });
-    await act(async () => socket.receive(new ArrayBuffer(8)));
+    const wav = wavBytes();
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 8, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
     const source = MockAudioContext.instances[0].sources[0];
 
     emit(socket, { type: "vad.started", session_id: SESSION_ID, turn_id: 9 });
@@ -305,16 +387,89 @@ describe("useVoiceSession", () => {
 
   it("ignores stale binary payloads after turn cancellation and preview replacement", async () => {
     const { hook, socket } = openSession();
-    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 8, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: 8 });
+    const wav = wavBytes();
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 8, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
     emit(socket, { type: "turn.cancelled", session_id: SESSION_ID, turn_id: 8 });
-    await act(async () => socket.receive(new ArrayBuffer(8)));
+    await act(async () => socket.receive(wav));
     expect(MockAudioContext.instances).toHaveLength(0);
     expect(hook.result.current.error).toBeNull();
 
-    emit(socket, { type: "voice.preview.chunk", preview_id: 1, sample_rate: 24_000, mime_type: "audio/wav", byte_length: 8 });
+    emit(socket, { type: "voice.preview.chunk", preview_id: 1, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
     act(() => hook.result.current.previewVoice("clear_female", 1));
-    await act(async () => socket.receive(new ArrayBuffer(8)));
+    await act(async () => socket.receive(wav));
     expect(MockAudioContext.instances).toHaveLength(0);
+  });
+
+  it.each(["vad", "text", "cancel"] as const)("durably rejects late old-turn audio after %s interruption", async (kind) => {
+    const { hook, socket } = openSession();
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 8, delta: "old" });
+    act(() => hook.result.current.speakMessage(8));
+    if (kind === "vad") emit(socket, { type: "vad.started", session_id: SESSION_ID, turn_id: 9 });
+    if (kind === "text") act(() => hook.result.current.submitText("new"));
+    if (kind === "cancel") emit(socket, { type: "turn.cancelled", session_id: SESSION_ID, turn_id: 8 });
+    const wav = wavBytes();
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 8, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances.flatMap((context) => context.sources).every((source) => source.start.mock.calls.length === 0)).toBe(true);
+  });
+
+  it("durably rejects a late old preview after preview replacement", async () => {
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.previewVoice("clear_female", 1));
+    act(() => hook.result.current.previewVoice("clear_female", 1.2));
+    const wav = wavBytes();
+    emit(socket, { type: "voice.preview.chunk", preview_id: 1, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances.flatMap((context) => context.sources)).toHaveLength(0);
+    emit(socket, { type: "voice.preview.chunk", preview_id: 2, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances.flatMap((context) => context.sources).filter((source) => source.start.mock.calls.length > 0)).toHaveLength(1);
+  });
+
+  it("fails closed without misassociating binary payloads after back-to-back metadata", async () => {
+    const { hook, socket } = openSession();
+    const wav = wavBytes();
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 1, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 2, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances.flatMap((context) => context.sources)).toHaveLength(0);
+    expect(hook.result.current.error).toEqual(expect.objectContaining({ code: "invalid_server_event", recoverable: true }));
+
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 3, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances.flatMap((context) => context.sources).filter((source) => source.start.mock.calls.length > 0)).toHaveLength(1);
+  });
+
+  it("ignores old socket callbacks and keeps reused turn IDs in separate drafts", async () => {
+    const { hook, socket: oldSocket } = openSession();
+    emit(oldSocket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 1, delta: "old" });
+    await act(async () => hook.result.current.disconnect());
+    act(() => hook.result.current.connect());
+    const currentSocket = MockWebSocket.instances.at(-1)!;
+    act(() => currentSocket.open());
+    emit(currentSocket, readyEvent());
+    emit(currentSocket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 1, delta: "new" });
+    emit(oldSocket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 1, delta: "stale" });
+
+    expect(hook.result.current.messages.filter((message) => message.role === "assistant").map((message) => message.text)).toEqual(["old", "new"]);
+  });
+
+  it("tears down microphone and playback on an unexpected socket close", async () => {
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    const { hook, socket } = openSession();
+    await act(async () => hook.result.current.startMicrophone());
+    const wav = wavBytes();
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 1, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    const source = MockAudioContext.instances.flatMap((context) => context.sources)[0];
+
+    act(() => socket.close());
+    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    expect(source.stop).toHaveBeenCalledOnce();
+    expect(hook.result.current.connectionStatus).toBe("disconnected");
+    expect(hook.result.current.isMicrophoneActive).toBe(false);
   });
 
   it("keeps voice and typed messages in one ordered stream and preserves cancelled text", () => {

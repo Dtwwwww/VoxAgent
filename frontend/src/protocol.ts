@@ -131,7 +131,7 @@ export function parseClientEvent(value: unknown): ClientEvent {
   }
 }
 
-const STRICT_INTEGER_TOKEN = /("(?:turn_id|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:\d+\.\d*|\d*\.\d+|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
+const STRICT_INTEGER_TOKEN = /("(?:turn_id|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
 
 function parseProtocolJson(raw: string): unknown {
   if (typeof raw !== "string") throw new TypeError("event JSON must be a string");

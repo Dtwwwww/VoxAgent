@@ -10,6 +10,31 @@ interface TurnQueue {
   pending: Map<number, AudioBuffer>;
 }
 
+function ascii(view: DataView, offset: number, length: number): string {
+  return String.fromCharCode(...Array.from({ length }, (_, index) => view.getUint8(offset + index)));
+}
+
+function nativeWavSampleRate(bytes: ArrayBuffer): number {
+  const view = new DataView(bytes);
+  if (view.byteLength < 12 || ascii(view, 0, 4) !== "RIFF" || ascii(view, 8, 4) !== "WAVE") {
+    throw new Error("audio payload is not a RIFF/WAVE file");
+  }
+  let offset = 12;
+  while (offset + 8 <= view.byteLength) {
+    const chunkType = ascii(view, offset, 4);
+    const chunkLength = view.getUint32(offset + 4, true);
+    const dataOffset = offset + 8;
+    if (chunkType === "fmt ") {
+      if (chunkLength < 16 || dataOffset + 16 > view.byteLength) throw new Error("WAV fmt chunk is incomplete");
+      const sampleRate = view.getUint32(dataOffset + 4, true);
+      if (sampleRate < 1) throw new Error("WAV sample rate must be positive");
+      return sampleRate;
+    }
+    offset = dataOffset + chunkLength + (chunkLength % 2);
+  }
+  throw new Error("WAV fmt chunk is missing");
+}
+
 export class AudioPlayback {
   private context: AudioContext | null = null;
   private readonly sources = new Set<TaggedSource>();
@@ -19,13 +44,13 @@ export class AudioPlayback {
   private cancelledTurns = new Set<number>();
 
   async enqueue(metadata: PlaybackMetadata, bytes: ArrayBuffer): Promise<void> {
+    if (nativeWavSampleRate(bytes) !== metadata.sampleRate) throw new Error("WAV sample rate does not match metadata");
     if (metadata.kind === "preview") {
       this.stopPreview();
       const generation = this.previewGeneration;
       const context = this.getContext();
       const buffer = await context.decodeAudioData(bytes.slice(0));
       if (generation !== this.previewGeneration) return;
-      if (buffer.sampleRate !== metadata.sampleRate) throw new Error("WAV sample rate does not match metadata");
       const source = this.makeSource(buffer);
       source.previewId = metadata.previewId;
       source.start();
@@ -37,7 +62,6 @@ export class AudioPlayback {
     const context = this.getContext();
     const buffer = await context.decodeAudioData(bytes.slice(0));
     if (generation !== this.conversationGeneration || this.cancelledTurns.has(metadata.turnId)) return;
-    if (buffer.sampleRate !== metadata.sampleRate) throw new Error("WAV sample rate does not match metadata");
     const queue = this.turns.get(metadata.turnId) ?? { nextSequence: 0, tailTime: context.currentTime, pending: new Map() };
     queue.pending.set(metadata.sequence, buffer);
     this.turns.set(metadata.turnId, queue);

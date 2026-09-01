@@ -69,14 +69,19 @@ export class MicrophoneCapture {
   async start(): Promise<void> {
     if (this.stream) return;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    let context: AudioContext | null = null;
+    let source: MediaStreamAudioSourceNode | null = null;
+    let worklet: AudioWorkletNode | null = null;
+    let sink: GainNode | null = null;
+    let url: string | null = null;
     try {
-      const context = new AudioContext();
+      context = new AudioContext();
       const packetizer = new PcmFramePacketizer(context.sampleRate, this.onFrame);
-      const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "text/javascript" }));
+      url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "text/javascript" }));
       await context.audioWorklet.addModule(url);
-      const source = context.createMediaStreamSource(stream);
-      const worklet = new AudioWorkletNode(context, "voxagent-capture", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
-      const sink = context.createGain();
+      source = context.createMediaStreamSource(stream);
+      worklet = new AudioWorkletNode(context, "voxagent-capture", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      sink = context.createGain();
       sink.gain.value = 0;
       worklet.port.onmessage = (event: MessageEvent<Float32Array>) => packetizer.push(event.data);
       source.connect(worklet);
@@ -91,6 +96,11 @@ export class MicrophoneCapture {
       this.workletUrl = url;
     } catch (error) {
       stream.getTracks().forEach((track) => track.stop());
+      source?.disconnect();
+      worklet?.disconnect();
+      sink?.disconnect();
+      if (context) await context.close();
+      if (url) URL.revokeObjectURL(url);
       throw error;
     }
   }
