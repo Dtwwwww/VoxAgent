@@ -1,6 +1,30 @@
 const TARGET_SAMPLE_RATE = 16_000;
 const FRAME_SAMPLES = 320;
 
+function abortError(): DOMException {
+  return new DOMException("Microphone setup was cancelled", "AbortError");
+}
+
+function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(abortError()));
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
 export class PcmFramePacketizer {
   private readonly ratio: number;
   private sourcePosition = 0;
@@ -66,9 +90,13 @@ export class MicrophoneCapture {
 
   constructor(private readonly onFrame: (frame: ArrayBuffer) => void) {}
 
-  async start(): Promise<void> {
+  async start(signal?: AbortSignal): Promise<void> {
     if (this.stream) return;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    const media = navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    if (signal) void media.then((lateStream) => {
+      if (signal.aborted) lateStream.getTracks().forEach((track) => track.stop());
+    }, () => undefined);
+    const stream = await abortable(media, signal);
     let context: AudioContext | null = null;
     let source: MediaStreamAudioSourceNode | null = null;
     let worklet: AudioWorkletNode | null = null;
@@ -78,7 +106,7 @@ export class MicrophoneCapture {
       context = new AudioContext();
       const packetizer = new PcmFramePacketizer(context.sampleRate, this.onFrame);
       url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "text/javascript" }));
-      await context.audioWorklet.addModule(url);
+      await abortable(context.audioWorklet.addModule(url), signal);
       source = context.createMediaStreamSource(stream);
       worklet = new AudioWorkletNode(context, "voxagent-capture", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
       sink = context.createGain();
@@ -87,7 +115,7 @@ export class MicrophoneCapture {
       source.connect(worklet);
       worklet.connect(sink);
       sink.connect(context.destination);
-      await context.resume();
+      await abortable(context.resume(), signal);
       this.stream = stream;
       this.context = context;
       this.source = source;

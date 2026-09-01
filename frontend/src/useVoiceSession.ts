@@ -82,6 +82,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const socketRef = useRef<WebSocket | null>(null);
   const captureRef = useRef<MicrophoneCapture | null>(null);
   const captureStartRef = useRef<Promise<void> | null>(null);
+  const captureAbortRef = useRef<AbortController | null>(null);
   const captureLifecycleRef = useRef(0);
   const playbackRef = useRef(new AudioPlayback());
   const pendingAudioRef = useRef<AudioMetadata | null>(null);
@@ -92,7 +93,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const blockedThroughTurnRef = useRef(0);
   const cancelledTurnsRef = useRef(new Set<number>());
   const allowedReplayTurnsRef = useRef(new Set<number>());
-  const previewRequestsRef = useRef<Array<{ valid: boolean }>>([]);
+  const requestedPreviewIdRef = useRef(0);
   const messageIdRef = useRef(0);
 
   const nextId = useCallback((prefix: string) => `${prefix}-${++messageIdRef.current}`, []);
@@ -113,18 +114,28 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     blockedThroughTurnRef.current = 0;
     cancelledTurnsRef.current.clear();
     allowedReplayTurnsRef.current.clear();
-    previewRequestsRef.current = [];
+    requestedPreviewIdRef.current = 0;
   }, []);
 
   const stopLocalResources = useCallback(async () => {
     captureLifecycleRef.current += 1;
     setMicrophoneActive(false);
     setVoiceStatus("idle");
+    const abort = captureAbortRef.current;
+    captureAbortRef.current = null;
+    abort?.abort();
+    const pendingStart = captureStartRef.current;
+    captureStartRef.current = null;
     const capture = captureRef.current;
     captureRef.current = null;
-    if (capture) await capture.stop();
-    await playbackRef.current.close();
+    const playback = playbackRef.current;
+    playbackRef.current = new AudioPlayback();
     resetSessionTracking();
+    await Promise.all([
+      pendingStart?.catch(() => undefined),
+      capture?.stop(),
+      playback.close(),
+    ]);
   }, [resetSessionTracking]);
 
   const failProtocol = useCallback(() => {
@@ -170,7 +181,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         blockedThroughTurnRef.current = 0;
         cancelledTurnsRef.current.clear();
         allowedReplayTurnsRef.current.clear();
-        previewRequestsRef.current = [];
+        requestedPreviewIdRef.current = 0;
         setConnectionStatus("connected");
         break;
       case "voices.available": {
@@ -192,7 +203,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           previewId: event.preview_id,
           sampleRate: event.sample_rate,
           byteLength: event.byte_length,
-          valid: previewRequestsRef.current.shift()?.valid ?? true,
+          valid: event.preview_id === requestedPreviewIdRef.current,
         };
         break;
       case "tts.chunk": {
@@ -249,7 +260,6 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setVoiceStatus("idle");
         break;
       case "error":
-        if (previewRequestsRef.current.length > 0) previewRequestsRef.current.shift();
         setError({ code: event.code, message: event.message, recoverable: event.recoverable });
         break;
     }
@@ -327,6 +337,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if (captureRef.current) return Promise.resolve();
     if (captureStartRef.current) return captureStartRef.current;
     const lifecycle = captureLifecycleRef.current;
+    const abort = new AbortController();
+    captureAbortRef.current = abort;
     const capture = new MicrophoneCapture((frame) => {
       const socket = socketRef.current;
       if (socket?.readyState === WebSocket.OPEN) socket.send(frame);
@@ -334,7 +346,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     let operation!: Promise<void>;
     operation = (async () => {
       try {
-        await capture.start();
+        await capture.start(abort.signal);
         if (lifecycle !== captureLifecycleRef.current) {
           await capture.stop();
           return;
@@ -351,6 +363,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         }
       } finally {
         if (captureStartRef.current === operation) captureStartRef.current = null;
+        if (captureAbortRef.current === abort) captureAbortRef.current = null;
       }
     })();
     captureStartRef.current = operation;
@@ -359,6 +372,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
 
   const stopMicrophone = useCallback(async () => {
     captureLifecycleRef.current += 1;
+    captureAbortRef.current?.abort();
+    captureAbortRef.current = null;
     const capture = captureRef.current;
     captureRef.current = null;
     if (capture) await capture.stop();
@@ -397,9 +412,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
 
   const previewVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
-    for (const request of previewRequestsRef.current) request.valid = false;
     playbackRef.current.stopPreview();
-    if (send({ type: "voice.preview", voice_key: voiceKey, speed })) previewRequestsRef.current.push({ valid: true });
+    if (send({ type: "voice.preview", voice_key: voiceKey, speed })) requestedPreviewIdRef.current += 1;
   }, [send]);
 
   const cancelActive = useCallback(() => {
@@ -421,6 +435,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
 
   useEffect(() => () => {
     captureLifecycleRef.current += 1;
+    captureAbortRef.current?.abort();
+    captureAbortRef.current = null;
     const socket = socketRef.current;
     socketRef.current = null;
     socket?.close();

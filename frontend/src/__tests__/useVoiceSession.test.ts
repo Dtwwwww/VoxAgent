@@ -18,6 +18,16 @@ const fixtures = JSON.parse(fixtureSource.replace(
   invalid_server: unknown[];
 };
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
   static readonly CONNECTING = 0;
@@ -74,15 +84,19 @@ class MockAudioContext {
   static nextSampleRate = 48_000;
   static decoder: (() => Promise<AudioBuffer>) | null = null;
   static workletFailure: Error | null = null;
+  static workletGates: Array<Promise<void>> = [];
+  static resumeGates: Array<Promise<void>> = [];
+  static closeGates: Array<Promise<void>> = [];
   readonly sampleRate = 48_000;
   readonly currentTime = 0;
   readonly destination = {} as AudioDestinationNode;
   readonly audioWorklet = { addModule: vi.fn(async () => {
     if (MockAudioContext.workletFailure) throw MockAudioContext.workletFailure;
+    await (MockAudioContext.workletGates.shift() ?? Promise.resolve());
   }) };
   readonly sources: MockBufferSource[] = [];
-  close = vi.fn().mockResolvedValue(undefined);
-  resume = vi.fn().mockResolvedValue(undefined);
+  close = vi.fn(async () => { await (MockAudioContext.closeGates.shift() ?? Promise.resolve()); });
+  resume = vi.fn(async () => { await (MockAudioContext.resumeGates.shift() ?? Promise.resolve()); });
   createMediaStreamSource = vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() }));
   createGain = vi.fn(() => ({ gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }));
 
@@ -164,6 +178,9 @@ beforeEach(() => {
   MockAudioContext.decoder = null;
   MockAudioContext.workletFailure = null;
   MockAudioContext.nextSampleRate = 48_000;
+  MockAudioContext.workletGates = [];
+  MockAudioContext.resumeGates = [];
+  MockAudioContext.closeGates = [];
   vi.stubGlobal("WebSocket", MockWebSocket);
   vi.stubGlobal("AudioContext", MockAudioContext);
   vi.stubGlobal("AudioWorkletNode", MockAudioWorkletNode);
@@ -354,6 +371,63 @@ describe("useVoiceSession", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:worklet");
   });
 
+  it("immediately aborts microphone setup while addModule is pending and permits a fresh reconnect start", async () => {
+    const oldWorklet = deferred();
+    MockAudioContext.workletGates = [oldWorklet.promise, Promise.resolve()];
+    const oldStop = vi.fn();
+    const newStop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia)
+      .mockResolvedValueOnce({ getTracks: () => [{ stop: oldStop }] } as unknown as MediaStream)
+      .mockResolvedValueOnce({ getTracks: () => [{ stop: newStop }] } as unknown as MediaStream);
+    const { hook } = openSession();
+    let oldStart!: Promise<void>;
+    act(() => { oldStart = hook.result.current.startMicrophone(); });
+    await waitFor(() => expect(MockAudioContext.instances[0].audioWorklet.addModule).toHaveBeenCalledOnce());
+
+    await act(async () => hook.result.current.disconnect());
+    const cleanedBeforeWorkletSettled = oldStop.mock.calls.length === 1
+      && MockAudioContext.instances[0].close.mock.calls.length === 1
+      && vi.mocked(URL.revokeObjectURL).mock.calls.length === 1;
+    act(() => hook.result.current.connect());
+    const nextSocket = MockWebSocket.instances.at(-1)!;
+    act(() => nextSocket.open());
+    emit(nextSocket, readyEvent());
+    let newStart!: Promise<void>;
+    act(() => { newStart = hook.result.current.startMicrophone(); });
+    const requestedFreshMedia = vi.mocked(navigator.mediaDevices.getUserMedia).mock.calls.length === 2;
+    oldWorklet.resolve();
+    await act(async () => Promise.all([oldStart, newStart]));
+
+    expect(cleanedBeforeWorkletSettled).toBe(true);
+    expect(requestedFreshMedia).toBe(true);
+    expect(hook.result.current.isMicrophoneActive).toBe(true);
+  });
+
+  it("immediately aborts microphone setup while resume is pending after unmount", async () => {
+    const resumeGate = deferred();
+    MockAudioContext.resumeGates = [resumeGate.promise];
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    const hook = renderHook(() => useVoiceSession({ url: "ws://localhost/v1/voice" }));
+    let pending!: Promise<void>;
+    act(() => { pending = hook.result.current.startMicrophone(); });
+    await waitFor(() => expect(MockAudioContext.instances[0].resume).toHaveBeenCalledOnce());
+
+    hook.unmount();
+    await waitFor(() => {
+      expect(stop).toHaveBeenCalledOnce();
+      expect(MockAudioContext.instances[0].close).toHaveBeenCalledOnce();
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:worklet");
+    });
+    const cleanedBeforeResumeSettled = stop.mock.calls.length === 1
+      && MockAudioContext.instances[0].close.mock.calls.length === 1
+      && vi.mocked(URL.revokeObjectURL).mock.calls.length === 1;
+    resumeGate.resolve();
+    await pending;
+
+    expect(cleanedBeforeResumeSettled).toBe(true);
+  });
+
   it("submits typed text silently by default and stops active playback", async () => {
     const { hook, socket } = openSession();
     const wav = wavBytes();
@@ -426,6 +500,16 @@ describe("useVoiceSession", () => {
     expect(MockAudioContext.instances.flatMap((context) => context.sources).filter((source) => source.start.mock.calls.length > 0)).toHaveLength(1);
   });
 
+  it("plays the latest preview when the purged prior preview produces no response", async () => {
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.previewVoice("clear_female", 1));
+    act(() => hook.result.current.previewVoice("clear_female", 1.2));
+    const wav = wavBytes();
+    emit(socket, { type: "voice.preview.chunk", preview_id: 2, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances.flatMap((context) => context.sources).filter((source) => source.start.mock.calls.length > 0)).toHaveLength(1);
+  });
+
   it("fails closed without misassociating binary payloads after back-to-back metadata", async () => {
     const { hook, socket } = openSession();
     const wav = wavBytes();
@@ -470,6 +554,27 @@ describe("useVoiceSession", () => {
     expect(source.stop).toHaveBeenCalledOnce();
     expect(hook.result.current.connectionStatus).toBe("disconnected");
     expect(hook.result.current.isMicrophoneActive).toBe(false);
+  });
+
+  it("does not let delayed old-socket cleanup clear an immediately reconnected draft", async () => {
+    const oldClose = deferred();
+    MockAudioContext.closeGates = [oldClose.promise];
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream);
+    const { hook, socket: oldSocket } = openSession();
+    await act(async () => hook.result.current.startMicrophone());
+
+    act(() => oldSocket.close());
+    act(() => hook.result.current.connect());
+    const newSocket = MockWebSocket.instances.at(-1)!;
+    act(() => newSocket.open());
+    emit(newSocket, readyEvent());
+    emit(newSocket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 1, delta: "new" });
+    oldClose.resolve();
+    await act(async () => Promise.resolve());
+    emit(newSocket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 1, delta: " draft" });
+
+    expect(hook.result.current.connectionStatus).toBe("connected");
+    expect(hook.result.current.messages.filter((message) => message.role === "assistant").map((message) => message.text)).toEqual(["new draft"]);
   });
 
   it("keeps voice and typed messages in one ordered stream and preserves cancelled text", () => {
