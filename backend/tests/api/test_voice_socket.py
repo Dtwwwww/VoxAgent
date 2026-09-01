@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -19,6 +20,7 @@ from voxagent.conversation.events import (
 )
 
 SESSION_TOKEN = base64.urlsafe_b64encode(b"x" * 32).decode("ascii").rstrip("=")
+voice_app = importlib.import_module("voxagent.api.app")
 
 
 class FakeOrchestrator:
@@ -63,7 +65,10 @@ class FakeOrchestrator:
     def select_voice(self, voice_key: str, speed: float):
         self.calls.append(("select_voice", voice_key, speed))
         return ErrorMessage(
-            type="error", code="selected_voice", message="test", recoverable=True
+            type="error",
+            code="unknown_voice" if voice_key == "unknown_voice" else "selected_voice",
+            message="test",
+            recoverable=True,
         )
 
     async def preview_voice(self, voice_key: str, speed: float):
@@ -139,6 +144,20 @@ def test_healthz_contains_only_public_status():
     assert "token" not in serialized
     assert "path" not in serialized
     assert "qwen" not in serialized
+
+
+def test_application_shutdown_closes_production_owned_resources():
+    closed: list[str] = []
+
+    async def close_resource() -> None:
+        closed.append("closed")
+
+    application = create_app(Factory(), SESSION_TOKEN, on_shutdown=close_resource)
+
+    with TestClient(application) as client:
+        assert client.get("/healthz").status_code == 200
+
+    assert closed == ["closed"]
 
 
 @pytest.mark.parametrize("query", ["", "?token=wrong", "?token=中文"])
@@ -250,6 +269,27 @@ def test_recoverable_validation_error_does_not_close_socket(payload: dict[str, o
     assert error["type"] == "error"
     assert error["code"] == "invalid_event"
     assert error["recoverable"] is True
+    assert ready["type"] == "session.ready"
+
+
+def test_unknown_voice_key_is_recoverable_and_socket_remains_usable():
+    client, _ = _client()
+    url = f"/v1/voice?token={SESSION_TOKEN}"
+
+    with client.websocket_connect(url) as socket:
+        socket.send_json(
+            {"type": "voice.select", "voice_key": "unknown_voice", "speed": 1.0}
+        )
+        error = socket.receive_json()
+        socket.send_json({"type": "session.start"})
+        ready = socket.receive_json()
+
+    assert error == {
+        "type": "error",
+        "code": "unknown_voice",
+        "message": "test",
+        "recoverable": True,
+    }
     assert ready["type"] == "session.ready"
 
 
@@ -371,6 +411,153 @@ async def test_concurrent_reply_and_preview_producers_keep_each_wav_pair_adjacen
         ("tts.chunk", b"reply-wav"),
         ("voice.preview.chunk", b"preview-wav"),
     }
+
+
+@pytest.mark.asyncio
+async def test_microphone_worker_applies_bounded_backpressure_and_preserves_frame_order():
+    class BlockingOrchestrator:
+        def __init__(self) -> None:
+            self.calls: list[bytes] = []
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def accept_audio(self, frame: bytes):
+            self.calls.append(frame)
+            if len(self.calls) == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+            yield ErrorMessage(
+                type="error", code="frame", message="test", recoverable=True
+            )
+
+        async def commit_audio(self):
+            if False:
+                yield None
+
+    class RecordingWriter:
+        async def send(self, *items: object) -> None:
+            await asyncio.sleep(0)
+
+    orchestrator = BlockingOrchestrator()
+    tracked: set[asyncio.Task[object]] = set()
+    worker = voice_app._MicrophoneWorker(
+        orchestrator,
+        RecordingWriter(),
+        tracked.add,
+        max_pending=2,
+    )
+    worker.start()
+    await worker.submit_frame(b"frame-1")
+    await orchestrator.first_started.wait()
+    await worker.submit_frame(b"frame-2")
+    await worker.submit_frame(b"frame-3")
+
+    blocked = asyncio.create_task(worker.submit_frame(b"frame-4"))
+    await asyncio.sleep(0)
+    assert blocked.done() is False
+    assert worker.pending_count == 2
+
+    orchestrator.release_first.set()
+    await asyncio.wait_for(blocked, timeout=0.2)
+    await asyncio.wait_for(worker.join(), timeout=0.2)
+    if tracked:
+        await asyncio.gather(*tracked)
+    await worker.close()
+
+    assert orchestrator.calls == [b"frame-1", b"frame-2", b"frame-3", b"frame-4"]
+
+
+@pytest.mark.asyncio
+async def test_microphone_worker_orders_commit_after_frames_but_detaches_reply_remainder():
+    class BlockingOrchestrator:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+            self.frame_started = asyncio.Event()
+            self.allow_frame_prime = asyncio.Event()
+            self.commit_seen = asyncio.Event()
+            self.release_reply = asyncio.Event()
+
+        async def accept_audio(self, frame: bytes):
+            self.calls.append(frame)
+            self.frame_started.set()
+            await self.allow_frame_prime.wait()
+            yield ErrorMessage(
+                type="error", code="frame", message="test", recoverable=True
+            )
+            await self.release_reply.wait()
+            yield ErrorMessage(
+                type="error", code="reply_done", message="test", recoverable=True
+            )
+
+        async def commit_audio(self):
+            self.calls.append("commit")
+            self.commit_seen.set()
+            yield ErrorMessage(
+                type="error", code="commit", message="test", recoverable=True
+            )
+
+    class RecordingWriter:
+        async def send(self, *items: object) -> None:
+            await asyncio.sleep(0)
+
+    orchestrator = BlockingOrchestrator()
+    tracked: set[asyncio.Task[object]] = set()
+    worker = voice_app._MicrophoneWorker(
+        orchestrator,
+        RecordingWriter(),
+        tracked.add,
+        max_pending=2,
+    )
+    worker.start()
+    await worker.submit_frame(b"frame")
+    await orchestrator.frame_started.wait()
+    await worker.submit_commit()
+    await asyncio.sleep(0)
+    assert orchestrator.calls == [b"frame"]
+
+    orchestrator.allow_frame_prime.set()
+    await asyncio.wait_for(orchestrator.commit_seen.wait(), timeout=0.2)
+    assert orchestrator.calls == [b"frame", "commit"]
+    assert orchestrator.release_reply.is_set() is False
+
+    orchestrator.release_reply.set()
+    await asyncio.wait_for(worker.join(), timeout=0.2)
+    if tracked:
+        await asyncio.gather(*tracked)
+    await worker.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_microphone_worker_rejects_new_frames_instead_of_filling_dead_queue():
+    class Orchestrator:
+        async def accept_audio(self, _frame: bytes):
+            yield ErrorMessage(
+                type="error", code="frame", message="test", recoverable=True
+            )
+
+        async def commit_audio(self):
+            if False:
+                yield None
+
+    class FailingWriter:
+        async def send(self, *items: object) -> None:
+            raise RuntimeError("writer failed")
+
+    worker = voice_app._MicrophoneWorker(
+        Orchestrator(),
+        FailingWriter(),
+        lambda _task: None,
+        max_pending=1,
+    )
+    task = worker.start()
+    with pytest.raises(RuntimeError, match="writer failed"):
+        await worker.submit_frame(b"frame-1")
+    assert task.done()
+
+    with pytest.raises(RuntimeError, match="writer failed"):
+        await worker.submit_frame(b"frame-2")
+
+    await worker.close()
 
 
 def test_stop_exception_cannot_strand_single_session_slot():

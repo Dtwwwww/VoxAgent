@@ -1020,5 +1020,42 @@ async def test_commit_audio_finishes_buffered_turn_through_normal_reply_path():
     await orchestrator.stop()
 
 
+@pytest.mark.asyncio
+async def test_concurrent_commits_waiting_on_partial_asr_claim_live_turn_once():
+    partial = BlockingPartialAsr()
+    final_asr = FakeAsr(["只能提交一次"])
+    orchestrator, _, _ = make_orchestrator(
+        vad=FakeVad([VadDecision.STARTED, VadDecision.SPEECH]),
+        replies=[["单次回答"]],
+    )
+    orchestrator.partial_asr = partial
+    orchestrator.asr = final_asr
+    _ = [item async for item in orchestrator.accept_audio(FRAME)]
+    pending_frame = asyncio.create_task(_collect(orchestrator.accept_audio(FRAME)))
+    await asyncio.to_thread(partial.started.wait, 1)
+
+    commits = [
+        asyncio.create_task(_collect(orchestrator.commit_audio())),
+        asyncio.create_task(_collect(orchestrator.commit_audio())),
+    ]
+    await asyncio.sleep(0)
+    partial.release.set()
+    await pending_frame
+    results = await asyncio.gather(*commits)
+
+    assert len(final_asr.calls) == 1
+    assert sum(
+        item.type == "asr.final"
+        for result in results
+        for item in result
+        if hasattr(item, "type")
+    ) == 1
+    assert orchestrator.history.messages_for_model()[-2:] == (
+        ChatMessage("user", "只能提交一次"),
+        ChatMessage("assistant", "单次回答"),
+    )
+    await orchestrator.stop()
+
+
 async def _collect(iterator):
     return [item async for item in iterator]

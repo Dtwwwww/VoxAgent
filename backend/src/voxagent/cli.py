@@ -186,7 +186,11 @@ def _create_production_app(session_token: str):
             voice_catalog=catalog,
         )
 
-    application = create_app(orchestrator_factory, session_token)
+    application = create_app(
+        orchestrator_factory,
+        session_token,
+        on_shutdown=http.aclose,
+    )
     application.state.ollama_http = http
     return application
 

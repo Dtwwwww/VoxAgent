@@ -6,7 +6,8 @@ import binascii
 import hmac
 import json
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Protocol
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -58,6 +59,7 @@ class Orchestrator(Protocol):
 
 OrchestratorFactory = Callable[[], Orchestrator]
 _Output = object | bytes
+_MICROPHONE_QUEUE_CAPACITY = 32
 
 
 def _validate_session_token(token: str) -> str:
@@ -178,6 +180,131 @@ async def _forward_outputs(
             await writer.send(item)
 
 
+class _MicrophoneWorker:
+    def __init__(
+        self,
+        orchestrator: Orchestrator,
+        writer: _SocketWriter,
+        track_producer: Callable[[asyncio.Task[object]], object],
+        *,
+        max_pending: int = _MICROPHONE_QUEUE_CAPACITY,
+    ) -> None:
+        if max_pending < 1:
+            raise ValueError("microphone queue capacity must be positive")
+        self._orchestrator = orchestrator
+        self._writer = writer
+        self._track_producer = track_producer
+        self._queue: asyncio.Queue[tuple[str, bytes | None]] = asyncio.Queue(
+            maxsize=max_pending
+        )
+        self._task: asyncio.Task[object] | None = None
+
+    @property
+    def pending_count(self) -> int:
+        return self._queue.qsize()
+
+    @property
+    def task(self) -> asyncio.Task[object] | None:
+        return self._task
+
+    def start(self) -> asyncio.Task[object]:
+        if self._task is not None:
+            raise RuntimeError("microphone worker already started")
+        self._task = asyncio.create_task(self.run(), name="voice-microphone-worker")
+        return self._task
+
+    async def submit_frame(self, frame: bytes) -> None:
+        await self._submit(("frame", frame))
+
+    async def submit_commit(self) -> None:
+        await self._submit(("commit", None))
+
+    async def _submit(self, command: tuple[str, bytes | None]) -> None:
+        task = self._task
+        if task is None:
+            raise RuntimeError("microphone worker has not started")
+        if task.done():
+            await self._raise_worker_result(task)
+        pending_put = asyncio.create_task(self._queue.put(command))
+        try:
+            done, _ = await asyncio.wait(
+                (pending_put, task), return_when=asyncio.FIRST_COMPLETED
+            )
+        except BaseException:
+            pending_put.cancel()
+            await asyncio.gather(pending_put, return_exceptions=True)
+            raise
+        if task in done:
+            if not pending_put.done():
+                pending_put.cancel()
+                await asyncio.gather(pending_put, return_exceptions=True)
+            await self._raise_worker_result(task)
+        await pending_put
+        if task.done():
+            await self._raise_worker_result(task)
+
+    @staticmethod
+    async def _raise_worker_result(task: asyncio.Task[object]) -> None:
+        try:
+            await task
+        except asyncio.CancelledError as error:
+            raise RuntimeError("microphone worker stopped") from error
+        raise RuntimeError("microphone worker stopped unexpectedly")
+
+    async def run(self) -> None:
+        while True:
+            kind, frame = await self._queue.get()
+            try:
+                outputs = (
+                    self._orchestrator.accept_audio(frame)
+                    if kind == "frame" and frame is not None
+                    else self._orchestrator.commit_audio()
+                )
+                await self._prime(outputs)
+            finally:
+                self._queue.task_done()
+
+    async def _prime(self, outputs: AsyncIterator[_Output]) -> None:
+        iterator = aiter(outputs)
+        try:
+            first = await anext(iterator)
+        except StopAsyncIteration:
+            return
+        if isinstance(first, (TtsChunk, VoicePreviewChunk)):
+            audio = await anext(iterator)
+            if not isinstance(audio, bytes) or len(audio) != first.byte_length:
+                raise RuntimeError("audio metadata must be followed by matching WAV bytes")
+            await self._writer.send(first, audio)
+        else:
+            await self._writer.send(first)
+        remainder = asyncio.create_task(
+            _forward_outputs(iterator, self._writer),
+            name="voice-microphone-output",
+        )
+        self._track_producer(remainder)
+
+    async def join(self) -> None:
+        await self._queue.join()
+
+    async def close(self) -> None:
+        task = self._task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._queue.task_done()
+
+
 async def _dispatch_event(
     event: object, orchestrator: Orchestrator, writer: _SocketWriter
 ) -> bool:
@@ -217,10 +344,29 @@ async def _dispatch_event(
     return False
 
 
-def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) -> FastAPI:
+def create_app(
+    orchestrator_factory: OrchestratorFactory,
+    session_token: str,
+    *,
+    on_shutdown: Callable[[], Awaitable[None]] | None = None,
+) -> FastAPI:
     expected_token = _validate_session_token(session_token)
     expected_token_bytes = expected_token.encode("ascii")
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            if on_shutdown is not None:
+                await on_shutdown()
+
+    app = FastAPI(
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     slot_lock = asyncio.Lock()
     session_active = False
 
@@ -249,14 +395,17 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
 
         orchestrator: Orchestrator | None = None
         writer: _SocketWriter | None = None
+        microphone: _MicrophoneWorker | None = None
         receive_task: asyncio.Task[dict[str, object]] | None = None
-        producers: set[asyncio.Task[bool]] = set()
+        producers: set[asyncio.Task[object]] = set()
         orchestrator_stopped = False
         try:
             orchestrator = orchestrator_factory()
             await socket.accept()
             writer = _SocketWriter(socket)
             writer.start()
+            microphone = _MicrophoneWorker(orchestrator, writer, producers.add)
+            producers.add(microphone.start())
             while True:
                 if receive_task is None:
                     receive_task = asyncio.create_task(
@@ -282,11 +431,7 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
                     except (TypeError, ValueError):
                         await socket.close(code=4400)
                         break
-                    producer = asyncio.create_task(
-                        _forward_outputs(orchestrator.accept_audio(raw), writer),
-                        name="voice-socket-audio",
-                    )
-                    producers.add(producer)
+                    await microphone.submit_frame(raw)
                     continue
                 try:
                     decoded = json.loads(message.get("text") or "")
@@ -305,11 +450,12 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
                         )
                     )
                     continue
-                if event.type in {
+                if event.type == "audio.commit":
+                    await microphone.submit_commit()
+                elif event.type in {
                     "text.submit",
                     "assistant.speak",
                     "voice.preview",
-                    "audio.commit",
                 }:
                     producer = asyncio.create_task(
                         _dispatch_event(event, orchestrator, writer),
@@ -325,6 +471,11 @@ def create_app(orchestrator_factory: OrchestratorFactory, session_token: str) ->
         finally:
             try:
                 try:
+                    if microphone is not None:
+                        worker_task = microphone.task
+                        await microphone.close()
+                        if worker_task is not None:
+                            producers.discard(worker_task)
                     pending = [*producers]
                     if receive_task is not None:
                         pending.append(receive_task)

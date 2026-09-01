@@ -249,7 +249,11 @@ class ConversationOrchestrator:
 
     async def _commit_voice_token(self, token: TurnToken) -> AsyncIterator[Output]:
         async with self._action_lock:
-            if not self._owns_live_turn(token):
+            if (
+                not self._owns_live_turn(token)
+                or self.state.phase is not Phase.LISTENING
+                or not self._audio_frames
+            ):
                 return
             self.state.finish_user_speech(token)
             samples = self._all_samples()
