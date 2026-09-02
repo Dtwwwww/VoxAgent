@@ -74,6 +74,13 @@ Manual acceptance replaces the former four-voice exercise with one selected-voic
 preview and answer once at each speed, refresh to confirm only the public voice key and speed
 persist, and confirm neither `voice-005` nor the native speaker ID appears in the browser.
 
+The user approved a first-version latency amendment after reviewing the measured Kokoro ID 3
+benchmark (`14.331` seconds p95 TTS first-audio latency). Keep the selected voice and change only
+the p95 `first assistant text token -> first TTS audio chunk` acceptance ceiling from `4.0` to
+`15.0` seconds. The `natural=1.35s` endpoint profile, the approximately `2.0s` incomplete-ending
+extension, and the `200ms` barge-in playback-stop target remain unchanged. Record the measured
+value rather than claiming that Kokoro meets the former four-second gate.
+
 ## Out of Scope
 
 The first version does not create placeholder female/male voices, duplicate `voice-005` under
