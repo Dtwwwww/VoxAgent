@@ -91,7 +91,7 @@ Run:
 
 ```powershell
 cd backend
-& .\.venv\Scripts\python.exe -m pytest tests/speech/test_tts.py tests/speech/test_voice_selection.py -v
+& .\.venv\Scripts\python.exe -m pytest tests/speech/test_tts.py tests/speech/test_voice_selection.py -v --basetemp ..\.superpowers\pytest-tmp -p no:cacheprovider
 ```
 
 Expected RED: import/collection fails because `voice_selection.py` and `build_voice_review_layout` do not exist.
@@ -227,7 +227,7 @@ Run:
 
 ```powershell
 cd backend
-& .\.venv\Scripts\python.exe -m pytest tests/speech/test_voice_catalog.py tests/speech/test_voice_selection.py tests/api/test_voice_socket.py -v
+& .\.venv\Scripts\python.exe -m pytest tests/speech/test_voice_catalog.py tests/speech/test_voice_selection.py tests/api/test_voice_socket.py -v --basetemp ..\.superpowers\pytest-tmp -p no:cacheprovider
 & .\.venv\Scripts\voxagent.exe serve --help
 ```
 
@@ -419,7 +419,7 @@ State explicitly that `/healthz` contains no token and the token is never commit
 
 ```powershell
 cd backend
-& .\.venv\Scripts\python.exe -m pytest -v
+& .\.venv\Scripts\python.exe -m pytest -v --basetemp ..\.superpowers\pytest-tmp -p no:cacheprovider
 & .\.venv\Scripts\ruff.exe check src tests
 cd ..\frontend
 & .\node_modules\.bin\vitest.cmd run
