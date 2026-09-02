@@ -40,6 +40,10 @@ from voxagent.speech.voice_catalog import (
     VoiceCatalog,
     load_production_catalog,
 )
+from voxagent.speech.voice_selection import (
+    VoiceSelectionError,
+    publish_approved_voice_artifacts,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -316,6 +320,19 @@ def prepare_voice_review_command(
     )
     template = prepare_voice_review(output_dir, kokoro=kokoro, melo=melo)
     typer.echo(json.dumps(template, ensure_ascii=False, indent=2))
+
+
+@app.command("finalize-voice-review")
+def finalize_voice_review_command(
+    review_template: Annotated[Path, typer.Option("--review-template", dir_okay=False)],
+    style_output: Annotated[Path, typer.Option("--style-output", dir_okay=False)],
+    catalog_output: Annotated[Path, typer.Option("--catalog-output", dir_okay=False)],
+) -> None:
+    try:
+        publish_approved_voice_artifacts(review_template, style_output, catalog_output)
+    except (VoiceSelectionError, OSError, json.JSONDecodeError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=2) from error
 
 
 @app.command("validate-baseline")

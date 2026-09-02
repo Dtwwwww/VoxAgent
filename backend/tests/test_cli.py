@@ -11,6 +11,38 @@ from voxagent.speech.voice_catalog import VoiceCatalogError
 SESSION_TOKEN = base64.urlsafe_b64encode(b"x" * 32).decode("ascii").rstrip("=")
 
 
+def _valid_voice_review_template() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "seed": 20260830,
+        "engine_comparison": [
+            {
+                "sample_id": f"engine-{index:03d}",
+                "file": f"engine-{index:03d}.wav",
+                "naturalness": None,
+                "intelligibility": None,
+            }
+            for index in range(1, 7)
+        ],
+        "voice_style": [
+            {
+                "sample_id": f"voice-{index:03d}",
+                "file": f"voice-{index:03d}.wav",
+                "assigned_label": None,
+                "naturalness": None,
+                "intelligibility": None,
+            }
+            for index in range(1, 9)
+        ],
+        "required_voice_labels": ["清澈女声", "温柔女声", "沉稳男声", "阳光男声"],
+        "scoring_rules": {
+            "range": [1, 5],
+            "minimum_selected_score": 3,
+            "no_duplicate_assignments": True,
+        },
+    }
+
+
 def test_preflight_outputs_json_and_blocks_when_gpu_is_unavailable(monkeypatch, tmp_path):
     snapshot = HardwareSnapshot(
         cpu_name="CPU",
@@ -336,6 +368,75 @@ def test_prepare_voice_review_uses_local_engines_without_a_catalog(monkeypatch, 
 
     assert result.exit_code == 0, result.output
     assert created == [("kokoro", None), ("melo", None)]
+
+
+def test_finalize_voice_review_publishes_validated_style_and_catalog_together(tmp_path):
+    review_template = tmp_path / "review-template.json"
+    review_template.write_text(
+        json.dumps(_valid_voice_review_template(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    style_output = tmp_path / "tts-voice-style.json"
+    catalog_output = tmp_path / "voice_catalog.json"
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "finalize-voice-review",
+            "--review-template",
+            str(review_template),
+            "--style-output",
+            str(style_output),
+            "--catalog-output",
+            str(catalog_output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(style_output.read_text(encoding="utf-8"))["selected_sample_id"] == (
+        "voice-005"
+    )
+    assert json.loads(catalog_output.read_text(encoding="utf-8"))["voices"] == [
+        {
+            "voice_key": "default_voice",
+            "display_name": "声灵默认音色",
+            "description": "自然清晰，适合日常对话",
+            "gender": "neutral",
+            "engine": "kokoro",
+            "native_voice_id": 3,
+            "is_default": True,
+            "previewable": True,
+        }
+    ]
+    assert style_output.read_bytes().endswith(b"\n")
+    assert catalog_output.read_bytes().endswith(b"\n")
+
+
+def test_finalize_voice_review_rejects_invalid_input_without_partial_artifacts(tmp_path):
+    review_template = tmp_path / "review-template.json"
+    template = _valid_voice_review_template()
+    template["seed"] = 7
+    review_template.write_text(json.dumps(template), encoding="utf-8")
+    style_output = tmp_path / "tts-voice-style.json"
+    catalog_output = tmp_path / "voice_catalog.json"
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "finalize-voice-review",
+            "--review-template",
+            str(review_template),
+            "--style-output",
+            str(style_output),
+            "--catalog-output",
+            str(catalog_output),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Error:" in result.stderr
+    assert not style_output.exists()
+    assert not catalog_output.exists()
 
 
 def test_serve_uses_localhost_message_limit_and_no_access_log(monkeypatch):

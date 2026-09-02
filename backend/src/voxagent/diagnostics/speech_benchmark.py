@@ -17,13 +17,8 @@ import psutil
 import soundfile
 
 from voxagent.speech.asr import AsrEngine, PartialAsrEngine
-from voxagent.speech.tts import AudioChunk
+from voxagent.speech.tts import TTS_BENCHMARK_TEXTS, AudioChunk
 
-TTS_BENCHMARK_TEXTS = (
-    "你好，我是声灵，很高兴陪你聊聊天。",
-    "下午三点提醒我喝水，然后打开记事本。",
-    "今天的 meeting 改到晚上八点，请不要忘记。",
-)
 MIN_AUDIO_DURATION_SECONDS = 10.0
 MAX_AUDIO_DURATION_SECONDS = 20.0
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}")

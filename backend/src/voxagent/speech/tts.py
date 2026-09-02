@@ -17,6 +17,11 @@ PUBLIC_TTS_SPEEDS = frozenset({0.8, 1.0, 1.2})
 TtsEngineName = Literal["kokoro", "melo"]
 VOICE_REVIEW_SEED = 20260830
 KOKORO_REVIEW_VOICE_IDS = (3, 13, 27, 43, 58, 69, 85, 98)
+TTS_BENCHMARK_TEXTS = (
+    "你好，我是声灵，很高兴陪你聊聊天。",
+    "下午三点提醒我喝水，然后打开记事本。",
+    "今天的 meeting 改到晚上八点，请不要忘记。",
+)
 VOICE_REVIEW_SENTENCE = "你好，我是声灵，很高兴陪你一起聊天。"
 VOICE_REVIEW_SPEED = 1.2
 _MIN_REVIEW_DURATION_SECONDS = 3.0
@@ -37,6 +42,20 @@ class AudioChunk:
             raise ValueError("duration_seconds must be positive")
         if not self.wav_bytes:
             raise ValueError("wav_bytes must be non-empty")
+
+
+@dataclass(frozen=True, slots=True)
+class EngineReviewAssignment:
+    sample_id: str
+    engine: Literal["kokoro", "melo"]
+    native_voice_id: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceReviewAssignment:
+    sample_id: str
+    native_voice_id: int
 
 
 class TtsEngine(Protocol):
@@ -171,6 +190,34 @@ class SherpaOfflineTts:
         )
 
 
+def build_voice_review_layout(
+    seed: int = VOICE_REVIEW_SEED,
+) -> tuple[tuple[EngineReviewAssignment, ...], tuple[VoiceReviewAssignment, ...]]:
+    randomizer = random.Random(seed)
+    engine_sources: list[tuple[Literal["kokoro", "melo"], int, str]] = [
+        (engine, voice_id, text)
+        for text in TTS_BENCHMARK_TEXTS
+        for engine, voice_id in (("kokoro", 3), ("melo", 0))
+    ]
+    randomizer.shuffle(engine_sources)
+    engines = tuple(
+        EngineReviewAssignment(
+            sample_id=f"engine-{index:03d}",
+            engine=engine,
+            native_voice_id=voice_id,
+            text=text,
+        )
+        for index, (engine, voice_id, text) in enumerate(engine_sources, start=1)
+    )
+    voice_ids = list(KOKORO_REVIEW_VOICE_IDS)
+    randomizer.shuffle(voice_ids)
+    voices = tuple(
+        VoiceReviewAssignment(sample_id=f"voice-{index:03d}", native_voice_id=voice_id)
+        for index, voice_id in enumerate(voice_ids, start=1)
+    )
+    return engines, voices
+
+
 def prepare_voice_review(
     output_dir: Path,
     *,
@@ -185,43 +232,37 @@ def prepare_voice_review(
             raise TypeError(f"{expected_engine} must expose synthesize_native()")
     destination = Path(output_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    randomizer = random.Random(VOICE_REVIEW_SEED)
-    engine_sources = [
-        (tts, text, voice_id)
-        for text in (
-            "你好，我是声灵，很高兴陪你聊聊天。",
-            "下午三点提醒我喝水，然后打开记事本。",
-            "今天的 meeting 改到晚上八点，请不要忘记。",
-        )
-        for tts, voice_id in ((kokoro, 3), (melo, 0))
-    ]
-    randomizer.shuffle(engine_sources)
+    engine_assignments, voice_assignments = build_voice_review_layout()
+    engines = {"kokoro": kokoro, "melo": melo}
     engine_comparison: list[dict[str, object]] = []
-    for index, (tts, text, voice_id) in enumerate(engine_sources, start=1):
-        sample_id = f"engine-{index:03d}"
-        audio = tts.synthesize_native(text, voice_id, VOICE_REVIEW_SPEED)
-        _write_review_wav(destination / f"{sample_id}.wav", audio)
+    for assignment in engine_assignments:
+        tts = engines[assignment.engine]
+        audio = tts.synthesize_native(
+            assignment.text, assignment.native_voice_id, VOICE_REVIEW_SPEED
+        )
+        _write_review_wav(destination / f"{assignment.sample_id}.wav", audio)
         engine_comparison.append(
             {
-                "sample_id": sample_id,
-                "file": f"{sample_id}.wav",
+                "sample_id": assignment.sample_id,
+                "file": f"{assignment.sample_id}.wav",
                 "naturalness": None,
                 "intelligibility": None,
             }
         )
-    voice_ids = list(KOKORO_REVIEW_VOICE_IDS)
-    randomizer.shuffle(voice_ids)
     voice_style: list[dict[str, object]] = []
-    for index, voice_id in enumerate(voice_ids, start=1):
-        sample_id = f"voice-{index:03d}"
+    for assignment in voice_assignments:
         _write_review_wav(
-            destination / f"{sample_id}.wav",
-            kokoro.synthesize_native(VOICE_REVIEW_SENTENCE, voice_id, VOICE_REVIEW_SPEED),
+            destination / f"{assignment.sample_id}.wav",
+            kokoro.synthesize_native(
+                VOICE_REVIEW_SENTENCE,
+                assignment.native_voice_id,
+                VOICE_REVIEW_SPEED,
+            ),
         )
         voice_style.append(
             {
-                "sample_id": sample_id,
-                "file": f"{sample_id}.wav",
+                "sample_id": assignment.sample_id,
+                "file": f"{assignment.sample_id}.wav",
                 "assigned_label": None,
                 "naturalness": None,
                 "intelligibility": None,

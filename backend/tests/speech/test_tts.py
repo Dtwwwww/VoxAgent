@@ -6,7 +6,10 @@ import numpy as np
 import pytest
 import soundfile
 
+from voxagent.speech import tts as tts_module
 from voxagent.speech.tts import (
+    TTS_BENCHMARK_TEXTS,
+    VOICE_REVIEW_SENTENCE,
     AudioChunk,
     SherpaOfflineTts,
     _prepare_review_wav,
@@ -162,22 +165,56 @@ class _ReviewTts:
         return AudioChunk(self.wav_bytes, sample_rate=24000, duration_seconds=0.1)
 
 
-def test_voice_review_is_anonymous_deterministic_and_has_all_required_samples(tmp_path):
+def test_voice_review_is_anonymous_deterministic_and_has_all_required_samples(
+    monkeypatch, tmp_path
+):
     stream = io.BytesIO()
     soundfile.write(stream, np.zeros(2400, dtype=np.float32), 24000, format="WAV", subtype="PCM_16")
     kokoro = _ReviewTts("kokoro", stream.getvalue())
     melo = _ReviewTts("melo", stream.getvalue())
+    layout_calls = 0
+    real_build_layout = tts_module.build_voice_review_layout
+
+    def tracked_build_layout():
+        nonlocal layout_calls
+        layout_calls += 1
+        return real_build_layout()
+
+    monkeypatch.setattr(tts_module, "build_voice_review_layout", tracked_build_layout)
 
     template = prepare_voice_review(tmp_path, kokoro=kokoro, melo=melo)
 
     payload = json.loads((tmp_path / "review-template.json").read_text(encoding="utf-8"))
+    assert layout_calls == 1
     assert template == payload
     assert payload["seed"] == 20260830
     assert len(payload["engine_comparison"]) == 6
     assert len(payload["voice_style"]) == 8
+    assert [item["file"] for item in payload["engine_comparison"]] == [
+        f"engine-{index:03d}.wav" for index in range(1, 7)
+    ]
+    assert [item["file"] for item in payload["voice_style"]] == [
+        f"voice-{index:03d}.wav" for index in range(1, 9)
+    ]
     assert len(list(tmp_path.glob("*.wav"))) == 14
-    assert len(kokoro.calls) == 11
-    assert len(melo.calls) == 3
+    assert kokoro.calls == [
+        (TTS_BENCHMARK_TEXTS[2], 3, 1.2),
+        (TTS_BENCHMARK_TEXTS[1], 3, 1.2),
+        (TTS_BENCHMARK_TEXTS[0], 3, 1.2),
+        (VOICE_REVIEW_SENTENCE, 85, 1.2),
+        (VOICE_REVIEW_SENTENCE, 69, 1.2),
+        (VOICE_REVIEW_SENTENCE, 43, 1.2),
+        (VOICE_REVIEW_SENTENCE, 13, 1.2),
+        (VOICE_REVIEW_SENTENCE, 3, 1.2),
+        (VOICE_REVIEW_SENTENCE, 27, 1.2),
+        (VOICE_REVIEW_SENTENCE, 98, 1.2),
+        (VOICE_REVIEW_SENTENCE, 58, 1.2),
+    ]
+    assert melo.calls == [
+        (TTS_BENCHMARK_TEXTS[2], 0, 1.2),
+        (TTS_BENCHMARK_TEXTS[1], 0, 1.2),
+        (TTS_BENCHMARK_TEXTS[0], 0, 1.2),
+    ]
     assert {speed for _, _, speed in (*kokoro.calls, *melo.calls)} == {1.2}
     for wav in tmp_path.glob("*.wav"):
         info = soundfile.info(wav)
