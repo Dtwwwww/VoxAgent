@@ -43,7 +43,6 @@ export interface VoiceSessionController {
   isMicrophoneActive: boolean;
   modelId: string | null;
   offline: boolean;
-  speakTextReplies: boolean;
   connect(): void;
   disconnect(): Promise<void>;
   startMicrophone(): Promise<void>;
@@ -53,7 +52,6 @@ export interface VoiceSessionController {
   selectVoice(voiceKey: string, speed: VoiceSpeed): void;
   previewVoice(voiceKey: string, speed: VoiceSpeed): void;
   cancelActive(): void;
-  setSpeakTextReplies(enabled: boolean): void;
 }
 
 type AudioMetadata =
@@ -75,7 +73,6 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const [isMicrophoneActive, setMicrophoneActive] = useState(false);
   const [modelId, setModelId] = useState<string | null>(null);
   const [offline, setOffline] = useState(true);
-  const [speakTextReplies, setSpeakTextRepliesState] = useState(initialSettings.speakTextReplies);
   const socketRef = useRef<WebSocket | null>(null);
   const captureRef = useRef<MicrophoneCapture | null>(null);
   const captureStartRef = useRef<Promise<void> | null>(null);
@@ -186,7 +183,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       case "voices.available": {
         setVoices(event.voices);
         setSelectedVoice((current) => {
-          const settings = reconcileVoiceSettings({ voiceKey: current?.voiceKey ?? null, speed: current?.speed ?? 1, speakTextReplies }, event.voices);
+          const settings = reconcileVoiceSettings({ voiceKey: current?.voiceKey ?? null, speed: current?.speed ?? 1 }, event.voices);
           saveVoiceSettings(localStorage, settings);
           return settings.voiceKey ? { voiceKey: settings.voiceKey, speed: settings.speed } : null;
         });
@@ -261,7 +258,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setError({ code: event.code, message: event.message, recoverable: event.recoverable });
         break;
     }
-  }, [nextId, speakTextReplies]);
+  }, [nextId]);
 
   const connect = useCallback(() => {
     if (socketRef.current && socketRef.current.readyState < WebSocket.CLOSING) return;
@@ -393,8 +390,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     playbackRef.current.stopConversation();
     setMessages((current) => [...current, { id: nextId("text-user"), role: "user", origin: "text", text, status: "complete" }]);
     setVoiceStatus("thinking");
-    send({ type: "text.submit", text, speak_response: speakTextReplies });
-  }, [nextId, send, speakTextReplies]);
+    send({ type: "text.submit", text, speak_response: false });
+  }, [nextId, send]);
 
   const speakMessage = useCallback((turnId: number) => {
     playbackRef.current.prepareTurnReplay(turnId);
@@ -405,14 +402,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const selectVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     const selection = { voiceKey, speed };
     setSelectedVoice(selection);
-    saveVoiceSettings(localStorage, { voiceKey, speed, speakTextReplies });
+    saveVoiceSettings(localStorage, { voiceKey, speed });
     send({ type: "voice.select", voice_key: voiceKey, speed });
   }, [send]);
-
-  const setSpeakTextReplies = useCallback((enabled: boolean) => {
-    setSpeakTextRepliesState(enabled);
-    saveVoiceSettings(localStorage, { voiceKey: selectedVoice?.voiceKey ?? null, speed: selectedVoice?.speed ?? 1, speakTextReplies: enabled });
-  }, [selectedVoice]);
 
   const previewVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
@@ -459,7 +451,6 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     isMicrophoneActive,
     modelId,
     offline,
-    speakTextReplies,
     connect,
     disconnect,
     startMicrophone,
@@ -469,6 +460,5 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     selectVoice,
     previewVoice,
     cancelActive,
-    setSpeakTextReplies,
   };
 }

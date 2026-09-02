@@ -14,9 +14,9 @@ function controller(): VoiceSessionController {
     ],
     voices: [{ voice_key: "default_voice", display_name: "声灵默认音色", description: "自然清晰，适合日常对话", gender: "neutral", is_default: true, previewable: true }],
     selectedVoice: { voiceKey: "default_voice", speed: 1 }, connectionStatus: "connected", voiceStatus: "idle", error: null,
-    isMicrophoneActive: false, modelId: "qwen", offline: true, speakTextReplies: false,
+    isMicrophoneActive: false, modelId: "qwen", offline: true,
     connect: vi.fn(), disconnect: vi.fn(async () => undefined), startMicrophone: vi.fn(async () => undefined), stopMicrophone: vi.fn(async () => undefined),
-    submitText: vi.fn(), speakMessage: vi.fn(), selectVoice: vi.fn(), previewVoice: vi.fn(), cancelActive: vi.fn(), setSpeakTextReplies: vi.fn(),
+    submitText: vi.fn(), speakMessage: vi.fn(), selectVoice: vi.fn(), previewVoice: vi.fn(), cancelActive: vi.fn(),
   };
 }
 
@@ -40,8 +40,7 @@ describe("App", () => {
     expect(session.submitText).toHaveBeenCalledWith("hello");
     fireEvent.keyDown(input, { key: "Escape" });
     expect(session.cancelActive).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("checkbox", { name: "文字回复自动朗读" }));
-    expect(session.setSpeakTextReplies).toHaveBeenCalledWith(true);
+    expect(screen.queryByRole("checkbox", { name: "文字回复自动朗读" })).toBeNull();
   });
 
   it("keeps a session connected when controller state creates a new object", () => {

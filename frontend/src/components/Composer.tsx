@@ -26,7 +26,6 @@ export function Composer({ controller }: { controller: VoiceSessionController })
       <button type="button" onClick={() => controller.isMicrophoneActive ? void controller.stopMicrophone() : void controller.startMicrophone()}>{controller.isMicrophoneActive ? "结束聆听" : "麦克风"}</button>
       <button type="button" onClick={controller.cancelActive}>停止</button>
       <button type="button" onClick={submit}>发送</button>
-      <label className="auto-speak"><input type="checkbox" checked={controller.speakTextReplies} onChange={(event) => controller.setSpeakTextReplies(event.target.checked)} />文字回复自动朗读</label>
     </div>
     <p className="visually-live" aria-live="polite">{validation}</p>
   </section>;

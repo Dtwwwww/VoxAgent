@@ -452,7 +452,12 @@ describe("useVoiceSession", () => {
     expect(cleanedBeforeResumeSettled).toBe(true);
   });
 
-  it("submits typed text using the current auto-speak setting and stops active playback", async () => {
+  it("keeps typed replies silent even when legacy settings enabled auto-speak", async () => {
+    localStorage.setItem("voxagent.voice-settings.v1", JSON.stringify({
+      voiceKey: null,
+      speed: 1,
+      speakTextReplies: true,
+    }));
     const { hook, socket } = openSession();
     const wav = wavBytes();
     emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 8, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
@@ -464,9 +469,8 @@ describe("useVoiceSession", () => {
     expect(source.stop).toHaveBeenCalledOnce();
     expect(socket.jsonMessages().at(-1)).toEqual({ type: "text.submit", text: "hello", speak_response: false });
     expect(hook.result.current.messages.at(-1)).toEqual(expect.objectContaining({ role: "user", origin: "text", text: "hello" }));
-    act(() => hook.result.current.setSpeakTextReplies(true));
     act(() => hook.result.current.submitText("again"));
-    expect(socket.jsonMessages().at(-1)).toEqual({ type: "text.submit", text: "again", speak_response: true });
+    expect(socket.jsonMessages().at(-1)).toEqual({ type: "text.submit", text: "again", speak_response: false });
   });
 
   it("exposes the precise voice lifecycle status transitions", async () => {
@@ -655,7 +659,7 @@ describe("useVoiceSession", () => {
 
     await act(async () => hook.result.current.disconnect());
 
-    expect(JSON.parse(localStorage.getItem("voxagent.voice-settings.v1")!)).toEqual({ voiceKey: "clear_female", speed: 0.8, speakTextReplies: false });
+    expect(JSON.parse(localStorage.getItem("voxagent.voice-settings.v1")!)).toEqual({ voiceKey: "clear_female", speed: 0.8 });
     expect(stop).toHaveBeenCalledOnce();
     expect(socket.readyState).toBe(MockWebSocket.CLOSED);
     await waitFor(() => expect(hook.result.current.connectionStatus).toBe("disconnected"));
