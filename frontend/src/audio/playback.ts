@@ -83,6 +83,12 @@ export class AudioPlayback {
     for (const source of this.sources) if (source.turnId === turnId) this.stopSource(source);
   }
 
+  prepareTurnReplay(turnId: number): void {
+    this.cancelledTurns.delete(turnId);
+    this.turns.delete(turnId);
+    for (const source of this.sources) if (source.turnId === turnId) this.stopSource(source);
+  }
+
   stopConversation(): void {
     this.conversationGeneration += 1;
     for (const source of this.sources) if (source.turnId !== undefined) this.stopSource(source);

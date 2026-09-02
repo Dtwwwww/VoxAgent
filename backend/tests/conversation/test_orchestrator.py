@@ -333,6 +333,65 @@ async def test_speak_message_requires_completed_assistant_and_does_not_add_histo
 
 
 @pytest.mark.asyncio
+async def test_auto_tts_strips_emoji_without_changing_streamed_or_stored_response():
+    response_text = "你好😀，欢迎来到 VoxAgent！"
+    orchestrator, _, tts = make_orchestrator(replies=[[response_text]])
+
+    outputs = [item async for item in orchestrator.submit_text("问题", speak_response=True)]
+    turn_id = next(
+        item.turn_id for item in outputs if getattr(item, "type", None) == "assistant.done"
+    )
+
+    assert [
+        item.delta for item in outputs if getattr(item, "type", None) == "assistant.delta"
+    ] == [response_text]
+    assert orchestrator.history.assistant_text(turn_id) == response_text
+    assert [call.text for call in tts.calls] == ["你好，欢迎来到 VoxAgent！"]
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_replay_tts_strips_emoji_from_completed_assistant_message():
+    response_text = "Great job 👍🏽! 继续加油。"
+    orchestrator, _, tts = make_orchestrator(replies=[[response_text]])
+    done = [item async for item in orchestrator.submit_text("问题", speak_response=False)]
+    turn_id = next(item.turn_id for item in done if item.type == "assistant.done")
+
+    replay = [item async for item in orchestrator.speak_message(turn_id)]
+
+    assert [item.type if hasattr(item, "type") else "binary" for item in replay] == [
+        "tts.chunk",
+        "binary",
+    ]
+    assert tts.calls[-1].text == "Great job ! 继续加油。"
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_emoji_only_assistant_response_skips_tts():
+    response_text = "👩🏽‍💻 🇨🇳 1️⃣"
+    orchestrator, _, tts = make_orchestrator(replies=[[response_text]])
+
+    outputs = [item async for item in orchestrator.submit_text("问题", speak_response=True)]
+    turn_id = next(
+        item.turn_id for item in outputs if getattr(item, "type", None) == "assistant.done"
+    )
+    replay = [item async for item in orchestrator.speak_message(turn_id)]
+
+    assert [
+        item.delta for item in outputs if getattr(item, "type", None) == "assistant.delta"
+    ] == [response_text]
+    assert orchestrator.history.assistant_text(turn_id) == response_text
+    assert [item.type if hasattr(item, "type") else "binary" for item in outputs] == [
+        "assistant.delta",
+        "assistant.done",
+    ]
+    assert replay == []
+    assert tts.calls == []
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
 async def test_speak_message_reports_speaking_phase_while_replay_runs():
     blocking_tts = FakeTts(block=True)
     orchestrator, _, _ = make_orchestrator(tts=blocking_tts, replies=[["完成回答"]])

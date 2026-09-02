@@ -266,6 +266,30 @@ describe("queued native-rate playback", () => {
     expect(MockAudioContext.instances[0].sources).toHaveLength(1);
   });
 
+  it("restarts sequence zero when a completed turn is prepared for replay", async () => {
+    const playback = new AudioPlayback();
+    await playback.enqueue({ kind: "turn", turnId: 5, sequence: 0, sampleRate: 24_000 }, wavBytes());
+    const first = MockAudioContext.instances[0].sources[0];
+
+    playback.prepareTurnReplay(5);
+    await playback.enqueue({ kind: "turn", turnId: 5, sequence: 0, sampleRate: 24_000 }, wavBytes());
+
+    const sources = MockAudioContext.instances[0].sources;
+    expect(first.stop).toHaveBeenCalledOnce();
+    expect(sources).toHaveLength(2);
+    expect(sources[1].start).toHaveBeenCalledWith(0);
+  });
+
+  it("allows a stopped turn to be prepared and replayed", async () => {
+    const playback = new AudioPlayback();
+    playback.stopTurn(5);
+
+    playback.prepareTurnReplay(5);
+    await playback.enqueue({ kind: "turn", turnId: 5, sequence: 0, sampleRate: 24_000 }, wavBytes());
+
+    expect(MockAudioContext.instances[0].sources[0].start).toHaveBeenCalledWith(0);
+  });
+
   it("does not start conversation audio whose decode finishes after interruption", async () => {
     let finishDecode!: (buffer: AudioBuffer) => void;
     MockAudioContext.decoder = () => new Promise((resolve) => { finishDecode = resolve; });
@@ -465,6 +489,16 @@ describe("useVoiceSession", () => {
   it("requests speech for an existing assistant message", () => {
     const { hook, socket } = openSession();
     act(() => hook.result.current.speakMessage(7));
+    expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 7 });
+  });
+
+  it("prepares a turn for replay before requesting its speech", () => {
+    const prepareTurnReplay = vi.spyOn(AudioPlayback.prototype, "prepareTurnReplay");
+    const { hook, socket } = openSession();
+
+    act(() => hook.result.current.speakMessage(7));
+
+    expect(prepareTurnReplay).toHaveBeenCalledWith(7);
     expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 7 });
   });
 

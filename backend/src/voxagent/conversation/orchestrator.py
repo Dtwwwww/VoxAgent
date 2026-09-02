@@ -36,6 +36,11 @@ MAX_UTTERANCE_FRAMES = 6000
 Output = ServerMessage | bytes
 _Owner = tuple[str, int]
 _T = TypeVar("_T")
+_EMOJI_RANGES = (
+    (0x1F000, 0x1FAFF),
+    (0x2600, 0x27BF),
+)
+_EMOJI_COMPONENTS = frozenset({0x200D, 0x20E3, 0xFE0F})
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,8 +566,11 @@ class ConversationOrchestrator:
             return sequence, True
 
     async def _synthesize_turn(self, token: TurnToken, text: str, sequence: int) -> int:
+        speech_text = _text_for_tts(text)
+        if not speech_text:
+            return sequence
         audio = await self._await_sync(
-            self.tts.synthesize, text, self._voice_key, self._speed
+            self.tts.synthesize, speech_text, self._voice_key, self._speed
         )
         if token.cancelled.is_set():
             return sequence
@@ -911,3 +919,27 @@ class ConversationOrchestrator:
     @staticmethod
     def _stopped_error() -> ErrorMessage:
         return ConversationOrchestrator._error("session_stopped", "会话已经结束")
+
+
+def _text_for_tts(text: str) -> str:
+    """Remove emoji presentation characters without changing display text."""
+    cleaned: list[str] = []
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character in "0123456789#*":
+            keycap_end = index + 1
+            if keycap_end < len(text) and text[keycap_end] == "\ufe0f":
+                keycap_end += 1
+            if keycap_end < len(text) and text[keycap_end] == "\u20e3":
+                index = keycap_end + 1
+                continue
+        code_point = ord(character)
+        if code_point in _EMOJI_COMPONENTS or any(
+            start <= code_point <= end for start, end in _EMOJI_RANGES
+        ):
+            index += 1
+            continue
+        cleaned.append(character)
+        index += 1
+    return "".join(cleaned).strip()

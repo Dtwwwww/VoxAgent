@@ -397,6 +397,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [nextId, send, speakTextReplies]);
 
   const speakMessage = useCallback((turnId: number) => {
+    playbackRef.current.prepareTurnReplay(turnId);
     allowedReplayTurnsRef.current.add(turnId);
     send({ type: "assistant.speak", turn_id: turnId });
   }, [send]);
