@@ -1,4 +1,3 @@
-import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
@@ -12,4 +11,4 @@ function VoiceClient() {
   return <App controller={useVoiceSession({ url })} />;
 }
 
-createRoot(document.getElementById("root")!).render(<StrictMode><VoiceClient /></StrictMode>);
+createRoot(document.getElementById("root")!).render(<VoiceClient />);

@@ -8,10 +8,11 @@ import type { VoiceSessionController } from "./useVoiceSession";
 const statusLabels = { idle: "空闲", listening: "正在聆听", transcribing: "正在转写", thinking: "正在思考", speaking: "正在朗读" };
 
 export function App({ controller }: { controller: VoiceSessionController }) {
+  const { connect, disconnect } = controller;
   useEffect(() => {
-    controller.connect();
-    return () => { void controller.disconnect(); };
-  }, [controller]);
+    connect();
+    return () => { void disconnect(); };
+  }, [connect, disconnect]);
   const voiceName = controller.voices.find((voice) => voice.voice_key === controller.selectedVoice?.voiceKey)?.display_name;
   return <main className="app-shell">
     <header><div><h1>Agent（声灵）</h1><p>本地运行 · {controller.modelId ?? "正在连接"}</p></div><p role="status">{statusLabels[controller.voiceStatus]}</p>{voiceName && <p className="current-voice">{voiceName}</p>}</header>

@@ -43,4 +43,15 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "文字回复自动朗读" }));
     expect(session.setSpeakTextReplies).toHaveBeenCalledWith(true);
   });
+
+  it("keeps a session connected when controller state creates a new object", () => {
+    const session = controller();
+    const view = render(<App controller={session} />);
+    expect(session.connect).toHaveBeenCalledOnce();
+    view.rerender(<App controller={{ ...session, messages: [...session.messages] }} />);
+    expect(session.connect).toHaveBeenCalledOnce();
+    expect(session.disconnect).not.toHaveBeenCalled();
+    view.unmount();
+    expect(session.disconnect).toHaveBeenCalledOnce();
+  });
 });
