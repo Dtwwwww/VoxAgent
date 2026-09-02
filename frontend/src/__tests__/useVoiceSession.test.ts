@@ -428,7 +428,7 @@ describe("useVoiceSession", () => {
     expect(cleanedBeforeResumeSettled).toBe(true);
   });
 
-  it("submits typed text silently by default and stops active playback", async () => {
+  it("submits typed text using the current auto-speak setting and stops active playback", async () => {
     const { hook, socket } = openSession();
     const wav = wavBytes();
     emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 8, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
@@ -440,6 +440,26 @@ describe("useVoiceSession", () => {
     expect(source.stop).toHaveBeenCalledOnce();
     expect(socket.jsonMessages().at(-1)).toEqual({ type: "text.submit", text: "hello", speak_response: false });
     expect(hook.result.current.messages.at(-1)).toEqual(expect.objectContaining({ role: "user", origin: "text", text: "hello" }));
+    act(() => hook.result.current.setSpeakTextReplies(true));
+    act(() => hook.result.current.submitText("again"));
+    expect(socket.jsonMessages().at(-1)).toEqual({ type: "text.submit", text: "again", speak_response: true });
+  });
+
+  it("exposes the precise voice lifecycle status transitions", async () => {
+    const { hook, socket } = openSession();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+    emit(socket, { type: "vad.started", session_id: SESSION_ID, turn_id: 1 });
+    expect(hook.result.current.voiceStatus).toBe("listening");
+    emit(socket, { type: "vad.stopped", session_id: SESSION_ID, turn_id: 1 });
+    expect(hook.result.current.voiceStatus).toBe("transcribing");
+    emit(socket, { type: "asr.final", session_id: SESSION_ID, turn_id: 1, text: "你好" });
+    expect(hook.result.current.voiceStatus).toBe("thinking");
+    const wav = wavBytes();
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 1, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(hook.result.current.voiceStatus).toBe("speaking");
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 1 });
+    expect(hook.result.current.voiceStatus).toBe("idle");
   });
 
   it("requests speech for an existing assistant message", () => {
@@ -601,7 +621,7 @@ describe("useVoiceSession", () => {
 
     await act(async () => hook.result.current.disconnect());
 
-    expect(JSON.parse(localStorage.getItem("voxagent.voice")!)).toEqual({ voiceKey: "clear_female", speed: 0.8 });
+    expect(JSON.parse(localStorage.getItem("voxagent.voice-settings.v1")!)).toEqual({ voiceKey: "clear_female", speed: 0.8, speakTextReplies: false });
     expect(stop).toHaveBeenCalledOnce();
     expect(socket.readyState).toBe(MockWebSocket.CLOSED);
     await waitFor(() => expect(hook.result.current.connectionStatus).toBe("disconnected"));

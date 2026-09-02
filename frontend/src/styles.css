@@ -1,0 +1,15 @@
+:root { color: #1d2939; background: #f7f8fa; font-family: system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, textarea, input { font: inherit; }
+button { cursor: pointer; }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 3px solid #2369d8; outline-offset: 2px; }
+.app-shell { max-width: 960px; min-height: 100vh; margin: auto; padding: 20px 20px 170px; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; border-bottom: 1px solid #d9dee7; }
+h1 { margin: 0; font-size: 1.35rem; } header p { margin: 4px 0 12px; } .current-voice { margin-left: auto; }
+.voice-picker { margin: 16px 0; } .voice-picker h2 { font-size: 1rem; }
+.voice-card { padding: 14px; border: 1px solid #ccd4df; border-radius: 12px; background: #fff; } .voice-card h3, .voice-card p { margin: 0 0 8px; }
+.speed-options, .composer__controls, .message__actions { display: flex; flex-wrap: wrap; gap: 8px; } button { border: 1px solid #9aa8ba; border-radius: 7px; background: #fff; padding: 7px 11px; } button[aria-pressed="true"], button:hover { border-color: #2369d8; background: #eaf2ff; }
+.conversation { display: grid; gap: 12px; }.message { width: fit-content; padding: 12px; border-radius: 14px; background: #fff; border: 1px solid #d7dde5; }.message--left { max-width: 72%; justify-self: start; }.message--right { max-width: 68%; justify-self: end; background: #eaf2ff; }.message__speaker { font-weight: 700; }.message__tag { display: inline-block; margin-top: 5px; font-size: .82rem; color: #49576a; }.message p { margin: 7px 0; white-space: pre-wrap; }
+.composer { position: sticky; bottom: 0; margin-top: 22px; padding: 14px; border: 1px solid #ccd4df; border-radius: 12px 12px 0 0; background: #fff; box-shadow: 0 -4px 16px #1d293914; }.composer textarea { display: block; width: 100%; min-height: 2.8rem; max-height: 8rem; margin: 6px 0 10px; resize: vertical; }.listening { margin: 0 0 6px; color: #b42318; font-weight: 700; }.visually-live, .session-error { color: #b42318; min-height: 1.2em; }
+@media (max-width: 600px) { .app-shell { padding-inline: 12px; }.message--left, .message--right { max-width: 90%; }.current-voice { margin-left: 0; width: 100%; } }

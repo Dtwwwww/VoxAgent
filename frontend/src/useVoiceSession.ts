@@ -3,9 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { MicrophoneCapture } from "./audio/capture";
 import { AudioPlayback } from "./audio/playback";
 import { type ServerEvent, type VoiceInfo, type VoiceSpeed, parseServerEventJson } from "./protocol";
+import { loadVoiceSettings, reconcileVoiceSettings, saveVoiceSettings } from "./voiceSettings";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
-export type VoiceStatus = "idle" | "listening" | "responding" | "speaking";
+export type VoiceStatus = "idle" | "listening" | "transcribing" | "thinking" | "speaking";
 export type MessageStatus = "streaming" | "complete" | "cancelled";
 
 export interface ConversationMessage {
@@ -40,6 +41,9 @@ export interface VoiceSessionController {
   voiceStatus: VoiceStatus;
   error: SessionError | null;
   isMicrophoneActive: boolean;
+  modelId: string | null;
+  offline: boolean;
+  speakTextReplies: boolean;
   connect(): void;
   disconnect(): Promise<void>;
   startMicrophone(): Promise<void>;
@@ -49,36 +53,29 @@ export interface VoiceSessionController {
   selectVoice(voiceKey: string, speed: VoiceSpeed): void;
   previewVoice(voiceKey: string, speed: VoiceSpeed): void;
   cancelActive(): void;
+  setSpeakTextReplies(enabled: boolean): void;
 }
 
 type AudioMetadata =
   | { kind: "turn"; turnId: number; sequence: number; sampleRate: number; byteLength: number; valid: boolean }
   | { kind: "preview"; previewId: number; sampleRate: number; byteLength: number; valid: boolean };
 
-const VOICE_STORAGE_KEY = "voxagent.voice";
-
-function storedVoice(): SelectedVoice | null {
-  try {
-    const value = JSON.parse(localStorage.getItem(VOICE_STORAGE_KEY) ?? "null") as Partial<SelectedVoice> | null;
-    if (value && typeof value.voiceKey === "string" && (value.speed === 0.8 || value.speed === 1 || value.speed === 1.2)) {
-      return { voiceKey: value.voiceKey, speed: value.speed };
-    }
-  } catch { /* Ignore damaged local preferences. */ }
-  return null;
-}
-
 function binaryData(value: unknown): value is ArrayBuffer | Blob {
   return value instanceof ArrayBuffer || value instanceof Blob;
 }
 
 export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionController {
+  const [initialSettings] = useState(() => loadVoiceSettings(localStorage));
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [voices, setVoices] = useState<VoiceInfo[]>([]);
-  const [selectedVoice, setSelectedVoice] = useState<SelectedVoice | null>(() => storedVoice());
+  const [selectedVoice, setSelectedVoice] = useState<SelectedVoice | null>(() => initialSettings.voiceKey ? { voiceKey: initialSettings.voiceKey, speed: initialSettings.speed } : null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("disconnected");
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("idle");
   const [error, setError] = useState<SessionError | null>(null);
   const [isMicrophoneActive, setMicrophoneActive] = useState(false);
+  const [modelId, setModelId] = useState<string | null>(null);
+  const [offline, setOffline] = useState(true);
+  const [speakTextReplies, setSpeakTextRepliesState] = useState(initialSettings.speakTextReplies);
   const socketRef = useRef<WebSocket | null>(null);
   const captureRef = useRef<MicrophoneCapture | null>(null);
   const captureStartRef = useRef<Promise<void> | null>(null);
@@ -183,15 +180,16 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         allowedReplayTurnsRef.current.clear();
         requestedPreviewIdRef.current = 0;
         setConnectionStatus("connected");
+        setModelId(event.model_id);
+        setOffline(event.offline);
         break;
       case "voices.available": {
         setVoices(event.voices);
-        setSelectedVoice((current) => current && event.voices.some((voice) => voice.voice_key === current.voiceKey)
-          ? current
-          : (() => {
-              const fallback = event.voices.find((voice) => voice.is_default) ?? event.voices[0];
-              return fallback ? { voiceKey: fallback.voice_key, speed: 1 } : null;
-            })());
+        setSelectedVoice((current) => {
+          const settings = reconcileVoiceSettings({ voiceKey: current?.voiceKey ?? null, speed: current?.speed ?? 1, speakTextReplies }, event.voices);
+          saveVoiceSettings(localStorage, settings);
+          return settings.voiceKey ? { voiceKey: settings.voiceKey, speed: settings.speed } : null;
+        });
         break;
       }
       case "voice.selected":
@@ -220,11 +218,11 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setVoiceStatus("listening");
         break;
       case "vad.stopped":
-        setVoiceStatus("responding");
+        setVoiceStatus("transcribing");
         break;
       case "asr.final":
         setMessages((current) => [...current, { id: nextId("voice-user"), turnId: event.turn_id, role: "user", origin: "voice", text: event.text, status: "complete" }]);
-        setVoiceStatus("responding");
+        setVoiceStatus("thinking");
         break;
       case "assistant.delta":
         setMessages((current) => {
@@ -237,7 +235,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           }
           return current.map((message, position) => position === index ? { ...message, text: message.text + event.delta } : message);
         });
-        setVoiceStatus("responding");
+        setVoiceStatus("thinking");
         break;
       case "assistant.done":
         {
@@ -263,7 +261,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setError({ code: event.code, message: event.message, recoverable: event.recoverable });
         break;
     }
-  }, [nextId]);
+  }, [nextId, speakTextReplies]);
 
   const connect = useCallback(() => {
     if (socketRef.current && socketRef.current.readyState < WebSocket.CLOSING) return;
@@ -378,7 +376,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     captureRef.current = null;
     if (capture) await capture.stop();
     setMicrophoneActive(false);
-    setVoiceStatus("responding");
+    setVoiceStatus("transcribing");
     send({ type: "audio.commit" });
   }, [send]);
 
@@ -394,9 +392,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     allowedReplayTurnsRef.current.clear();
     playbackRef.current.stopConversation();
     setMessages((current) => [...current, { id: nextId("text-user"), role: "user", origin: "text", text, status: "complete" }]);
-    setVoiceStatus("responding");
-    send({ type: "text.submit", text, speak_response: false });
-  }, [nextId, send]);
+    setVoiceStatus("thinking");
+    send({ type: "text.submit", text, speak_response: speakTextReplies });
+  }, [nextId, send, speakTextReplies]);
 
   const speakMessage = useCallback((turnId: number) => {
     allowedReplayTurnsRef.current.add(turnId);
@@ -406,9 +404,14 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const selectVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     const selection = { voiceKey, speed };
     setSelectedVoice(selection);
-    localStorage.setItem(VOICE_STORAGE_KEY, JSON.stringify(selection));
+    saveVoiceSettings(localStorage, { voiceKey, speed, speakTextReplies });
     send({ type: "voice.select", voice_key: voiceKey, speed });
   }, [send]);
+
+  const setSpeakTextReplies = useCallback((enabled: boolean) => {
+    setSpeakTextRepliesState(enabled);
+    saveVoiceSettings(localStorage, { voiceKey: selectedVoice?.voiceKey ?? null, speed: selectedVoice?.speed ?? 1, speakTextReplies: enabled });
+  }, [selectedVoice]);
 
   const previewVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
@@ -453,6 +456,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     voiceStatus,
     error,
     isMicrophoneActive,
+    modelId,
+    offline,
+    speakTextReplies,
     connect,
     disconnect,
     startMicrophone,
@@ -462,5 +468,6 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     selectVoice,
     previewVoice,
     cancelActive,
+    setSpeakTextReplies,
   };
 }
