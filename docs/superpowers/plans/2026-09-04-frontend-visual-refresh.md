@@ -453,32 +453,32 @@ git commit -m "style: apply responsive VoxAgent visual system"
 **Interfaces:**
 - Validates the complete frontend against the design document and current voice behavior.
 
-- [ ] **Step 1: Run the complete frontend suite**
+- [x] **Step 1: Run the complete frontend suite**
 
 Run: `pnpm --dir frontend test -- --run`  
 Expected: all frontend tests PASS with no unhandled errors.
 
-- [ ] **Step 2: Run static and production checks**
+- [x] **Step 2: Run static and production checks**
 
 Run: `pnpm --dir frontend typecheck`  
 Expected: PASS.  
 Run: `pnpm --dir frontend build`  
 Expected: PASS.
 
-- [ ] **Step 3: Start the existing application and inspect desktop layout**
+- [x] **Step 3: Start the existing application and inspect desktop layout**
 
 Use the repository's existing launch command documented in its README, open the generated tokenized URL, and inspect at 1440×900. Verify: header alignment, left/right message identity, scroll behavior, status immediately above composer, voice dialog placement, long-text wrapping, and no content hidden under the composer.
 
-- [ ] **Step 4: Inspect mobile layout**
+- [x] **Step 4: Inspect mobile layout**
 
 Inspect at 390×844. Verify: 88–90% message width, 44px controls, bottom-sheet voice picker, keyboard-safe composer, no horizontal scroll, and visible focus/pressed states.
 
-- [ ] **Step 5: Exercise the two interaction paths**
+- [x] **Step 5: Exercise the two interaction paths**
 
 Typed path: submit text and confirm the response remains silent until “朗读” is clicked.  
 Voice path: start/stop microphone and confirm visible listening → transcribing → thinking → speaking transitions. Confirm that manual replay works twice on the same completed assistant message.
 
-- [ ] **Step 6: Record final evidence and commit only necessary fixes**
+- [x] **Step 6: Record final evidence and commit only necessary fixes**
 
 If verification required code corrections, add only those files and commit:
 

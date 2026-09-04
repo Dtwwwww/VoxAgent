@@ -309,7 +309,7 @@ describe("queued native-rate playback", () => {
 });
 
 describe("useVoiceSession", () => {
-  it("connects and starts a session without requesting microphone permission", () => {
+  it("waits for session readiness after the WebSocket opens", () => {
     const hook = renderHook(() => useVoiceSession({ url: "ws://localhost/v1/voice" }));
     act(() => hook.result.current.connect());
     const socket = MockWebSocket.instances[0];
@@ -317,6 +317,10 @@ describe("useVoiceSession", () => {
 
     act(() => socket.open());
     expect(socket.jsonMessages()).toEqual([{ type: "session.start" }]);
+    expect(hook.result.current.connectionStatus).toBe("initializing");
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+
+    emit(socket, readyEvent());
     expect(hook.result.current.connectionStatus).toBe("connected");
   });
 

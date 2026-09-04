@@ -5,7 +5,7 @@ import { AudioPlayback } from "./audio/playback";
 import { type ServerEvent, type VoiceInfo, type VoiceSpeed, parseServerEventJson } from "./protocol";
 import { loadVoiceSettings, reconcileVoiceSettings, saveVoiceSettings } from "./voiceSettings";
 
-export type ConnectionStatus = "disconnected" | "connecting" | "connected";
+export type ConnectionStatus = "disconnected" | "connecting" | "initializing" | "connected";
 export type VoiceStatus = "idle" | "listening" | "transcribing" | "thinking" | "speaking";
 export type MessageStatus = "streaming" | "complete" | "cancelled";
 
@@ -280,7 +280,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     socketRef.current = socket;
     socket.onopen = () => {
       if (socketRef.current !== socket) return;
-      setConnectionStatus("connected");
+      setConnectionStatus("initializing");
       socket.send(JSON.stringify({ type: "session.start" }));
     };
     socket.onmessage = (message) => {

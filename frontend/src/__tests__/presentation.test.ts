@@ -10,6 +10,7 @@ describe("presentation", () => {
   it("describes local connection states", () => {
     expect(connectionPresentation("connected", "qwen2.5:7b").label).toBe("本地运行 · qwen2.5:7b");
     expect(connectionPresentation("connecting", null).label).toBe("正在连接本地服务");
+    expect(connectionPresentation("initializing", null).label).toBe("正在初始化本地语音模型…");
     expect(connectionPresentation("disconnected", null).label).toBe("本地服务未连接");
   });
 

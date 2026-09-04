@@ -10,6 +10,9 @@ export function connectionPresentation(status: ConnectionStatus, modelId: string
   if (status === "connecting") {
     return { tone: "warning" as const, label: "正在连接本地服务" };
   }
+  if (status === "initializing") {
+    return { tone: "warning" as const, label: "正在初始化本地语音模型…" };
+  }
   return { tone: "danger" as const, label: "本地服务未连接" };
 }
 

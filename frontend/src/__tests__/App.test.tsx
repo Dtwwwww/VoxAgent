@@ -139,6 +139,14 @@ describe("App", () => {
     expect(status.compareDocumentPosition(screen.getByLabelText("消息输入")) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });
 
+  it("shows local model initialization and keeps voice input unavailable until ready", () => {
+    render(<App controller={controller({ connectionStatus: "initializing" })} />);
+    expect(screen.getByRole("status")).toHaveTextContent("正在初始化本地语音模型…");
+    expect(screen.getAllByText("正在初始化本地语音模型…")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "开始语音输入" })).toBeDisabled();
+    expect(screen.queryByText(/本地运行/)).toBeNull();
+  });
+
   it("opens and closes the accessible voice dialog", () => {
     render(<App controller={controller()} />);
     fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
