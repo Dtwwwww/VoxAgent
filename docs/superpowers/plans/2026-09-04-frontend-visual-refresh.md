@@ -300,7 +300,7 @@ git commit -m "feat: redesign chat shell and conversation"
 - `Composer({ controller })` remains controller-backed and adds IME-safe keyboard behavior.
 - `VoicePicker({ controller, open, onClose })` is an accessible dialog.
 
-- [ ] **Step 1: Add failing interaction tests**
+- [x] **Step 1: Add failing interaction tests**
 
 Test these exact behaviors:
 
@@ -321,12 +321,12 @@ expect(screen.queryByRole("dialog", { name: "选择音色" })).toBeNull();
 
 Also assert that a `connection` error shows “重试连接”, a microphone permission error shows “重试麦克风”, and only one preview action can be active.
 
-- [ ] **Step 2: Run the App test and confirm interaction failures**
+- [x] **Step 2: Run the App test and confirm interaction failures**
 
 Run: `pnpm --dir frontend test -- --run src/__tests__/App.test.tsx`  
 Expected: FAIL on IME handling, status presentation, error action, and dialog behavior.
 
-- [ ] **Step 3: Implement the composer and status row**
+- [x] **Step 3: Implement the composer and status row**
 
 Track composition with a ref and submit only when not composing:
 
@@ -340,22 +340,22 @@ if (event.key === "Enter" && !event.shiftKey && !composing.current) {
 
 The microphone button label must be “开始语音输入” when idle and “结束录音” while active. Disable it during `transcribing` and `thinking`. Show `cancelActive` as “停止生成” only during `thinking` or `speaking`. Keep the 1–4000 character validation and clear it after a valid submission.
 
-- [ ] **Step 4: Implement recoverable error actions**
+- [x] **Step 4: Implement recoverable error actions**
 
 `ErrorNotice` calls `controller.connect()` only for connection recovery and `controller.startMicrophone()` only for microphone recovery. It does not invent a generic retry for playback or non-recoverable errors.
 
-- [ ] **Step 5: Implement the accessible voice dialog**
+- [x] **Step 5: Implement the accessible voice dialog**
 
 Render only when `open` is true. Use `role="dialog"`, `aria-modal="true"`, `aria-labelledby="voice-picker-title"`, close on Escape and overlay click, and restore focus to the trigger after `onClose`. Label speeds exactly “舒缓”“自然”“稍快”. For the active preview voice, show “停止试听” and call `stopVoicePreview`; disable preview buttons on other voices until stopped.
 
-- [ ] **Step 6: Run focused tests and typecheck**
+- [x] **Step 6: Run focused tests and typecheck**
 
 Run: `pnpm --dir frontend test -- --run src/__tests__/App.test.tsx`  
 Expected: PASS.  
 Run: `pnpm --dir frontend typecheck`  
 Expected: PASS.
 
-- [ ] **Step 7: Commit the interaction redesign**
+- [x] **Step 7: Commit the interaction redesign**
 
 ```powershell
 git add frontend/src/components/VoiceStatus.tsx frontend/src/components/ErrorNotice.tsx frontend/src/components/Composer.tsx frontend/src/components/VoicePicker.tsx frontend/src/__tests__/App.test.tsx

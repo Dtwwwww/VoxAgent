@@ -113,6 +113,74 @@ describe("App", () => {
     expect(screen.queryByRole("checkbox", { name: "文字回复自动朗读" })).toBeNull();
   });
 
+  it("keeps composition input intact and disables an empty send action", () => {
+    const session = controller();
+    render(<App controller={session} />);
+    const input = screen.getByRole("textbox");
+
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "输入中" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(session.submitText).not.toHaveBeenCalled();
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(session.submitText).toHaveBeenCalledWith("输入中");
+  });
+
+  it("shows active voice state immediately above the composer", () => {
+    render(<App controller={controller({ voiceStatus: "thinking" })} />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("声灵正在思考");
+    expect(status.compareDocumentPosition(screen.getByLabelText("消息输入")) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
+  it("opens and closes the accessible voice dialog", () => {
+    render(<App controller={controller()} />);
+    fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
+    expect(screen.getByRole("dialog", { name: "选择音色" })).toBeVisible();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "选择音色" })).toBeNull();
+  });
+
+  it("offers only valid recovery actions for connection and microphone errors", () => {
+    const connection = controller({ error: { code: "connection", message: "raw", recoverable: true } });
+    const view = render(<App controller={connection} />);
+    expect(screen.getByText("本地服务未启动，请启动后重试。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重试连接" }));
+    expect(connection.connect).toHaveBeenCalledTimes(2);
+
+    const microphone = controller({ error: { code: "microphone_permission", message: "raw", recoverable: true } });
+    view.rerender(<App controller={microphone} />);
+    expect(screen.getByText("无法使用麦克风，请在浏览器地址栏中允许麦克风权限。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重试麦克风" }));
+    expect(microphone.startMicrophone).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "重试连接" })).toBeNull();
+  });
+
+  it("keeps voice previews mutually exclusive", () => {
+    const voices = [
+      ...controller().voices,
+      { voice_key: "engine-002", display_name: "清亮音色", description: "清晰明快", gender: "female", is_default: false, previewable: true },
+    ];
+    const session = controller({ voices, previewingVoiceKey: "default_voice" });
+    render(<App controller={session} />);
+    fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "停止试听 声灵默认音色" }));
+    expect(session.stopVoicePreview).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "试听 清亮音色" })).toBeDisabled();
+  });
+
+  it("exposes recording and message playback stop actions", () => {
+    const session = controller({ isMicrophoneActive: true, voiceStatus: "listening", speakingTurnId: 3 });
+    render(<App controller={session} />);
+    fireEvent.click(screen.getByRole("button", { name: "结束录音" }));
+    expect(session.stopMicrophone).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "停止朗读" }));
+    expect(session.stopSpeaking).toHaveBeenCalledWith(3);
+  });
+
   it("keeps a session connected when controller state creates a new object", () => {
     const session = controller();
     const view = render(<App controller={session} />);
