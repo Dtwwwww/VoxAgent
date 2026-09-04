@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import importlib
+from threading import Event, Thread
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -144,6 +145,39 @@ def test_healthz_contains_only_public_status():
     assert "token" not in serialized
     assert "path" not in serialized
     assert "qwen" not in serialized
+
+
+def test_socket_accepts_before_slow_orchestrator_factory_finishes():
+    factory_started = Event()
+    allow_factory = Event()
+    connected = Event()
+    failures: list[BaseException] = []
+
+    def blocking_factory() -> FakeOrchestrator:
+        factory_started.set()
+        assert allow_factory.wait(timeout=2)
+        return FakeOrchestrator()
+
+    client = TestClient(create_app(blocking_factory, SESSION_TOKEN))
+
+    def connect() -> None:
+        try:
+            with client.websocket_connect(f"/v1/voice?token={SESSION_TOKEN}"):
+                connected.set()
+        except BaseException as error:
+            failures.append(error)
+
+    thread = Thread(target=connect)
+    thread.start()
+    try:
+        assert factory_started.wait(timeout=1)
+        assert connected.wait(timeout=0.2), "WebSocket handshake waited for speech model loading"
+    finally:
+        allow_factory.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert failures == []
 
 
 def test_application_shutdown_closes_production_owned_resources():

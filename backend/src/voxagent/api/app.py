@@ -400,8 +400,20 @@ def create_app(
         producers: set[asyncio.Task[object]] = set()
         orchestrator_stopped = False
         try:
-            orchestrator = orchestrator_factory()
             await socket.accept()
+            try:
+                orchestrator = await asyncio.to_thread(orchestrator_factory)
+            except Exception:
+                await socket.send_json(
+                    ErrorMessage(
+                        type="error",
+                        code="speech_runtime_startup",
+                        message="本地语音模型初始化失败，请重启服务后再试",
+                        recoverable=True,
+                    ).model_dump(mode="json")
+                )
+                await socket.close(code=1011)
+                return
             writer = _SocketWriter(socket)
             writer.start()
             microphone = _MicrophoneWorker(orchestrator, writer, producers.add)
