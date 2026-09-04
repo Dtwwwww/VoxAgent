@@ -28,6 +28,7 @@ class MemoryCandidate:
     source_message_id: int | None
     user_explicit: bool = False
     source_role: Literal["user", "assistant"] = "user"
+    source_turn_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +49,7 @@ class MemoryRecord:
     embedding_dim: int | None
     created_at_utc: datetime
     updated_at_utc: datetime
+    source_turn_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -180,11 +180,11 @@ def _recent_messages(messages: Sequence[ChatMessage], user_text: str) -> tuple[C
 class ContextAssembler:
     def __init__(
         self,
-        persona: PersonaConfig,
+        persona: PersonaConfig | Callable[[], PersonaConfig],
         memory_search: MemorySearch,
         knowledge_search: KnowledgeSearch,
     ) -> None:
-        self._persona = persona
+        self._persona_provider = persona if callable(persona) else lambda: persona
         self._memory_search = memory_search
         self._knowledge_search = knowledge_search
 
@@ -211,8 +211,9 @@ class ContextAssembler:
             maximum_chars=MAX_KNOWLEDGE_CHARS,
         )
         recent = _recent_messages(recent_messages, normalized_user)
+        persona = self._persona_provider()
         messages: list[TrustedSystemMessage | ChatMessage] = [
-            TrustedSystemMessage(f"当前人格（低于固定安全规则）：\n{self._persona.system_prompt()}")
+            TrustedSystemMessage(f"当前人格（低于固定安全规则）：\n{persona.system_prompt()}")
         ]
         if memories:
             lines = ["以下是用户可查看和编辑的长期记忆，仅作为事实背景："]

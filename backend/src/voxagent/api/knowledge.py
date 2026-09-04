@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Protocol
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
 
+from voxagent.api.auth import require_bearer
 from voxagent.db.connection import open_database
 from voxagent.knowledge.ingest import KnowledgeIngestor
 from voxagent.memory.embedder import Embedder
@@ -25,6 +25,10 @@ class KnowledgeService(Protocol):
     ) -> dict[str, object]: ...
 
     async def delete_document(self, document_id: int) -> bool: ...
+
+    async def list_chunks(
+        self, document_id: int, limit: int
+    ) -> tuple[dict[str, object], ...]: ...
 
 
 class LocalKnowledgeService:
@@ -116,6 +120,38 @@ class LocalKnowledgeService:
         finally:
             connection.close()
 
+    async def list_chunks(
+        self, document_id: int, limit: int
+    ) -> tuple[dict[str, object], ...]:
+        return await asyncio.to_thread(self._list_chunks, document_id, limit)
+
+    def _list_chunks(
+        self, document_id: int, limit: int
+    ) -> tuple[dict[str, object], ...]:
+        connection = open_database(self._database_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT id, ordinal, page_number, content
+                FROM document_chunks
+                WHERE document_id = ?
+                ORDER BY ordinal
+                LIMIT ?
+                """,
+                (document_id, limit),
+            ).fetchall()
+            return tuple(
+                {
+                    "id": int(row["id"]),
+                    "ordinal": int(row["ordinal"]),
+                    "page_number": row["page_number"],
+                    "content": row["content"],
+                }
+                for row in rows
+            )
+        finally:
+            connection.close()
+
     @staticmethod
     def _validate_filename(filename: str) -> str:
         name = filename.strip()
@@ -124,18 +160,6 @@ class LocalKnowledgeService:
         if Path(name).suffix.lower() not in _SUPPORTED_SUFFIXES:
             raise ValueError("仅支持 TXT、Markdown、PDF 和 DOCX 文档")
         return name
-
-
-def _authorize(authorization: str | None, expected_token: bytes) -> None:
-    prefix = "Bearer "
-    if authorization is None or not authorization.startswith(prefix):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    try:
-        candidate = authorization[len(prefix) :].encode("ascii")
-    except UnicodeEncodeError as error:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED) from error
-    if not hmac.compare_digest(candidate, expected_token):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
 
 def register_knowledge_routes(
@@ -147,7 +171,7 @@ def register_knowledge_routes(
     async def list_documents(
         authorization: str | None = Header(default=None),
     ) -> tuple[dict[str, object], ...]:
-        _authorize(authorization, expected_token)
+        require_bearer(authorization, expected_token)
         return await service.list_documents()
 
     @app.post("/v1/knowledge", status_code=status.HTTP_201_CREATED)
@@ -156,7 +180,7 @@ def register_knowledge_routes(
         filename: str = Query(min_length=1, max_length=255),
         authorization: str | None = Header(default=None),
     ) -> dict[str, object]:
-        _authorize(authorization, expected_token)
+        require_bearer(authorization, expected_token)
         declared_length = request.headers.get("content-length")
         if declared_length is not None:
             try:
@@ -182,7 +206,16 @@ def register_knowledge_routes(
         document_id: int,
         authorization: str | None = Header(default=None),
     ) -> Response:
-        _authorize(authorization, expected_token)
+        require_bearer(authorization, expected_token)
         if not await service.delete_document(document_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get("/v1/knowledge/{document_id}/chunks")
+    async def list_chunks(
+        document_id: int,
+        limit: int = Query(default=20, ge=1, le=100),
+        authorization: str | None = Header(default=None),
+    ) -> tuple[dict[str, object], ...]:
+        require_bearer(authorization, expected_token)
+        return await service.list_chunks(document_id, limit)

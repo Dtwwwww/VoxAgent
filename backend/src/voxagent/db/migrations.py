@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-LATEST_SCHEMA_VERSION = 1
+LATEST_SCHEMA_VERSION = 2
 
 _UTC_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
@@ -83,6 +83,18 @@ _MIGRATION_001 = (
     """,
 )
 
+_MIGRATION_002 = (
+    "ALTER TABLE memories ADD COLUMN source_turn_id INTEGER",
+    f"""
+    CREATE TABLE persona_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        config_json TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        updated_at_utc TEXT NOT NULL DEFAULT ({_UTC_NOW})
+    )
+    """,
+)
+
 
 def migrate(connection: sqlite3.Connection) -> int:
     """Atomically migrate a database to the latest supported schema."""
@@ -103,10 +115,17 @@ def migrate(connection: sqlite3.Connection) -> int:
         if current_version == 0:
             for statement in _MIGRATION_001:
                 connection.execute(statement)
+            current_version = 1
             connection.execute(
-                "UPDATE schema_version SET version = ?", (LATEST_SCHEMA_VERSION,)
+                "UPDATE schema_version SET version = ?", (current_version,)
             )
-            current_version = LATEST_SCHEMA_VERSION
+        if current_version == 1:
+            for statement in _MIGRATION_002:
+                connection.execute(statement)
+            current_version = 2
+            connection.execute(
+                "UPDATE schema_version SET version = ?", (current_version,)
+            )
         connection.commit()
     except BaseException:
         connection.rollback()

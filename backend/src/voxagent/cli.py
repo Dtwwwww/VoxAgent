@@ -1,6 +1,7 @@
 import asyncio
 import json
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
@@ -9,7 +10,10 @@ import typer
 import uvicorn
 
 from voxagent.api.app import _validate_session_token, create_app
+from voxagent.api.data import LocalDataService
 from voxagent.api.knowledge import LocalKnowledgeService
+from voxagent.api.memory import LocalMemoryService
+from voxagent.api.persona import LocalPersonaService
 from voxagent.config import AppPaths, resolve_data_root
 from voxagent.conversation.context import (
     ContextAssembler,
@@ -18,7 +22,7 @@ from voxagent.conversation.context import (
     SqliteContextSource,
 )
 from voxagent.conversation.orchestrator import ConversationOrchestrator
-from voxagent.conversation.persona import DEFAULT_PERSONA
+from voxagent.db.backup import DailyBackupManager
 from voxagent.db.connection import open_database
 from voxagent.db.migrations import migrate
 from voxagent.diagnostics.baseline_validator import validate_baseline
@@ -162,8 +166,9 @@ def _create_production_app(session_token: str):
         paths.models / "embeddings" / "bge-small-zh-v1.5"
     )
     context_source = SqliteContextSource(database, embedder)
+    persona_service = LocalPersonaService(database_path)
     context_assembler = ContextAssembler(
-        DEFAULT_PERSONA,
+        persona_service.load_config,
         context_source.search_memories,
         context_source.search_knowledge,
     )
@@ -173,6 +178,9 @@ def _create_production_app(session_token: str):
     knowledge_service = LocalKnowledgeService(
         database_path, paths.temp / "knowledge-uploads", embedder
     )
+    memory_service = LocalMemoryService(database_path, embedder)
+    data_service = LocalDataService(database_path, paths.data)
+    backup_manager = DailyBackupManager(paths.data / "backups")
 
     def orchestrator_factory() -> ConversationOrchestrator:
         final_asr = SenseVoiceAsr.from_model_dir(
@@ -224,13 +232,19 @@ def _create_production_app(session_token: str):
 
     async def shutdown() -> None:
         await http.aclose()
-        database.close()
+        try:
+            backup_manager.create(database, date.today())
+        finally:
+            database.close()
 
     application = create_app(
         orchestrator_factory,
         session_token,
         on_shutdown=shutdown,
         knowledge_service=knowledge_service,
+        memory_service=memory_service,
+        persona_service=persona_service,
+        data_service=data_service,
     )
     application.state.ollama_http = http
     application.state.plan3_database = database
@@ -267,7 +281,8 @@ def benchmark_asr(
     try:
         validate_fixture_checksum(wav, wav.parent / "checksums.json")
     except FixtureChecksumError as error:
-        raise typer.BadParameter(str(error), param_hint="--wav") from error
+        typer.echo(f"Error: invalid --wav: {error}", err=True)
+        raise typer.Exit(code=2) from error
     baseline_path = (
         baseline or REPO_ROOT / "benchmarks" / "target-machine-baseline.json"
     ).resolve()

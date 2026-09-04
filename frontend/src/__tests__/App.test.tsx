@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
 import type { KnowledgeClient } from "../knowledge/client";
+import type { LocalApiClient } from "../localApi";
 import type { VoiceSessionController } from "../useVoiceSession";
 
 afterEach(cleanup);
@@ -27,6 +28,7 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     offline: true,
     speakingTurnId: null,
     previewingVoiceKey: null,
+    memoryProposals: [],
     connect: vi.fn(),
     disconnect: vi.fn(async () => undefined),
     startMicrophone: vi.fn(async () => undefined),
@@ -38,16 +40,40 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     previewVoice: vi.fn(),
     stopVoicePreview: vi.fn(),
     cancelActive: vi.fn(),
+    dismissMemoryProposal: vi.fn(),
     ...overrides,
   };
 }
 
 describe("App", () => {
+  it("opens lazy settings tabs and keeps them separate from the voice picker", async () => {
+    const localApiClient = {
+      getPersona: vi.fn(async () => ({ revision: 0, config: {
+        name: "声灵", user_address: "用户", background: "本地伙伴", traits: "温和",
+        relationship: "陪伴与助手", style: "简洁", initiative: "适度主动",
+        boundaries: "尊重用户", default_reply_length: "两到四句",
+      } })),
+      listMemories: vi.fn(async () => []),
+    } as unknown as LocalApiClient;
+    render(<App controller={controller()} localApiClient={localApiClient} />);
+
+    expect(localApiClient.getPersona).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(await screen.findByRole("dialog", { name: "声灵设置" })).toBeVisible();
+    expect(localApiClient.getPersona).toHaveBeenCalledOnce();
+    expect(localApiClient.listMemories).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "记忆" }));
+    expect(await screen.findByText("还没有长期记忆。")).toBeVisible();
+    expect(localApiClient.listMemories).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog", { name: "选择音色" })).toBeNull();
+  });
+
   it("exposes a lazy-loaded local knowledge entry", async () => {
     const knowledgeClient: KnowledgeClient = {
       listDocuments: vi.fn(async () => []),
       importDocument: vi.fn(),
       deleteDocument: vi.fn(),
+      listChunks: vi.fn(),
     };
     render(<App controller={controller()} knowledgeClient={knowledgeClient} />);
 

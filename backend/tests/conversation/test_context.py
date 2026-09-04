@@ -55,6 +55,19 @@ def test_context_order_is_persona_memory_knowledge_history_then_current_user() -
     assert bundle.messages[-1] == ChatMessage("user", "怎么设置？")
 
 
+def test_context_reads_the_latest_persona_for_every_turn() -> None:
+    current = [DEFAULT_PERSONA]
+    assembler = ContextAssembler(
+        lambda: current[0],
+        lambda _query, _limit: (),
+        lambda _query, _limit: (),
+    )
+
+    assert "声灵" in assembler.build("你好", ()).messages[0].content
+    current[0] = DEFAULT_PERSONA.model_copy(update={"name": "小灵"})
+    assert "小灵" in assembler.build("你好", ()).messages[0].content
+
+
 def test_context_limits_sources_and_character_budgets() -> None:
     memories = tuple(
         MemoryContext(index, str(index) * 300, 1 - index / 100, index)

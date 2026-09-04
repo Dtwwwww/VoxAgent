@@ -208,6 +208,19 @@ describe("the frozen WebSocket protocol", () => {
     expect(() => parseClientEventJson('{"type":"assistant.speak","turn_id":7.0e0}')).toThrow();
     expect(() => parseServerEventJson(`{"type":"tts.chunk","session_id":"${SESSION_ID}","turn_id":1,"sequence":0.0e0,"sample_rate":24000,"mime_type":"audio/wav","byte_length":46}`)).toThrow();
   });
+
+  it("parses strict memory proposals with source turn attribution", () => {
+    expect(parseServerEvent({
+      type: "memory.proposed",
+      session_id: SESSION_ID,
+      turn_id: 4,
+      proposal_index: 0,
+      kind: "preference",
+      content: "用户喜欢无糖咖啡",
+      importance: 0.8,
+      requires_confirmation: false,
+    })).toMatchObject({ type: "memory.proposed", turn_id: 4, content: "用户喜欢无糖咖啡" });
+  });
 });
 
 describe("PCM microphone framing", () => {
@@ -362,6 +375,30 @@ describe("queued native-rate playback", () => {
 });
 
 describe("useVoiceSession", () => {
+  it("surfaces and dismisses reviewable memory proposals", () => {
+    const { hook, socket } = openSession();
+
+    emit(socket, {
+      type: "memory.proposed",
+      session_id: SESSION_ID,
+      turn_id: 4,
+      proposal_index: 0,
+      kind: "preference",
+      content: "用户喜欢无糖咖啡",
+      importance: 0.8,
+      requires_confirmation: false,
+    });
+
+    expect(hook.result.current.memoryProposals).toHaveLength(1);
+    expect(hook.result.current.memoryProposals[0]).toMatchObject({
+      id: "4:0",
+      sourceTurnId: 4,
+      content: "用户喜欢无糖咖啡",
+    });
+    act(() => hook.result.current.dismissMemoryProposal("4:0"));
+    expect(hook.result.current.memoryProposals).toEqual([]);
+  });
+
   it("waits for session readiness after the WebSocket opens", () => {
     const hook = renderHook(() => useVoiceSession({ url: "ws://localhost/v1/voice" }));
     act(() => hook.result.current.connect());

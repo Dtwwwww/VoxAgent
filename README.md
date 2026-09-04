@@ -9,6 +9,7 @@ Local-first Windows voice companion for a GTX 1660 Ti / 16GB target machine.
 - `benchmarks/`: committed machine-readable benchmark summaries
 - [`docs/plan-01/README.md`](docs/plan-01/README.md): Plan 1 manual startup and model commands
 - [`docs/plan-02/README.md`](docs/plan-02/README.md): Plan 2 Web text and voice startup guide
+- [`docs/plan-03/README.md`](docs/plan-03/README.md): Plan 3 memory, persona, knowledge, export, and backup guide
 - `docs/superpowers/specs/`: approved product design
 - `docs/superpowers/plans/`: ordered implementation plans
 

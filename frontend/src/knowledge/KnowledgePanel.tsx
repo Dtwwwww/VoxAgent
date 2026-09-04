@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Icon } from "../components/Icon";
-import type { KnowledgeClient, KnowledgeDocument } from "./client";
+import type { KnowledgeChunk, KnowledgeClient, KnowledgeDocument } from "./client";
 
 interface KnowledgePanelProps {
   open: boolean;
@@ -16,6 +16,8 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [openDocumentId, setOpenDocumentId] = useState<number | null>(null);
+  const [chunks, setChunks] = useState<KnowledgeChunk[]>([]);
 
   const loadDocuments = async () => {
     setLoading(true);
@@ -75,6 +77,21 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
     }
   };
 
+  const inspect = async (document: KnowledgeDocument) => {
+    if (openDocumentId === document.id) {
+      setOpenDocumentId(null);
+      setChunks([]);
+      return;
+    }
+    setError(null);
+    try {
+      setChunks(await client.listChunks(document.id));
+      setOpenDocumentId(document.id);
+    } catch (inspectError) {
+      setError(inspectError instanceof Error ? inspectError.message : "无法读取知识片段");
+    }
+  };
+
   return <div className="knowledge-layer" role="presentation" onMouseDown={(event) => {
     if (event.target === event.currentTarget) onClose();
   }}>
@@ -114,19 +131,31 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
           <span>添加资料后，声灵会在回答时检索相关片段。</span>
         </div>}
         {documents.map((document) => <article className="knowledge-card" key={document.id}>
-          <span className="knowledge-card__icon"><Icon name="file" /></span>
-          <div className="knowledge-card__copy">
-            <strong title={document.display_name}>{document.display_name}</strong>
-            <span>{document.chunk_count} 个知识片段</span>
+          <div className="knowledge-card__summary">
+            <span className="knowledge-card__icon"><Icon name="file" /></span>
+            <div className="knowledge-card__copy">
+              <strong title={document.display_name}>{document.display_name}</strong>
+              <span>{document.chunk_count} 个知识片段</span>
+            </div>
+            <button type="button" className="knowledge-card__inspect" aria-label={`查看 ${document.display_name} 的片段`} onClick={() => { void inspect(document); }}>
+              {openDocumentId === document.id ? "收起" : "查看"}
+            </button>
+            <button
+              type="button"
+              className="knowledge-card__delete"
+              aria-label={`删除 ${document.display_name}`}
+              onClick={() => { void deleteDocument(document); }}
+            >
+              <Icon name="trash" size={18} />
+            </button>
           </div>
-          <button
-            type="button"
-            className="knowledge-card__delete"
-            aria-label={`删除 ${document.display_name}`}
-            onClick={() => { void deleteDocument(document); }}
-          >
-            <Icon name="trash" size={18} />
-          </button>
+          {openDocumentId === document.id && <div className="knowledge-chunks">
+            {chunks.length === 0 && <p>文档中没有可显示的片段。</p>}
+            {chunks.map((chunk) => <section key={chunk.id}>
+              <span>{chunk.page_number ? `第 ${chunk.page_number} 页 · ` : ""}片段 {chunk.ordinal + 1}</span>
+              <p>{chunk.content}</p>
+            </section>)}
+          </div>}
         </article>)}
       </div>
     </section>

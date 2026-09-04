@@ -26,6 +26,12 @@ function client(): KnowledgeClient {
       sha256: "b".repeat(64),
     })),
     deleteDocument: vi.fn(async () => undefined),
+    listChunks: vi.fn(async () => [{
+      id: 11,
+      ordinal: 0,
+      page_number: 2,
+      content: "这是可核对的来源片段",
+    }]),
   };
 }
 
@@ -63,5 +69,16 @@ describe("KnowledgePanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "删除 产品说明.md" }));
 
     await waitFor(() => expect(api.deleteDocument).toHaveBeenCalledWith(7));
+  });
+
+  it("lets the user inspect attributed source excerpts", async () => {
+    const api = client();
+    render(<KnowledgePanel open client={api} onClose={vi.fn()} />);
+    await screen.findByText("产品说明.md");
+
+    fireEvent.click(screen.getByRole("button", { name: "查看 产品说明.md 的片段" }));
+
+    expect(await screen.findByText("这是可核对的来源片段")).toBeVisible();
+    expect(screen.getByText("第 2 页 · 片段 1")).toBeVisible();
   });
 });

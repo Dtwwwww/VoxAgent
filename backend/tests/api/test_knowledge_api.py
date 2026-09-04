@@ -58,6 +58,20 @@ class FakeKnowledgeService:
         self.deleted.append(document_id)
         return document_id == 7
 
+    async def list_chunks(
+        self, document_id: int, limit: int
+    ) -> tuple[dict[str, object], ...]:
+        if document_id != 7:
+            return ()
+        return (
+            {
+                "id": 11,
+                "ordinal": 0,
+                "page_number": 2,
+                "content": "这是可核对的来源片段",
+            },
+        )[:limit]
+
 
 def _client(service: FakeKnowledgeService) -> TestClient:
     return TestClient(
@@ -81,7 +95,7 @@ def test_knowledge_routes_allow_only_the_local_web_frontend_origin():
         "/v1/knowledge",
         headers={
             "Origin": "http://127.0.0.1:5173",
-            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Method": "PATCH",
         },
     )
     remote = client.options(
@@ -93,6 +107,7 @@ def test_knowledge_routes_allow_only_the_local_web_frontend_origin():
     )
 
     assert local.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+    assert "PATCH" in local.headers["access-control-allow-methods"]
     assert "access-control-allow-origin" not in remote.headers
 
 
@@ -146,6 +161,18 @@ def test_deletes_an_imported_document():
     assert response.status_code == 204
     assert service.deleted == [7]
     assert client.delete("/v1/knowledge/999", headers=AUTH).status_code == 404
+
+
+def test_inspects_source_labelled_chunk_excerpts_without_filesystem_paths():
+    client = _client(FakeKnowledgeService())
+
+    response = client.get("/v1/knowledge/7/chunks?limit=4", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"id": 11, "ordinal": 0, "page_number": 2, "content": "这是可核对的来源片段"}
+    ]
+    assert "source_path" not in response.text
 
 
 class FakeEmbedder:

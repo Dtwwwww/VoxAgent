@@ -82,9 +82,9 @@ class MemoryRepository:
                     INSERT INTO memories(
                         kind, content, normalized_content, importance,
                         source_message_id, embedding, embedding_dim,
-                        created_at_utc, updated_at_utc
+                        created_at_utc, updated_at_utc, source_turn_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         candidate.kind.value,
@@ -96,6 +96,7 @@ class MemoryRepository:
                         embedding_dim,
                         timestamp,
                         timestamp,
+                        candidate.source_turn_id,
                     ),
                 )
                 memory_id = int(result.lastrowid)
@@ -238,4 +239,5 @@ class MemoryRepository:
             embedding_dim=row["embedding_dim"],
             created_at_utc=_parse_utc(row["created_at_utc"]),
             updated_at_utc=_parse_utc(row["updated_at_utc"]),
+            source_turn_id=row["source_turn_id"],
         )

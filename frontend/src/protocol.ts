@@ -40,6 +40,14 @@ export type ServerEvent =
   | ({ type: "asr.final"; text: string } & TurnFields)
   | ({ type: "assistant.delta"; delta: string } & TurnFields)
   | ({ type: "assistant.done" } & TurnFields)
+  | ({
+      type: "memory.proposed";
+      proposal_index: number;
+      kind: "preference" | "profile" | "habit" | "relationship" | "event";
+      content: string;
+      importance: number;
+      requires_confirmation: boolean;
+    } & TurnFields)
   | ({ type: "tts.chunk"; sequence: number; sample_rate: number; mime_type: "audio/wav"; byte_length: number } & TurnFields)
   | ({ type: "turn.cancelled" } & TurnFields)
   | { type: "error"; code: string; message: string; recoverable: boolean };
@@ -75,6 +83,13 @@ function integer(value: unknown, name: string, minimum?: number): number {
 
 function positiveInteger(value: unknown, name: string): number {
   return integer(value, name, 1);
+}
+
+function boundedNumber(value: unknown, name: string, minimum: number, maximum: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new TypeError(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return value;
 }
 
 function speed(value: unknown): VoiceSpeed {
@@ -131,7 +146,7 @@ export function parseClientEvent(value: unknown): ClientEvent {
   }
 }
 
-const STRICT_INTEGER_TOKEN = /("(?:turn_id|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
+const STRICT_INTEGER_TOKEN = /("(?:turn_id|proposal_index|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
 
 function parseProtocolJson(raw: string): unknown {
   if (typeof raw !== "string") throw new TypeError("event JSON must be a string");
@@ -194,6 +209,23 @@ export function parseServerEvent(value: unknown): ServerEvent {
     case "assistant.delta": {
       const object = turnObject(value, ["delta"]);
       return { type, session_id: object.session_id as string, turn_id: object.turn_id as number, delta: string(object.delta, "delta") };
+    }
+    case "memory.proposed": {
+      const object = turnObject(value, ["proposal_index", "kind", "content", "importance", "requires_confirmation"]);
+      const kind = string(object.kind, "kind");
+      if (!["preference", "profile", "habit", "relationship", "event"].includes(kind)) {
+        throw new TypeError("memory kind is unsupported");
+      }
+      return {
+        type,
+        session_id: object.session_id as string,
+        turn_id: object.turn_id as number,
+        proposal_index: integer(object.proposal_index, "proposal_index", 0),
+        kind: kind as "preference" | "profile" | "habit" | "relationship" | "event",
+        content: string(object.content, "content"),
+        importance: boundedNumber(object.importance, "importance", 0, 1),
+        requires_confirmation: bool(object.requires_confirmation, "requires_confirmation"),
+      };
     }
     case "tts.chunk": {
       const object = turnObject(value, ["sequence", "sample_rate", "mime_type", "byte_length"]);

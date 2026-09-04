@@ -14,7 +14,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 from starlette.middleware.cors import CORSMiddleware
 
+from voxagent.api.data import DataService, register_data_routes
 from voxagent.api.knowledge import KnowledgeService, register_knowledge_routes
+from voxagent.api.memory import MemoryService, register_memory_routes
+from voxagent.api.persona import PersonaService, register_persona_routes
 from voxagent.api.protocol import parse_client_message, validate_audio_frame
 from voxagent.conversation.events import (
     INPUT_AUDIO_FORMAT,
@@ -352,6 +355,9 @@ def create_app(
     *,
     on_shutdown: Callable[[], Awaitable[None]] | None = None,
     knowledge_service: KnowledgeService | None = None,
+    memory_service: MemoryService | None = None,
+    persona_service: PersonaService | None = None,
+    data_service: DataService | None = None,
 ) -> FastAPI:
     expected_token = _validate_session_token(session_token)
     expected_token_bytes = expected_token.encode("ascii")
@@ -373,11 +379,17 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
     if knowledge_service is not None:
         register_knowledge_routes(app, knowledge_service, expected_token)
+    if memory_service is not None:
+        register_memory_routes(app, memory_service, expected_token)
+    if persona_service is not None:
+        register_persona_routes(app, persona_service, expected_token)
+    if data_service is not None:
+        register_data_routes(app, data_service, expected_token)
     slot_lock = asyncio.Lock()
     session_active = False
 

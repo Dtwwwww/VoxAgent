@@ -531,7 +531,16 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
     assembler = object()
     proposer = object()
     knowledge = object()
+    memory = object()
+    data_service = object()
+    backup_calls: list[tuple[object, object]] = []
     captured: dict[str, object] = {}
+
+    class FakePersonaService:
+        def load_config(self):
+            return object()
+
+    persona_service = FakePersonaService()
 
     class FakeHttp:
         closed = False
@@ -562,6 +571,18 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
     monkeypatch.setattr(cli, "ContextAssembler", lambda persona, memories, documents: assembler)
     monkeypatch.setattr(cli, "LocalMemoryProposalService", lambda client, parser: proposer)
     monkeypatch.setattr(cli, "LocalKnowledgeService", lambda database_path, temp, model: knowledge)
+    monkeypatch.setattr(cli, "LocalMemoryService", lambda database_path, model: memory)
+    monkeypatch.setattr(cli, "LocalPersonaService", lambda database_path: persona_service)
+    monkeypatch.setattr(cli, "LocalDataService", lambda database_path, data: data_service)
+    monkeypatch.setattr(
+        cli,
+        "DailyBackupManager",
+        lambda directory: type(
+            "Backup",
+            (),
+            {"create": lambda self, connection, day: backup_calls.append((connection, day))},
+        )(),
+    )
     monkeypatch.setattr(cli.httpx, "AsyncClient", lambda **_: fake_http)
 
     application = type("Application", (), {"state": type("State", (), {})()})()
@@ -578,7 +599,11 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
     assert captured["db_path"] == tmp_path / "data" / "voxagent.db"
     assert captured["model_path"] == tmp_path / "models" / "embeddings" / "bge-small-zh-v1.5"
     assert captured["knowledge_service"] is knowledge
+    assert captured["memory_service"] is memory
+    assert captured["persona_service"] is persona_service
+    assert captured["data_service"] is data_service
     assert captured["token"] == SESSION_TOKEN
     asyncio.run(captured["on_shutdown"]())
     assert database.closed is True
     assert fake_http.closed is True
+    assert backup_calls and backup_calls[0][0] is database

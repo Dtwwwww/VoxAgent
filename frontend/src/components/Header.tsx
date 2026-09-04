@@ -5,10 +5,11 @@ import { Icon } from "./Icon";
 interface HeaderProps {
   controller: VoiceSessionController;
   onOpenKnowledge?(): void;
+  onOpenSettings?(): void;
   onOpenVoices(): void;
 }
 
-export function Header({ controller, onOpenKnowledge, onOpenVoices }: HeaderProps) {
+export function Header({ controller, onOpenKnowledge, onOpenSettings, onOpenVoices }: HeaderProps) {
   const connection = connectionPresentation(controller.connectionStatus, controller.modelId);
   const voiceName = controller.voices.find((voice) => voice.voice_key === controller.selectedVoice?.voiceKey)?.display_name
     ?? "正在加载音色";
@@ -34,9 +35,9 @@ export function Header({ controller, onOpenKnowledge, onOpenVoices }: HeaderProp
         音色：{voiceName}
         <Icon name="chevronDown" size={16} />
       </button>
-      <button className="icon-button header-settings" type="button" aria-label="设置" onClick={onOpenVoices} aria-haspopup="dialog">
+      {onOpenSettings && <button className="icon-button header-settings" type="button" aria-label="设置" onClick={onOpenSettings} aria-haspopup="dialog">
         <Icon name="settings" />
-      </button>
+      </button>}
     </div>
   </header>;
 }

@@ -15,10 +15,18 @@ export interface KnowledgeImportResult {
   sha256: string;
 }
 
+export interface KnowledgeChunk {
+  id: number;
+  ordinal: number;
+  page_number: number | null;
+  content: string;
+}
+
 export interface KnowledgeClient {
   listDocuments(): Promise<KnowledgeDocument[]>;
   importDocument(file: File): Promise<KnowledgeImportResult>;
   deleteDocument(documentId: number): Promise<void>;
+  listChunks(documentId: number): Promise<KnowledgeChunk[]>;
 }
 
 async function requireSuccess(response: Response): Promise<Response> {
@@ -56,6 +64,13 @@ export function createKnowledgeClient(baseUrl: string, token: string): Knowledge
         method: "DELETE",
         headers: authorization,
       }));
+    },
+    async listChunks(documentId) {
+      const response = await requireSuccess(await fetch(
+        `${baseUrl}/v1/knowledge/${documentId}/chunks?limit=20`,
+        { headers: authorization },
+      ));
+      return await response.json() as KnowledgeChunk[];
     },
   };
 }

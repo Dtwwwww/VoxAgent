@@ -19,12 +19,12 @@ def database(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> sqlite3.Connect
     connection.close()
 
 
-def test_new_database_migrates_to_version_one_idempotently(
+def test_new_database_migrates_to_latest_version_idempotently(
     database: sqlite3.Connection,
 ) -> None:
-    assert migrate(database) == 1
-    assert migrate(database) == 1
-    assert database.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+    assert migrate(database) == 2
+    assert migrate(database) == 2
+    assert database.execute("SELECT version FROM schema_version").fetchone()[0] == 2
 
     tables = {
         row[0]
@@ -40,7 +40,28 @@ def test_new_database_migrates_to_version_one_idempotently(
         "documents",
         "document_chunks",
         "audit_events",
+        "persona_config",
     } <= tables
+
+    memory_columns = {
+        row[1] for row in database.execute("PRAGMA table_info(memories)").fetchall()
+    }
+    assert "source_turn_id" in memory_columns
+
+
+def test_persona_table_enforces_exactly_one_versioned_row(
+    database: sqlite3.Connection,
+) -> None:
+    migrate(database)
+
+    database.execute(
+        "INSERT INTO persona_config(id, config_json, revision) VALUES (1, '{}', 1)"
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        database.execute(
+            "INSERT INTO persona_config(id, config_json, revision) VALUES (2, '{}', 1)"
+        )
 
 
 def test_connection_uses_safe_sqlite_settings(database: sqlite3.Connection) -> None:

@@ -29,6 +29,15 @@ export interface SelectedVoice {
   speed: VoiceSpeed;
 }
 
+export interface MemoryProposal {
+  id: string;
+  sourceTurnId: number;
+  kind: "preference" | "profile" | "habit" | "relationship" | "event";
+  content: string;
+  importance: number;
+  requiresConfirmation: boolean;
+}
+
 export interface VoiceSessionOptions {
   url: string;
 }
@@ -45,6 +54,7 @@ export interface VoiceSessionController {
   offline: boolean;
   speakingTurnId: number | null;
   previewingVoiceKey: string | null;
+  memoryProposals: MemoryProposal[];
   connect(): void;
   disconnect(): Promise<void>;
   startMicrophone(): Promise<void>;
@@ -56,6 +66,7 @@ export interface VoiceSessionController {
   previewVoice(voiceKey: string, speed: VoiceSpeed): void;
   stopVoicePreview(): void;
   cancelActive(): void;
+  dismissMemoryProposal(id: string): void;
 }
 
 type AudioMetadata =
@@ -79,6 +90,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const [offline, setOffline] = useState(true);
   const [speakingTurnId, setSpeakingTurnId] = useState<number | null>(null);
   const [previewingVoiceKey, setPreviewingVoiceKey] = useState<string | null>(null);
+  const [memoryProposals, setMemoryProposals] = useState<MemoryProposal[]>([]);
   const socketRef = useRef<WebSocket | null>(null);
   const captureRef = useRef<MicrophoneCapture | null>(null);
   const captureStartRef = useRef<Promise<void> | null>(null);
@@ -129,6 +141,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     previewRequestedRef.current = false;
     activePreviewIdRef.current = null;
     expectedPreviewIdRef.current = 0;
+    setMemoryProposals([]);
   }, []);
 
   const stopLocalResources = useCallback(async () => {
@@ -293,6 +306,20 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           return current;
         });
         break;
+      case "memory.proposed": {
+        const proposal: MemoryProposal = {
+          id: `${event.turn_id}:${event.proposal_index}`,
+          sourceTurnId: event.turn_id,
+          kind: event.kind,
+          content: event.content,
+          importance: event.importance,
+          requiresConfirmation: event.requires_confirmation,
+        };
+        setMemoryProposals((current) => current.some((item) => item.id === proposal.id)
+          ? current
+          : [...current, proposal]);
+        break;
+      }
       case "turn.cancelled":
         cancelledTurnsRef.current.add(event.turn_id);
         allowedReplayTurnsRef.current.delete(event.turn_id);
@@ -520,6 +547,10 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     send({ type: "turn.cancel" });
   }, [send]);
 
+  const dismissMemoryProposal = useCallback((id: string) => {
+    setMemoryProposals((current) => current.filter((proposal) => proposal.id !== id));
+  }, []);
+
   const disconnect = useCallback(async () => {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "session.stop" }));
@@ -553,6 +584,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     offline,
     speakingTurnId,
     previewingVoiceKey,
+    memoryProposals,
     connect,
     disconnect,
     startMicrophone,
@@ -564,5 +596,6 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     previewVoice,
     stopVoicePreview,
     cancelActive,
+    dismissMemoryProposal,
   };
 }

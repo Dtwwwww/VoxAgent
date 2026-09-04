@@ -51,6 +51,29 @@ def test_create_and_list_return_immutable_domain_models(
         created.content = "被修改"  # type: ignore[misc]
 
 
+def test_create_preserves_the_source_turn_for_user_visible_attribution(
+    repository: tuple[MemoryRepository, sqlite3.Connection],
+) -> None:
+    repo, connection = repository
+    created = repo.create(
+        MemoryCandidate(
+            MemoryKind.PREFERENCE,
+            "喜欢无糖咖啡",
+            0.8,
+            None,
+            source_turn_id=12,
+        ),
+        embedding=_vector(1, 0),
+        embedding_dim=2,
+        now_utc=datetime(2026, 9, 4, 12, tzinfo=UTC),
+    )
+
+    assert created.source_turn_id == 12
+    assert connection.execute(
+        "SELECT source_turn_id FROM memories WHERE id = ?", (created.id,)
+    ).fetchone()[0] == 12
+
+
 def test_exact_normalized_duplicate_refreshes_instead_of_inserting(
     repository: tuple[MemoryRepository, sqlite3.Connection],
 ) -> None:
