@@ -131,6 +131,10 @@ describe("App", () => {
   it("shows active voice state immediately above the composer", () => {
     render(<App controller={controller({ voiceStatus: "thinking" })} />);
     const status = screen.getByRole("status");
+    expect(screen.getByRole("main")).toHaveClass("app-shell");
+    expect(screen.getByLabelText("对话记录")).toHaveClass("conversation");
+    expect(screen.getByLabelText("消息输入")).toHaveClass("composer");
+    expect(status).toHaveAttribute("data-state", "thinking");
     expect(status).toHaveTextContent("声灵正在思考");
     expect(status.compareDocumentPosition(screen.getByLabelText("消息输入")) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });

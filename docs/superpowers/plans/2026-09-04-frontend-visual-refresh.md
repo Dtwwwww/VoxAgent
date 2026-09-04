@@ -374,7 +374,7 @@ git commit -m "feat: polish voice and composer interactions"
 - Consumes the class names introduced in Tasks 3 and 4.
 - Produces the approved warm-white visual system at desktop, tablet, and mobile widths.
 
-- [ ] **Step 1: Add structural class assertions before CSS replacement**
+- [x] **Step 1: Add structural class assertions before CSS replacement**
 
 Assert stable styling hooks rather than computed pixel values:
 
@@ -385,7 +385,7 @@ expect(screen.getByLabelText("消息输入")).toHaveClass("composer");
 expect(screen.getByRole("status")).toHaveAttribute("data-state", "thinking");
 ```
 
-- [ ] **Step 2: Replace `styles.css` with tokenized styles**
+- [x] **Step 2: Replace `styles.css` with tokenized styles**
 
 Begin with these exact tokens and derive component styles from them:
 
@@ -412,7 +412,7 @@ Begin with these exact tokens and derive component styles from them:
 
 Implement a 960px desktop shell, independently scrolling conversation, fixed shell header/composer, 72%/68% assistant/user message widths, 44px mobile controls, dialog-to-bottom-sheet adaptation at 600px, visible focus states, hover states only under `(hover: hover)`, safe-area bottom padding, and text wrapping with `overflow-wrap: anywhere`.
 
-- [ ] **Step 3: Add approved state animations**
+- [x] **Step 3: Add approved state animations**
 
 Use 150–220ms transitions, 180ms message/dialog entrance, a 1.4s listening pulse, thinking dots, and speaking bars. Add:
 
@@ -427,7 +427,7 @@ Use 150–220ms transitions, 180ms message/dialog entrance, a 1.4s listening pul
 }
 ```
 
-- [ ] **Step 4: Run focused tests, typecheck, and build**
+- [x] **Step 4: Run focused tests, typecheck, and build**
 
 Run: `pnpm --dir frontend test -- --run src/__tests__/App.test.tsx`  
 Expected: PASS.  
@@ -436,7 +436,7 @@ Expected: PASS.
 Run: `pnpm --dir frontend build`  
 Expected: PASS and `frontend/dist/` created.
 
-- [ ] **Step 5: Commit the responsive visual system**
+- [x] **Step 5: Commit the responsive visual system**
 
 ```powershell
 git add frontend/src/styles.css frontend/src/__tests__/App.test.tsx
