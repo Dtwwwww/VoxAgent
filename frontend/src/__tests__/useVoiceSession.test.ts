@@ -270,6 +270,26 @@ describe("queued native-rate playback", () => {
     expect(completed).toHaveBeenCalledWith({ kind: "turn", turnId: 4 });
   });
 
+  it("waits for an in-flight final chunk decode before completing the turn", async () => {
+    const completed = vi.fn();
+    const playback = new AudioPlayback(completed);
+    await playback.enqueue({ kind: "turn", turnId: 5, sequence: 0, sampleRate: 24_000 }, wavBytes());
+    MockAudioContext.instances[0].sources[0].onended?.();
+    const decoded = deferred<AudioBuffer>();
+    MockAudioContext.decoder = () => decoded.promise;
+
+    const finalChunk = playback.enqueue({ kind: "turn", turnId: 5, sequence: 1, sampleRate: 24_000 }, wavBytes());
+    playback.finishTurn(5);
+    expect(completed).not.toHaveBeenCalled();
+    decoded.resolve({ duration: 0.1, sampleRate: 48_000 } as AudioBuffer);
+    await finalChunk;
+    const finalSource = MockAudioContext.instances[0].sources[1];
+    expect(finalSource.start).toHaveBeenCalled();
+    finalSource.onended?.();
+
+    expect(completed).toHaveBeenCalledWith({ kind: "turn", turnId: 5 });
+  });
+
   it("validates the WAV native rate while allowing browser decode resampling", async () => {
     const playback = new AudioPlayback();
     await playback.enqueue({ kind: "turn", turnId: 3, sequence: 1, sampleRate: 24_000 }, wavBytes());

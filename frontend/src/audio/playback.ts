@@ -17,6 +17,7 @@ interface TurnQueue {
   tailTime: number;
   pending: Map<number, AudioBuffer>;
   complete: boolean;
+  inFlight: number;
 }
 
 function ascii(view: DataView, offset: number, length: number): string {
@@ -72,29 +73,40 @@ export class AudioPlayback {
     if (this.cancelledTurns.has(metadata.turnId)) return false;
     const generation = this.conversationGeneration;
     const context = this.getContext();
-    const buffer = await context.decodeAudioData(bytes.slice(0));
-    if (generation !== this.conversationGeneration || this.cancelledTurns.has(metadata.turnId)) return false;
     const queue = this.turns.get(metadata.turnId) ?? {
       nextSequence: 0,
       tailTime: context.currentTime,
       pending: new Map(),
       complete: this.completedTurns.has(metadata.turnId),
+      inFlight: 0,
     };
-    queue.pending.set(metadata.sequence, buffer);
     this.turns.set(metadata.turnId, queue);
-    let started = false;
-    while (queue.pending.has(queue.nextSequence)) {
-      const next = queue.pending.get(queue.nextSequence)!;
-      queue.pending.delete(queue.nextSequence);
-      const source = this.makeSource(next);
-      source.turnId = metadata.turnId;
-      const startAt = Math.max(context.currentTime, queue.tailTime);
-      source.start(startAt);
-      started = true;
-      queue.tailTime = startAt + next.duration;
-      queue.nextSequence += 1;
+    queue.inFlight += 1;
+    try {
+      const buffer = await context.decodeAudioData(bytes.slice(0));
+      if (
+        generation !== this.conversationGeneration
+        || this.cancelledTurns.has(metadata.turnId)
+        || this.turns.get(metadata.turnId) !== queue
+      ) return false;
+      queue.pending.set(metadata.sequence, buffer);
+      let started = false;
+      while (queue.pending.has(queue.nextSequence)) {
+        const next = queue.pending.get(queue.nextSequence)!;
+        queue.pending.delete(queue.nextSequence);
+        const source = this.makeSource(next);
+        source.turnId = metadata.turnId;
+        const startAt = Math.max(context.currentTime, queue.tailTime);
+        source.start(startAt);
+        started = true;
+        queue.tailTime = startAt + next.duration;
+        queue.nextSequence += 1;
+      }
+      return started;
+    } finally {
+      queue.inFlight -= 1;
+      if (this.turns.get(metadata.turnId) === queue) this.finishTurnIfIdle(metadata.turnId, queue);
     }
-    return started;
   }
 
   finishTurn(turnId: number): void {
@@ -177,7 +189,7 @@ export class AudioPlayback {
 
   private finishTurnIfIdle(turnId: number, queue: TurnQueue): void {
     const hasMoreSources = [...this.sources].some((item) => item.turnId === turnId);
-    if (!queue.complete || hasMoreSources || queue.pending.size > 0) return;
+    if (!queue.complete || queue.inFlight > 0 || hasMoreSources || queue.pending.size > 0) return;
     this.turns.delete(turnId);
     this.completedTurns.delete(turnId);
     this.onCompletion({ kind: "turn", turnId });
