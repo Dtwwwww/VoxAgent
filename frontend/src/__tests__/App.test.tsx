@@ -196,6 +196,14 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "试听 清亮音色" })).toBeDisabled();
   });
 
+  it("disables voice previews while a conversation reply is playing", () => {
+    const session = controller({ voiceStatus: "speaking", speakingTurnId: 3 });
+    render(<App controller={session} />);
+    fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
+
+    expect(screen.getByRole("button", { name: "试听 声灵默认音色" })).toBeDisabled();
+  });
+
   it("exposes recording and message playback stop actions", () => {
     const session = controller({ isMicrophoneActive: true, voiceStatus: "listening", speakingTurnId: 3 });
     render(<App controller={session} />);

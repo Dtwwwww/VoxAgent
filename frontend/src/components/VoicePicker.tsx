@@ -42,7 +42,7 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
   const selectedVoice = controller.voices.find((voice) => voice.voice_key === selectedVoiceKey);
   const speed = controller.selectedVoice?.speed ?? 1;
   const previewBusy = controller.previewingVoiceKey !== null;
-  const sessionBusy = controller.voiceStatus === "transcribing" || controller.voiceStatus === "thinking";
+  const sessionBusy = controller.voiceStatus !== "idle";
 
   return <div className="voice-picker-layer" onMouseDown={(event) => {
     if (event.target === event.currentTarget) onClose();

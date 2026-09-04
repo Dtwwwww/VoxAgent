@@ -246,10 +246,28 @@ describe("queued native-rate playback", () => {
 
     first.onended?.();
     expect(completed).not.toHaveBeenCalled();
+    playback.finishTurn(3);
     second.onended?.();
 
     expect(completed).toHaveBeenCalledOnce();
     expect(completed).toHaveBeenCalledWith({ kind: "turn", turnId: 3 });
+  });
+
+  it("keeps the turn queue until a later synthesized chunk and assistant completion arrive", async () => {
+    const completed = vi.fn();
+    const playback = new AudioPlayback(completed);
+    await playback.enqueue({ kind: "turn", turnId: 4, sequence: 0, sampleRate: 24_000 }, wavBytes());
+    const first = MockAudioContext.instances[0].sources[0];
+    first.onended?.();
+    expect(completed).not.toHaveBeenCalled();
+
+    await playback.enqueue({ kind: "turn", turnId: 4, sequence: 1, sampleRate: 24_000 }, wavBytes());
+    const second = MockAudioContext.instances[0].sources[1];
+    expect(second.start).toHaveBeenCalled();
+    playback.finishTurn(4);
+    second.onended?.();
+
+    expect(completed).toHaveBeenCalledWith({ kind: "turn", turnId: 4 });
   });
 
   it("validates the WAV native rate while allowing browser decode resampling", async () => {
@@ -595,11 +613,43 @@ describe("useVoiceSession", () => {
     emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 3, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
     await act(async () => socket.receive(wav));
     expect(hook.result.current.speakingTurnId).toBe(3);
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 3 });
 
     act(() => MockAudioContext.instances[0].sources[0].onended?.());
 
     expect(hook.result.current.speakingTurnId).toBeNull();
     expect(hook.result.current.voiceStatus).toBe("idle");
+  });
+
+  it("does not restore speaking state when cancelled decoding finishes late", async () => {
+    const decoded = deferred<AudioBuffer>();
+    MockAudioContext.decoder = () => decoded.promise;
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.previewVoice("default_voice", 1));
+    const wav = wavBytes();
+    emit(socket, { type: "voice.preview.chunk", preview_id: 1, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    const receiving = act(async () => socket.receive(wav));
+
+    act(() => hook.result.current.stopVoicePreview());
+    decoded.resolve({ duration: 0.1, sampleRate: 48_000 } as AudioBuffer);
+    await receiving;
+
+    expect(hook.result.current.previewingVoiceKey).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+    expect(MockAudioContext.instances[0].sources).toHaveLength(0);
+  });
+
+  it("can preview again after a stopped preview without predicting server ids", async () => {
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.previewVoice("default_voice", 1));
+    act(() => hook.result.current.stopVoicePreview());
+    act(() => hook.result.current.previewVoice("default_voice", 1));
+    const wav = wavBytes();
+    emit(socket, { type: "voice.preview.chunk", preview_id: 2, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+
+    expect(MockAudioContext.instances[0].sources[0].start).toHaveBeenCalledOnce();
+    expect(hook.result.current.previewingVoiceKey).toBe("default_voice");
   });
 
   it("stops active conversation playback as soon as speech starts", async () => {

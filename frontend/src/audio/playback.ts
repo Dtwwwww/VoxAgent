@@ -16,6 +16,7 @@ interface TurnQueue {
   nextSequence: number;
   tailTime: number;
   pending: Map<number, AudioBuffer>;
+  complete: boolean;
 }
 
 function ascii(view: DataView, offset: number, length: number): string {
@@ -50,31 +51,38 @@ export class AudioPlayback {
   private previewGeneration = 0;
   private conversationGeneration = 0;
   private cancelledTurns = new Set<number>();
+  private completedTurns = new Set<number>();
 
   constructor(private readonly onCompletion: (completion: PlaybackCompletion) => void = () => undefined) {}
 
-  async enqueue(metadata: PlaybackMetadata, bytes: ArrayBuffer): Promise<void> {
+  async enqueue(metadata: PlaybackMetadata, bytes: ArrayBuffer): Promise<boolean> {
     if (nativeWavSampleRate(bytes) !== metadata.sampleRate) throw new Error("WAV sample rate does not match metadata");
     if (metadata.kind === "preview") {
       this.stopPreview();
       const generation = this.previewGeneration;
       const context = this.getContext();
       const buffer = await context.decodeAudioData(bytes.slice(0));
-      if (generation !== this.previewGeneration) return;
+      if (generation !== this.previewGeneration) return false;
       const source = this.makeSource(buffer);
       source.previewId = metadata.previewId;
       source.start();
-      return;
+      return true;
     }
 
-    if (this.cancelledTurns.has(metadata.turnId)) return;
+    if (this.cancelledTurns.has(metadata.turnId)) return false;
     const generation = this.conversationGeneration;
     const context = this.getContext();
     const buffer = await context.decodeAudioData(bytes.slice(0));
-    if (generation !== this.conversationGeneration || this.cancelledTurns.has(metadata.turnId)) return;
-    const queue = this.turns.get(metadata.turnId) ?? { nextSequence: 0, tailTime: context.currentTime, pending: new Map() };
+    if (generation !== this.conversationGeneration || this.cancelledTurns.has(metadata.turnId)) return false;
+    const queue = this.turns.get(metadata.turnId) ?? {
+      nextSequence: 0,
+      tailTime: context.currentTime,
+      pending: new Map(),
+      complete: this.completedTurns.has(metadata.turnId),
+    };
     queue.pending.set(metadata.sequence, buffer);
     this.turns.set(metadata.turnId, queue);
+    let started = false;
     while (queue.pending.has(queue.nextSequence)) {
       const next = queue.pending.get(queue.nextSequence)!;
       queue.pending.delete(queue.nextSequence);
@@ -82,19 +90,31 @@ export class AudioPlayback {
       source.turnId = metadata.turnId;
       const startAt = Math.max(context.currentTime, queue.tailTime);
       source.start(startAt);
+      started = true;
       queue.tailTime = startAt + next.duration;
       queue.nextSequence += 1;
     }
+    return started;
+  }
+
+  finishTurn(turnId: number): void {
+    this.completedTurns.add(turnId);
+    const queue = this.turns.get(turnId);
+    if (!queue) return;
+    queue.complete = true;
+    this.finishTurnIfIdle(turnId, queue);
   }
 
   stopTurn(turnId: number): void {
     this.cancelledTurns.add(turnId);
+    this.completedTurns.delete(turnId);
     this.turns.delete(turnId);
     for (const source of this.sources) if (source.turnId === turnId) this.stopSource(source);
   }
 
   prepareTurnReplay(turnId: number): void {
     this.cancelledTurns.delete(turnId);
+    this.completedTurns.delete(turnId);
     this.turns.delete(turnId);
     for (const source of this.sources) if (source.turnId === turnId) this.stopSource(source);
   }
@@ -103,6 +123,7 @@ export class AudioPlayback {
     this.conversationGeneration += 1;
     for (const source of this.sources) if (source.turnId !== undefined) this.stopSource(source);
     this.turns.clear();
+    this.completedTurns.clear();
   }
 
   stopPreview(): void {
@@ -115,6 +136,7 @@ export class AudioPlayback {
     this.conversationGeneration += 1;
     for (const source of [...this.sources]) this.stopSource(source);
     this.turns.clear();
+    this.completedTurns.clear();
   }
 
   async close(): Promise<void> {
@@ -122,6 +144,7 @@ export class AudioPlayback {
     if (this.context) await this.context.close();
     this.context = null;
     this.cancelledTurns.clear();
+    this.completedTurns.clear();
   }
 
   private getContext(): AudioContext {
@@ -143,17 +166,21 @@ export class AudioPlayback {
       source.outputGain?.disconnect();
       if (source.turnId !== undefined) {
         const queue = this.turns.get(source.turnId);
-        const hasMoreSources = [...this.sources].some((item) => item.turnId === source.turnId);
-        if (!hasMoreSources && (!queue || queue.pending.size === 0)) {
-          this.turns.delete(source.turnId);
-          this.onCompletion({ kind: "turn", turnId: source.turnId });
-        }
+        if (queue) this.finishTurnIfIdle(source.turnId, queue);
       } else if (source.previewId !== undefined) {
         this.onCompletion({ kind: "preview", previewId: source.previewId });
       }
     };
     this.sources.add(source);
     return source;
+  }
+
+  private finishTurnIfIdle(turnId: number, queue: TurnQueue): void {
+    const hasMoreSources = [...this.sources].some((item) => item.turnId === turnId);
+    if (!queue.complete || hasMoreSources || queue.pending.size > 0) return;
+    this.turns.delete(turnId);
+    this.completedTurns.delete(turnId);
+    this.onCompletion({ kind: "turn", turnId });
   }
 
   private stopSource(source: TaggedSource): void {

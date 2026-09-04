@@ -92,12 +92,16 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const blockedThroughTurnRef = useRef(0);
   const cancelledTurnsRef = useRef(new Set<number>());
   const allowedReplayTurnsRef = useRef(new Set<number>());
-  const requestedPreviewIdRef = useRef(0);
+  const previewRequestedRef = useRef(false);
+  const activePreviewIdRef = useRef<number | null>(null);
+  const expectedPreviewIdRef = useRef(0);
   const messageIdRef = useRef(0);
   const handlePlaybackCompletion = useCallback((completion: { kind: "turn"; turnId: number } | { kind: "preview"; previewId: number }) => {
     if (completion.kind === "turn") {
       setSpeakingTurnId((current) => current === completion.turnId ? null : current);
-    } else if (completion.previewId === requestedPreviewIdRef.current) {
+    } else if (completion.previewId === activePreviewIdRef.current) {
+      previewRequestedRef.current = false;
+      activePreviewIdRef.current = null;
       setPreviewingVoiceKey(null);
     }
     setVoiceStatus("idle");
@@ -122,7 +126,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     blockedThroughTurnRef.current = 0;
     cancelledTurnsRef.current.clear();
     allowedReplayTurnsRef.current.clear();
-    requestedPreviewIdRef.current = 0;
+    previewRequestedRef.current = false;
+    activePreviewIdRef.current = null;
+    expectedPreviewIdRef.current = 0;
   }, []);
 
   const stopLocalResources = useCallback(async () => {
@@ -186,10 +192,13 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if (!metadata.valid) return;
     try {
       if (metadata.kind === "turn") {
-        await playbackRef.current.enqueue({ kind: "turn", turnId: metadata.turnId, sequence: metadata.sequence, sampleRate: metadata.sampleRate }, bytes);
+        const started = await playbackRef.current.enqueue({ kind: "turn", turnId: metadata.turnId, sequence: metadata.sequence, sampleRate: metadata.sampleRate }, bytes);
+        if (!started) return;
         setSpeakingTurnId(metadata.turnId);
+        if (allowedReplayTurnsRef.current.has(metadata.turnId)) playbackRef.current.finishTurn(metadata.turnId);
       } else {
-        await playbackRef.current.enqueue({ kind: "preview", previewId: metadata.previewId, sampleRate: metadata.sampleRate }, bytes);
+        const started = await playbackRef.current.enqueue({ kind: "preview", previewId: metadata.previewId, sampleRate: metadata.sampleRate }, bytes);
+        if (!started) return;
       }
       setVoiceStatus("speaking");
     } catch {
@@ -207,7 +216,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         blockedThroughTurnRef.current = 0;
         cancelledTurnsRef.current.clear();
         allowedReplayTurnsRef.current.clear();
-        requestedPreviewIdRef.current = 0;
+        previewRequestedRef.current = false;
+        activePreviewIdRef.current = null;
+        expectedPreviewIdRef.current = 0;
         setConnectionStatus("connected");
         setModelId(event.model_id);
         setOffline(event.offline);
@@ -225,12 +236,15 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setSelectedVoice({ voiceKey: event.voice_key, speed: event.speed });
         break;
       case "voice.preview.chunk":
+        if (previewRequestedRef.current && event.preview_id === expectedPreviewIdRef.current) {
+          activePreviewIdRef.current = event.preview_id;
+        }
         pendingAudioRef.current = {
           kind: "preview",
           previewId: event.preview_id,
           sampleRate: event.sample_rate,
           byteLength: event.byte_length,
-          valid: event.preview_id === requestedPreviewIdRef.current,
+          valid: previewRequestedRef.current && event.preview_id === expectedPreviewIdRef.current,
         };
         break;
       case "tts.chunk": {
@@ -273,6 +287,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           setMessages((current) => current.map((message) => message.id === draftId ? { ...message, status: "complete" } : message));
         }
         assistantDraftsRef.current.delete(event.turn_id);
+        playbackRef.current.finishTurn(event.turn_id);
         setSpeakingTurnId((current) => {
           setVoiceStatus(current === event.turn_id ? "speaking" : "idle");
           return current;
@@ -292,6 +307,14 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setVoiceStatus("idle");
         break;
       case "error":
+        if (previewRequestedRef.current && ["conversation_busy", "preview_failed", "voice_not_previewable", "unknown_voice", "invalid_voice_speed"].includes(event.code)) {
+          if (["conversation_busy", "voice_not_previewable", "unknown_voice", "invalid_voice_speed"].includes(event.code)) {
+            expectedPreviewIdRef.current = Math.max(0, expectedPreviewIdRef.current - 1);
+          }
+          previewRequestedRef.current = false;
+          activePreviewIdRef.current = null;
+          setPreviewingVoiceKey(null);
+        }
         setError({ code: event.code, message: event.message, recoverable: event.recoverable });
         break;
     }
@@ -373,7 +396,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if (captureRef.current) return Promise.resolve();
     if (captureStartRef.current) return captureStartRef.current;
     if (pendingAudioRef.current) pendingAudioRef.current.valid = false;
-    requestedPreviewIdRef.current += 1;
+    previewRequestedRef.current = false;
+    activePreviewIdRef.current = null;
     playbackRef.current.stopAll();
     setSpeakingTurnId(null);
     setPreviewingVoiceKey(null);
@@ -466,16 +490,20 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const previewVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
     playbackRef.current.stopPreview();
+    previewRequestedRef.current = false;
+    activePreviewIdRef.current = null;
     setPreviewingVoiceKey(null);
     if (send({ type: "voice.preview", voice_key: voiceKey, speed })) {
-      requestedPreviewIdRef.current += 1;
+      expectedPreviewIdRef.current += 1;
+      previewRequestedRef.current = true;
       setPreviewingVoiceKey(voiceKey);
     }
   }, [send]);
 
   const stopVoicePreview = useCallback(() => {
     if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
-    requestedPreviewIdRef.current += 1;
+    previewRequestedRef.current = false;
+    activePreviewIdRef.current = null;
     playbackRef.current.stopPreview();
     setPreviewingVoiceKey(null);
     setVoiceStatus("idle");
