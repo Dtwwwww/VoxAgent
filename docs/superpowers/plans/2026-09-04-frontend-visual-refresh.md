@@ -58,7 +58,7 @@
 - Consumes: `ConnectionStatus`, `SessionError`, and `VoiceStatus` from `useVoiceSession.ts`.
 - Produces: `connectionPresentation()`, `voiceStatusPresentation()`, and `errorPresentation()`.
 
-- [ ] **Step 1: Write failing tests for exact labels and recovery kinds**
+- [x] **Step 1: Write failing tests for exact labels and recovery kinds**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -85,12 +85,12 @@ describe("presentation", () => {
 });
 ```
 
-- [ ] **Step 2: Run the focused test and confirm it fails because the module is absent**
+- [x] **Step 2: Run the focused test and confirm it fails because the module is absent**
 
 Run: `pnpm --dir frontend test -- --run src/__tests__/presentation.test.ts`  
 Expected: FAIL with module resolution error for `../presentation`.
 
-- [ ] **Step 3: Implement typed presentation helpers**
+- [x] **Step 3: Implement typed presentation helpers**
 
 ```ts
 import type { ConnectionStatus, SessionError, VoiceStatus } from "./useVoiceSession";
@@ -123,12 +123,12 @@ export function errorPresentation(error: SessionError) {
 }
 ```
 
-- [ ] **Step 4: Run the focused test**
+- [x] **Step 4: Run the focused test**
 
 Run: `pnpm --dir frontend test -- --run src/__tests__/presentation.test.ts`  
 Expected: PASS, 3 tests.
 
-- [ ] **Step 5: Commit the helper and its tests**
+- [x] **Step 5: Commit the helper and its tests**
 
 ```powershell
 git add frontend/src/presentation.ts frontend/src/__tests__/presentation.test.ts
