@@ -43,14 +43,18 @@ export interface VoiceSessionController {
   isMicrophoneActive: boolean;
   modelId: string | null;
   offline: boolean;
+  speakingTurnId: number | null;
+  previewingVoiceKey: string | null;
   connect(): void;
   disconnect(): Promise<void>;
   startMicrophone(): Promise<void>;
   stopMicrophone(): Promise<void>;
   submitText(text: string): void;
   speakMessage(turnId: number): void;
+  stopSpeaking(turnId: number): void;
   selectVoice(voiceKey: string, speed: VoiceSpeed): void;
   previewVoice(voiceKey: string, speed: VoiceSpeed): void;
+  stopVoicePreview(): void;
   cancelActive(): void;
 }
 
@@ -73,6 +77,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const [isMicrophoneActive, setMicrophoneActive] = useState(false);
   const [modelId, setModelId] = useState<string | null>(null);
   const [offline, setOffline] = useState(true);
+  const [speakingTurnId, setSpeakingTurnId] = useState<number | null>(null);
+  const [previewingVoiceKey, setPreviewingVoiceKey] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const captureRef = useRef<MicrophoneCapture | null>(null);
   const captureStartRef = useRef<Promise<void> | null>(null);
@@ -115,6 +121,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     captureLifecycleRef.current += 1;
     setMicrophoneActive(false);
     setVoiceStatus("idle");
+    setSpeakingTurnId(null);
+    setPreviewingVoiceKey(null);
     const abort = captureAbortRef.current;
     captureAbortRef.current = null;
     abort?.abort();
@@ -156,6 +164,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     try {
       if (metadata.kind === "turn") {
         await playbackRef.current.enqueue({ kind: "turn", turnId: metadata.turnId, sequence: metadata.sequence, sampleRate: metadata.sampleRate }, bytes);
+        setSpeakingTurnId(metadata.turnId);
       } else {
         await playbackRef.current.enqueue({ kind: "preview", previewId: metadata.previewId, sampleRate: metadata.sampleRate }, bytes);
       }
@@ -212,6 +221,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         allowedReplayTurnsRef.current.clear();
         if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
         playbackRef.current.stopConversation();
+        setSpeakingTurnId(null);
         setVoiceStatus("listening");
         break;
       case "vad.stopped":
@@ -247,6 +257,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         allowedReplayTurnsRef.current.delete(event.turn_id);
         if (pendingAudioRef.current?.kind === "turn" && pendingAudioRef.current.turnId === event.turn_id) pendingAudioRef.current.valid = false;
         playbackRef.current.stopTurn(event.turn_id);
+        setSpeakingTurnId((current) => current === event.turn_id ? null : current);
         {
           const draftId = assistantDraftsRef.current.get(event.turn_id);
           setMessages((current) => current.map((message) => message.id === draftId ? { ...message, status: "cancelled" } : message));
@@ -388,6 +399,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     blockedThroughTurnRef.current = Math.max(blockedThroughTurnRef.current, maximumTurnIdRef.current);
     allowedReplayTurnsRef.current.clear();
     playbackRef.current.stopConversation();
+    setSpeakingTurnId(null);
     setMessages((current) => [...current, { id: nextId("text-user"), role: "user", origin: "text", text, status: "complete" }]);
     setVoiceStatus("thinking");
     send({ type: "text.submit", text, speak_response: false });
@@ -399,6 +411,15 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     send({ type: "assistant.speak", turn_id: turnId });
   }, [send]);
 
+  const stopSpeaking = useCallback((turnId: number) => {
+    if (pendingAudioRef.current?.kind === "turn" && pendingAudioRef.current.turnId === turnId) {
+      pendingAudioRef.current.valid = false;
+    }
+    playbackRef.current.stopTurn(turnId);
+    setSpeakingTurnId((current) => current === turnId ? null : current);
+    setVoiceStatus("idle");
+  }, []);
+
   const selectVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     const selection = { voiceKey, speed };
     setSelectedVoice(selection);
@@ -409,14 +430,27 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const previewVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
     playbackRef.current.stopPreview();
-    if (send({ type: "voice.preview", voice_key: voiceKey, speed })) requestedPreviewIdRef.current += 1;
+    setPreviewingVoiceKey(null);
+    if (send({ type: "voice.preview", voice_key: voiceKey, speed })) {
+      requestedPreviewIdRef.current += 1;
+      setPreviewingVoiceKey(voiceKey);
+    }
   }, [send]);
+
+  const stopVoicePreview = useCallback(() => {
+    if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
+    playbackRef.current.stopPreview();
+    setPreviewingVoiceKey(null);
+    setVoiceStatus("idle");
+  }, []);
 
   const cancelActive = useCallback(() => {
     if (pendingAudioRef.current) pendingAudioRef.current.valid = false;
     blockedThroughTurnRef.current = Math.max(blockedThroughTurnRef.current, maximumTurnIdRef.current);
     allowedReplayTurnsRef.current.clear();
     playbackRef.current.stopAll();
+    setSpeakingTurnId(null);
+    setPreviewingVoiceKey(null);
     send({ type: "turn.cancel" });
   }, [send]);
 
@@ -451,14 +485,18 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     isMicrophoneActive,
     modelId,
     offline,
+    speakingTurnId,
+    previewingVoiceKey,
     connect,
     disconnect,
     startMicrophone,
     stopMicrophone,
     submitText,
     speakMessage,
+    stopSpeaking,
     selectVoice,
     previewVoice,
+    stopVoicePreview,
     cancelActive,
   };
 }

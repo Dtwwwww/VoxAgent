@@ -506,6 +506,37 @@ describe("useVoiceSession", () => {
     expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 7 });
   });
 
+  it("exposes the active spoken turn and stops it locally", async () => {
+    const stopTurn = vi.spyOn(AudioPlayback.prototype, "stopTurn");
+    const { hook, socket } = openSession();
+    const wav = wavBytes();
+
+    act(() => hook.result.current.speakMessage(3));
+    expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 3 });
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 3, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(hook.result.current.speakingTurnId).toBe(3);
+
+    act(() => hook.result.current.stopSpeaking(3));
+    expect(stopTurn).toHaveBeenCalledWith(3);
+    expect(hook.result.current.speakingTurnId).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+  });
+
+  it("exposes and stops the active voice preview", () => {
+    const stopPreview = vi.spyOn(AudioPlayback.prototype, "stopPreview");
+    const { hook, socket } = openSession();
+
+    act(() => hook.result.current.previewVoice("default_voice", 1));
+    expect(socket.jsonMessages().at(-1)).toEqual({ type: "voice.preview", voice_key: "default_voice", speed: 1 });
+    expect(hook.result.current.previewingVoiceKey).toBe("default_voice");
+
+    act(() => hook.result.current.stopVoicePreview());
+    expect(stopPreview).toHaveBeenCalled();
+    expect(hook.result.current.previewingVoiceKey).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+  });
+
   it("stops active conversation playback as soon as speech starts", async () => {
     const { socket } = openSession();
     const wav = wavBytes();

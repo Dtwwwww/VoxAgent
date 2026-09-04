@@ -147,7 +147,7 @@ git commit -m "feat: add frontend presentation rules"
 - Consumes: existing `AudioPlayback.stopTurn()` and `AudioPlayback.stopPreview()`.
 - Produces on `VoiceSessionController`: `speakingTurnId: number | null`, `previewingVoiceKey: string | null`, `stopSpeaking(turnId: number): void`, `stopVoicePreview(): void`.
 
-- [ ] **Step 1: Add compile-level fixture fields and failing behavioral tests**
+- [x] **Step 1: Add compile-level fixture fields and failing behavioral tests**
 
 Add the four interface members to the test controller fixtures. Add tests that dispatch a turn TTS chunk or invoke a preview, then assert active identity and stop behavior:
 
@@ -162,12 +162,12 @@ act(() => result.current.stopSpeaking(3));
 expect(result.current.speakingTurnId).toBeNull();
 ```
 
-- [ ] **Step 2: Run the focused controller tests and confirm failure**
+- [x] **Step 2: Run the focused controller tests and confirm failure**
 
 Run: `pnpm --dir frontend test -- --run src/__tests__/useVoiceSession.test.ts`  
 Expected: FAIL because the new state and actions do not exist.
 
-- [ ] **Step 3: Implement the minimal controller state**
+- [x] **Step 3: Implement the minimal controller state**
 
 Add state:
 
@@ -195,14 +195,14 @@ const stopVoicePreview = useCallback(() => {
 
 Return all four additions from the hook. Do not send any new WebSocket event.
 
-- [ ] **Step 4: Run controller tests and typecheck**
+- [x] **Step 4: Run controller tests and typecheck**
 
 Run: `pnpm --dir frontend test -- --run src/__tests__/useVoiceSession.test.ts`  
 Expected: PASS.  
 Run: `pnpm --dir frontend typecheck`  
 Expected: PASS after every `VoiceSessionController` fixture includes the new members.
 
-- [ ] **Step 5: Commit the controller presentation API**
+- [x] **Step 5: Commit the controller presentation API**
 
 ```powershell
 git add frontend/src/useVoiceSession.ts frontend/src/__tests__/useVoiceSession.test.ts frontend/src/__tests__/App.test.tsx

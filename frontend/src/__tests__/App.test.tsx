@@ -15,8 +15,9 @@ function controller(): VoiceSessionController {
     voices: [{ voice_key: "default_voice", display_name: "声灵默认音色", description: "自然清晰，适合日常对话", gender: "neutral", is_default: true, previewable: true }],
     selectedVoice: { voiceKey: "default_voice", speed: 1 }, connectionStatus: "connected", voiceStatus: "idle", error: null,
     isMicrophoneActive: false, modelId: "qwen", offline: true,
+    speakingTurnId: null, previewingVoiceKey: null,
     connect: vi.fn(), disconnect: vi.fn(async () => undefined), startMicrophone: vi.fn(async () => undefined), stopMicrophone: vi.fn(async () => undefined),
-    submitText: vi.fn(), speakMessage: vi.fn(), selectVoice: vi.fn(), previewVoice: vi.fn(), cancelActive: vi.fn(),
+    submitText: vi.fn(), speakMessage: vi.fn(), stopSpeaking: vi.fn(), selectVoice: vi.fn(), previewVoice: vi.fn(), stopVoicePreview: vi.fn(), cancelActive: vi.fn(),
   };
 }
 
