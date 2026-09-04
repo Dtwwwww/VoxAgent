@@ -9,8 +9,18 @@ import typer
 import uvicorn
 
 from voxagent.api.app import _validate_session_token, create_app
+from voxagent.api.knowledge import LocalKnowledgeService
 from voxagent.config import AppPaths, resolve_data_root
+from voxagent.conversation.context import (
+    ContextAssembler,
+    LocalMemoryProposalService,
+    MemoryProposalParser,
+    SqliteContextSource,
+)
 from voxagent.conversation.orchestrator import ConversationOrchestrator
+from voxagent.conversation.persona import DEFAULT_PERSONA
+from voxagent.db.connection import open_database
+from voxagent.db.migrations import migrate
 from voxagent.diagnostics.baseline_validator import validate_baseline
 from voxagent.diagnostics.hardware import collect_hardware, evaluate_preflight
 from voxagent.diagnostics.llm_benchmark import LLM_BENCHMARK_PROMPTS, run_llm_benchmark
@@ -27,6 +37,7 @@ from voxagent.diagnostics.speech_benchmark import (
     validate_fixture_checksum,
 )
 from voxagent.llm.ollama import OllamaClient
+from voxagent.memory.embedder import BgeSmallZhEmbedder
 from voxagent.speech.asr import (
     SenseVoiceAsr,
     SenseVoiceCandidatePauseAsr,
@@ -124,6 +135,8 @@ def _create_production_app(session_token: str):
     _validate_session_token(session_token)
     catalog = load_production_catalog()
     root = resolve_data_root(None)
+    paths = AppPaths.from_root(root)
+    paths.create()
     try:
         baseline = json.loads(
             (REPO_ROOT / "benchmarks" / "target-machine-baseline.json").read_text(
@@ -142,7 +155,24 @@ def _create_production_app(session_token: str):
     }:
         raise RuntimeError("Committed partial ASR selection is missing or invalid")
 
+    database_path = paths.data / "voxagent.db"
+    database = open_database(database_path)
+    migrate(database)
+    embedder = BgeSmallZhEmbedder.from_path(
+        paths.models / "embeddings" / "bge-small-zh-v1.5"
+    )
+    context_source = SqliteContextSource(database, embedder)
+    context_assembler = ContextAssembler(
+        DEFAULT_PERSONA,
+        context_source.search_memories,
+        context_source.search_knowledge,
+    )
     http = httpx.AsyncClient(base_url="http://127.0.0.1:11434", trust_env=False)
+    ollama = OllamaClient(http)
+    memory_proposer = LocalMemoryProposalService(ollama, MemoryProposalParser())
+    knowledge_service = LocalKnowledgeService(
+        database_path, paths.temp / "knowledge-uploads", embedder
+    )
 
     def orchestrator_factory() -> ConversationOrchestrator:
         final_asr = SenseVoiceAsr.from_model_dir(
@@ -185,17 +215,25 @@ def _create_production_app(session_token: str):
             endpoint=EndpointDetector("natural"),
             asr=final_asr,
             partial_asr=partial_asr,
-            llm=OllamaClient(http),
+            llm=ollama,
             tts=tts,
             voice_catalog=catalog,
+            context_assembler=context_assembler,
+            memory_proposer=memory_proposer,
         )
+
+    async def shutdown() -> None:
+        await http.aclose()
+        database.close()
 
     application = create_app(
         orchestrator_factory,
         session_token,
-        on_shutdown=http.aclose,
+        on_shutdown=shutdown,
+        knowledge_service=knowledge_service,
     )
     application.state.ollama_http = http
+    application.state.plan3_database = database
     return application
 
 

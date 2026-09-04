@@ -70,6 +70,7 @@ class KnowledgeIngestor:
         path: Path,
         *,
         now_utc: datetime,
+        source_label: str | None = None,
         is_cancelled: Callable[[], bool] = lambda: False,
     ) -> ImportResult:
         source = path.expanduser().resolve(strict=True)
@@ -110,7 +111,13 @@ class KnowledgeIngestor:
                     display_name, source_path, sha256, mime_type, imported_at_utc
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (document.display_name, str(source), digest, document.mime_type, timestamp),
+                (
+                    document.display_name,
+                    source_label or str(source),
+                    digest,
+                    document.mime_type,
+                    timestamp,
+                ),
             )
             document_id = int(result.lastrowid)
             self._connection.executemany(

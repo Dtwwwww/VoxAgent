@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
+import type { KnowledgeClient } from "../knowledge/client";
 import type { VoiceSessionController } from "../useVoiceSession";
 
 afterEach(cleanup);
@@ -42,6 +43,21 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
 }
 
 describe("App", () => {
+  it("exposes a lazy-loaded local knowledge entry", async () => {
+    const knowledgeClient: KnowledgeClient = {
+      listDocuments: vi.fn(async () => []),
+      importDocument: vi.fn(),
+      deleteDocument: vi.fn(),
+    };
+    render(<App controller={controller()} knowledgeClient={knowledgeClient} />);
+
+    expect(knowledgeClient.listDocuments).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "知识库" }));
+
+    expect(await screen.findByRole("dialog", { name: "本地知识库" })).toBeVisible();
+    expect(knowledgeClient.listDocuments).toHaveBeenCalledOnce();
+  });
+
   it("renders the approved shell and message identities", () => {
     const session = controller();
     render(<App controller={session} />);

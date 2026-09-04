@@ -12,7 +12,9 @@ from typing import Protocol
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
+from starlette.middleware.cors import CORSMiddleware
 
+from voxagent.api.knowledge import KnowledgeService, register_knowledge_routes
 from voxagent.api.protocol import parse_client_message, validate_audio_frame
 from voxagent.conversation.events import (
     INPUT_AUDIO_FORMAT,
@@ -349,6 +351,7 @@ def create_app(
     session_token: str,
     *,
     on_shutdown: Callable[[], Awaitable[None]] | None = None,
+    knowledge_service: KnowledgeService | None = None,
 ) -> FastAPI:
     expected_token = _validate_session_token(session_token)
     expected_token_bytes = expected_token.encode("ascii")
@@ -367,6 +370,14 @@ def create_app(
         openapi_url=None,
         lifespan=lifespan,
     )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+    if knowledge_service is not None:
+        register_knowledge_routes(app, knowledge_service, expected_token)
     slot_lock = asyncio.Lock()
     session_active = False
 

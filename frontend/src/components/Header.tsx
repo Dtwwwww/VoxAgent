@@ -4,10 +4,11 @@ import { Icon } from "./Icon";
 
 interface HeaderProps {
   controller: VoiceSessionController;
+  onOpenKnowledge?(): void;
   onOpenVoices(): void;
 }
 
-export function Header({ controller, onOpenVoices }: HeaderProps) {
+export function Header({ controller, onOpenKnowledge, onOpenVoices }: HeaderProps) {
   const connection = connectionPresentation(controller.connectionStatus, controller.modelId);
   const voiceName = controller.voices.find((voice) => voice.voice_key === controller.selectedVoice?.voiceKey)?.display_name
     ?? "正在加载音色";
@@ -25,6 +26,10 @@ export function Header({ controller, onOpenVoices }: HeaderProps) {
         <span className="connection__dot" aria-hidden="true" />
         {connection.label}
       </span>
+      {onOpenKnowledge && <button className="knowledge-trigger" type="button" onClick={onOpenKnowledge} aria-haspopup="dialog">
+        <Icon name="book" size={17} />
+        知识库
+      </button>}
       <button className="voice-trigger" type="button" onClick={onOpenVoices} aria-haspopup="dialog">
         音色：{voiceName}
         <Icon name="chevronDown" size={16} />

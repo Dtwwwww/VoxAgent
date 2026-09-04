@@ -6,11 +6,19 @@ import { ErrorNotice } from "./components/ErrorNotice";
 import { Header } from "./components/Header";
 import { VoiceStatus } from "./components/VoiceStatus";
 import { VoicePicker } from "./components/VoicePicker";
+import { KnowledgePanel } from "./knowledge/KnowledgePanel";
+import type { KnowledgeClient } from "./knowledge/client";
 import type { VoiceSessionController } from "./useVoiceSession";
 
-export function App({ controller }: { controller: VoiceSessionController }) {
+interface AppProps {
+  controller: VoiceSessionController;
+  knowledgeClient?: KnowledgeClient;
+}
+
+export function App({ controller, knowledgeClient }: AppProps) {
   const { connect, disconnect } = controller;
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
 
   useEffect(() => {
     connect();
@@ -26,7 +34,11 @@ export function App({ controller }: { controller: VoiceSessionController }) {
   };
 
   return <main className="app-shell">
-    <Header controller={controller} onOpenVoices={() => setVoicePickerOpen((open) => !open)} />
+    <Header
+      controller={controller}
+      onOpenKnowledge={knowledgeClient ? () => setKnowledgeOpen(true) : undefined}
+      onOpenVoices={() => setVoicePickerOpen((open) => !open)}
+    />
     <Conversation
       messages={controller.messages}
       speakingTurnId={controller.speakingTurnId}
@@ -40,5 +52,10 @@ export function App({ controller }: { controller: VoiceSessionController }) {
       <Composer controller={controller} />
     </div>
     <VoicePicker controller={controller} open={voicePickerOpen} onClose={() => setVoicePickerOpen(false)} />
+    {knowledgeClient && <KnowledgePanel
+      client={knowledgeClient}
+      open={knowledgeOpen}
+      onClose={() => setKnowledgeOpen(false)}
+    />}
   </main>;
 }

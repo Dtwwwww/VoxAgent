@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 
@@ -505,3 +506,79 @@ def test_production_app_rejects_bad_token_before_loading_private_assets(monkeypa
         cli._create_production_app("short")
 
     assert catalog_loads == []
+
+
+def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch, tmp_path):
+    baseline = tmp_path / "benchmarks" / "target-machine-baseline.json"
+    baseline.parent.mkdir()
+    baseline.write_text(
+        json.dumps(
+            {
+                "selection": {"selected_model": "qwen-local"},
+                "asr_candidates": [{"partial_model_id": "sensevoice-int8"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    database = type("Database", (), {"close": lambda self: setattr(self, "closed", True)})()
+    database.closed = False
+    embedder = object()
+    source = type(
+        "Source",
+        (),
+        {"search_memories": lambda *_: (), "search_knowledge": lambda *_: ()},
+    )()
+    assembler = object()
+    proposer = object()
+    knowledge = object()
+    captured: dict[str, object] = {}
+
+    class FakeHttp:
+        closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    fake_http = FakeHttp()
+    monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(cli, "resolve_data_root", lambda _: tmp_path)
+    monkeypatch.setattr(cli, "load_production_catalog", lambda: object())
+    def fake_open_database(path):
+        captured["db_path"] = path
+        return database
+
+    def fake_load_embedder(path):
+        captured["model_path"] = path
+        return embedder
+
+    monkeypatch.setattr(cli, "open_database", fake_open_database)
+    monkeypatch.setattr(
+        cli,
+        "migrate",
+        lambda connection: captured.setdefault("migrated", connection),
+    )
+    monkeypatch.setattr(cli.BgeSmallZhEmbedder, "from_path", fake_load_embedder)
+    monkeypatch.setattr(cli, "SqliteContextSource", lambda connection, model: source)
+    monkeypatch.setattr(cli, "ContextAssembler", lambda persona, memories, documents: assembler)
+    monkeypatch.setattr(cli, "LocalMemoryProposalService", lambda client, parser: proposer)
+    monkeypatch.setattr(cli, "LocalKnowledgeService", lambda database_path, temp, model: knowledge)
+    monkeypatch.setattr(cli.httpx, "AsyncClient", lambda **_: fake_http)
+
+    application = type("Application", (), {"state": type("State", (), {})()})()
+
+    def fake_create_app(factory, token, **kwargs):
+        captured.update(factory=factory, token=token, **kwargs)
+        return application
+
+    monkeypatch.setattr(cli, "create_app", fake_create_app)
+
+    result = cli._create_production_app(SESSION_TOKEN)
+
+    assert result is application
+    assert captured["db_path"] == tmp_path / "data" / "voxagent.db"
+    assert captured["model_path"] == tmp_path / "models" / "embeddings" / "bge-small-zh-v1.5"
+    assert captured["knowledge_service"] is knowledge
+    assert captured["token"] == SESSION_TOKEN
+    asyncio.run(captured["on_shutdown"]())
+    assert database.closed is True
+    assert fake_http.closed is True
