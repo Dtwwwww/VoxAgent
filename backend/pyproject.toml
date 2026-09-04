@@ -7,10 +7,12 @@ dependencies = [
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "numpy>=2.0,<3",
+  "onnxruntime>=1.22,<2",
   "pydantic>=2.11,<3",
   "psutil>=6.1,<8",
   "soundfile>=0.13,<1",
   "typer>=0.15,<1",
+  "tokenizers>=0.21,<1",
   "uvicorn[standard]>=0.35,<1",
 ]
 
@@ -41,6 +43,7 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
   "local_vad_smoke: explicitly enabled local Silero VAD integration smoke",
+  "model: explicitly enabled local embedding model integration smoke",
 ]
 
 [tool.ruff]
