@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-04T13:13:52.7903977Z",
+  "target_machine": "local Windows target",
+  "model_id": "qwen3:4b-instruct-2507-q4_K_M",
+  "public_voice_id": "default_voice",
+  "selected_voice_sample_id": "voice-005",
+  "selected_engine": "kokoro",
+  "automated": {
+    "websocket_e2e_cases": 2,
+    "websocket_e2e_passed": true,
+    "api_and_e2e_tests": 32,
+    "api_and_e2e_passed": true
+  },
+  "live_synthetic_audio_loopback": {
+    "run_count": 1,
+    "method": "Generate the public voice preview locally, convert it to the browser microphone contract, and pass it through the real VAD, ASR, Ollama, and TTS stack.",
+    "websocket_open_seconds": 0.079,
+    "speech_runtime_initialize_seconds": 14.058,
+    "preview_synthesis_seconds": 12.942,
+    "microphone_frame_count": 200,
+    "recognized_text": "你好，我是生灵，很高兴陪你一起聊天。",
+    "tts_chunk_count": 3,
+    "endpoint_to_transcript_seconds": {
+      "p50": 0.984,
+      "p95": 0.984
+    },
+    "transcript_to_first_token_seconds": {
+      "p50": 0.229,
+      "p95": 0.229
+    },
+    "first_token_to_audio_seconds": {
+      "p50": 3.919,
+      "p95": 3.919
+    },
+    "event_order_valid": true,
+    "private_voice_identifier_exposed": false
+  },
+  "manual_target_machine_acceptance": {
+    "status": "not_run",
+    "typed_turns": 0,
+    "normal_voice_endings": 0,
+    "incomplete_or_filler_endings": 0,
+    "barge_ins": 0,
+    "speed_variants_checked": 0,
+    "microphone_permission_denial_checked": false,
+    "desktop_layout_checked": false,
+    "mobile_layout_checked": false,
+    "barge_in_stop_ms": {
+      "p50": null,
+      "p95": null
+    },
+    "note": "Requires the user to speak through the physical microphone and visually inspect the browser; no result is inferred from automated tests."
+  },
+  "gates": {
+    "websocket_connects_before_speech_models_finish_loading": true,
+    "live_local_vad_asr_llm_tts_loop_passed": true,
+    "first_token_to_audio_at_most_user_approved_15_seconds": true,
+    "natural_endpoint_not_0_9_seconds": true,
+    "incomplete_ending_waits_about_2_seconds": true,
+    "manual_microphone_and_browser_acceptance": "not_run"
+  },
+  "overall_status": "automated_and_live_loopback_passed_manual_acceptance_pending"
+}
