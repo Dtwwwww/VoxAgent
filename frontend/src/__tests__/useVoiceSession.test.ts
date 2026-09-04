@@ -237,6 +237,21 @@ describe("PCM microphone framing", () => {
 });
 
 describe("queued native-rate playback", () => {
+  it("reports natural completion only after the final scheduled source ends", async () => {
+    const completed = vi.fn();
+    const playback = new AudioPlayback(completed);
+    await playback.enqueue({ kind: "turn", turnId: 3, sequence: 0, sampleRate: 24_000 }, wavBytes());
+    await playback.enqueue({ kind: "turn", turnId: 3, sequence: 1, sampleRate: 24_000 }, wavBytes());
+    const [first, second] = MockAudioContext.instances[0].sources;
+
+    first.onended?.();
+    expect(completed).not.toHaveBeenCalled();
+    second.onended?.();
+
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed).toHaveBeenCalledWith({ kind: "turn", turnId: 3 });
+  });
+
   it("validates the WAV native rate while allowing browser decode resampling", async () => {
     const playback = new AudioPlayback();
     await playback.enqueue({ kind: "turn", turnId: 3, sequence: 1, sampleRate: 24_000 }, wavBytes());
@@ -364,6 +379,17 @@ describe("useVoiceSession", () => {
     expect(socket.jsonMessages().at(-1)).toEqual({ type: "audio.commit" });
     expect(socket.readyState).toBe(MockWebSocket.OPEN);
     expect(hook.result.current.isMicrophoneActive).toBe(false);
+  });
+
+  it("stops current playback immediately when microphone capture starts", () => {
+    const media = deferred<MediaStream>();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValueOnce(media.promise);
+    const stopAll = vi.spyOn(AudioPlayback.prototype, "stopAll");
+    const { hook } = openSession();
+
+    act(() => { void hook.result.current.startMicrophone(); });
+
+    expect(stopAll).toHaveBeenCalledOnce();
   });
 
   it("makes microphone start single-flight and prevents a capture appearing after disconnect", async () => {
@@ -505,6 +531,8 @@ describe("useVoiceSession", () => {
     await act(async () => socket.receive(wav));
     expect(hook.result.current.voiceStatus).toBe("speaking");
     emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 1 });
+    expect(hook.result.current.voiceStatus).toBe("speaking");
+    act(() => MockAudioContext.instances[0].sources[0].onended?.());
     expect(hook.result.current.voiceStatus).toBe("idle");
   });
 
@@ -541,7 +569,7 @@ describe("useVoiceSession", () => {
     expect(hook.result.current.voiceStatus).toBe("idle");
   });
 
-  it("exposes and stops the active voice preview", () => {
+  it("exposes and stops the active voice preview without playing a late result", async () => {
     const stopPreview = vi.spyOn(AudioPlayback.prototype, "stopPreview");
     const { hook, socket } = openSession();
 
@@ -551,7 +579,26 @@ describe("useVoiceSession", () => {
 
     act(() => hook.result.current.stopVoicePreview());
     expect(stopPreview).toHaveBeenCalled();
+    expect(socket.jsonMessages().at(-1)).toEqual({ type: "turn.cancel" });
     expect(hook.result.current.previewingVoiceKey).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+
+    const wav = wavBytes();
+    emit(socket, { type: "voice.preview.chunk", preview_id: 1, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances.flatMap((context) => context.sources)).toHaveLength(0);
+  });
+
+  it("clears spoken state when browser playback ends naturally", async () => {
+    const { hook, socket } = openSession();
+    const wav = wavBytes();
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 3, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(hook.result.current.speakingTurnId).toBe(3);
+
+    act(() => MockAudioContext.instances[0].sources[0].onended?.());
+
+    expect(hook.result.current.speakingTurnId).toBeNull();
     expect(hook.result.current.voiceStatus).toBe("idle");
   });
 

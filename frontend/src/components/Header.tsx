@@ -10,8 +10,7 @@ interface HeaderProps {
 export function Header({ controller, onOpenVoices }: HeaderProps) {
   const connection = connectionPresentation(controller.connectionStatus, controller.modelId);
   const voiceName = controller.voices.find((voice) => voice.voice_key === controller.selectedVoice?.voiceKey)?.display_name
-    ?? controller.selectedVoice?.voiceKey
-    ?? "voice-005";
+    ?? "正在加载音色";
 
   return <header className="app-header">
     <div className="brand">

@@ -84,7 +84,6 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const captureStartRef = useRef<Promise<void> | null>(null);
   const captureAbortRef = useRef<AbortController | null>(null);
   const captureLifecycleRef = useRef(0);
-  const playbackRef = useRef(new AudioPlayback());
   const pendingAudioRef = useRef<AudioMetadata | null>(null);
   const discardedPayloadsRef = useRef(0);
   const assistantDraftsRef = useRef(new Map<number, string>());
@@ -95,6 +94,15 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const allowedReplayTurnsRef = useRef(new Set<number>());
   const requestedPreviewIdRef = useRef(0);
   const messageIdRef = useRef(0);
+  const handlePlaybackCompletion = useCallback((completion: { kind: "turn"; turnId: number } | { kind: "preview"; previewId: number }) => {
+    if (completion.kind === "turn") {
+      setSpeakingTurnId((current) => current === completion.turnId ? null : current);
+    } else if (completion.previewId === requestedPreviewIdRef.current) {
+      setPreviewingVoiceKey(null);
+    }
+    setVoiceStatus("idle");
+  }, []);
+  const playbackRef = useRef(new AudioPlayback(handlePlaybackCompletion));
 
   const nextId = useCallback((prefix: string) => `${prefix}-${++messageIdRef.current}`, []);
 
@@ -131,14 +139,14 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     const capture = captureRef.current;
     captureRef.current = null;
     const playback = playbackRef.current;
-    playbackRef.current = new AudioPlayback();
+    playbackRef.current = new AudioPlayback(handlePlaybackCompletion);
     resetSessionTracking();
     await Promise.all([
       pendingStart?.catch(() => undefined),
       capture?.stop(),
       playback.close(),
     ]);
-  }, [resetSessionTracking]);
+  }, [handlePlaybackCompletion, resetSessionTracking]);
 
   const failProtocol = useCallback(() => {
     setError({ code: "invalid_server_event", message: "服务器返回了无效数据，请重试", recoverable: true });
@@ -265,7 +273,10 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           setMessages((current) => current.map((message) => message.id === draftId ? { ...message, status: "complete" } : message));
         }
         assistantDraftsRef.current.delete(event.turn_id);
-        setVoiceStatus("idle");
+        setSpeakingTurnId((current) => {
+          setVoiceStatus(current === event.turn_id ? "speaking" : "idle");
+          return current;
+        });
         break;
       case "turn.cancelled":
         cancelledTurnsRef.current.add(event.turn_id);
@@ -361,6 +372,12 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const startMicrophone = useCallback((): Promise<void> => {
     if (captureRef.current) return Promise.resolve();
     if (captureStartRef.current) return captureStartRef.current;
+    if (pendingAudioRef.current) pendingAudioRef.current.valid = false;
+    requestedPreviewIdRef.current += 1;
+    playbackRef.current.stopAll();
+    setSpeakingTurnId(null);
+    setPreviewingVoiceKey(null);
+    send({ type: "turn.cancel" });
     const lifecycle = captureLifecycleRef.current;
     const abort = new AbortController();
     captureAbortRef.current = abort;
@@ -393,7 +410,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     })();
     captureStartRef.current = operation;
     return operation;
-  }, []);
+  }, [send]);
 
   const stopMicrophone = useCallback(async () => {
     captureLifecycleRef.current += 1;
@@ -458,10 +475,12 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
 
   const stopVoicePreview = useCallback(() => {
     if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
+    requestedPreviewIdRef.current += 1;
     playbackRef.current.stopPreview();
     setPreviewingVoiceKey(null);
     setVoiceStatus("idle");
-  }, []);
+    send({ type: "turn.cancel" });
+  }, [send]);
 
   const cancelActive = useCallback(() => {
     if (pendingAudioRef.current) pendingAudioRef.current.valid = false;

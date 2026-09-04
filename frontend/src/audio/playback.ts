@@ -2,7 +2,15 @@ export type PlaybackMetadata =
   | { kind: "turn"; turnId: number; sequence: number; sampleRate: number }
   | { kind: "preview"; previewId: number; sampleRate: number };
 
-type TaggedSource = AudioBufferSourceNode & { turnId?: number; previewId?: number };
+type TaggedSource = AudioBufferSourceNode & {
+  turnId?: number;
+  previewId?: number;
+  outputGain?: GainNode;
+};
+
+export type PlaybackCompletion =
+  | { kind: "turn"; turnId: number }
+  | { kind: "preview"; previewId: number };
 
 interface TurnQueue {
   nextSequence: number;
@@ -42,6 +50,8 @@ export class AudioPlayback {
   private previewGeneration = 0;
   private conversationGeneration = 0;
   private cancelledTurns = new Set<number>();
+
+  constructor(private readonly onCompletion: (completion: PlaybackCompletion) => void = () => undefined) {}
 
   async enqueue(metadata: PlaybackMetadata, bytes: ArrayBuffer): Promise<void> {
     if (nativeWavSampleRate(bytes) !== metadata.sampleRate) throw new Error("WAV sample rate does not match metadata");
@@ -126,14 +136,31 @@ export class AudioPlayback {
     gain.gain.value = 1.15;
     source.connect(gain);
     gain.connect(this.getContext().destination);
-    source.onended = () => this.sources.delete(source);
+    source.outputGain = gain;
+    source.onended = () => {
+      this.sources.delete(source);
+      source.disconnect();
+      source.outputGain?.disconnect();
+      if (source.turnId !== undefined) {
+        const queue = this.turns.get(source.turnId);
+        const hasMoreSources = [...this.sources].some((item) => item.turnId === source.turnId);
+        if (!hasMoreSources && (!queue || queue.pending.size === 0)) {
+          this.turns.delete(source.turnId);
+          this.onCompletion({ kind: "turn", turnId: source.turnId });
+        }
+      } else if (source.previewId !== undefined) {
+        this.onCompletion({ kind: "preview", previewId: source.previewId });
+      }
+    };
     this.sources.add(source);
     return source;
   }
 
   private stopSource(source: TaggedSource): void {
+    source.onended = null;
     try { source.stop(); } catch { /* A source may already have ended. */ }
     source.disconnect();
+    source.outputGain?.disconnect();
     this.sources.delete(source);
   }
 }

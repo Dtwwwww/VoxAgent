@@ -147,6 +147,18 @@ describe("App", () => {
     expect(screen.queryByText(/本地运行/)).toBeNull();
   });
 
+  it("never renders or submits a private voice identifier before the catalog loads", () => {
+    const session = controller({ voices: [], selectedVoice: { voiceKey: "voice-005", speed: 1 } });
+    render(<App controller={session} />);
+
+    expect(document.body).not.toHaveTextContent("voice-005");
+    fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
+    for (const button of screen.getAllByRole("button", { name: /舒缓|自然|稍快/ })) {
+      expect(button).toBeDisabled();
+    }
+    expect(session.selectVoice).not.toHaveBeenCalled();
+  });
+
   it("opens and closes the accessible voice dialog", () => {
     render(<App controller={controller()} />);
     fireEvent.click(screen.getByRole("button", { name: /音色：/ }));

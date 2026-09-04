@@ -36,7 +36,9 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
 
   if (!open) return null;
 
-  const selectedVoiceKey = controller.selectedVoice?.voiceKey ?? "voice-005";
+  const selectedVoiceKey = controller.voices.some((voice) => voice.voice_key === controller.selectedVoice?.voiceKey)
+    ? controller.selectedVoice?.voiceKey ?? null
+    : controller.voices.find((voice) => voice.is_default)?.voice_key ?? controller.voices[0]?.voice_key ?? null;
   const selectedVoice = controller.voices.find((voice) => voice.voice_key === selectedVoiceKey);
   const speed = controller.selectedVoice?.speed ?? 1;
   const previewBusy = controller.previewingVoiceKey !== null;
@@ -49,7 +51,7 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
       <div className="voice-picker__header">
         <div>
           <h2 id="voice-picker-title">选择音色</h2>
-          <p>当前：{selectedVoice?.display_name ?? selectedVoiceKey}</p>
+          <p>当前：{selectedVoice?.display_name ?? "正在加载音色"}</p>
         </div>
         <button ref={closeRef} className="icon-button" type="button" aria-label="关闭音色选择" onClick={onClose}>
           <Icon name="close" />
@@ -92,8 +94,11 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
           {speeds.map((item) => <button
             type="button"
             key={item.value}
+            disabled={selectedVoiceKey === null}
             aria-pressed={speed === item.value}
-            onClick={() => controller.selectVoice(selectedVoiceKey, item.value)}
+            onClick={() => {
+              if (selectedVoiceKey !== null) controller.selectVoice(selectedVoiceKey, item.value);
+            }}
           >{item.label}</button>)}
         </div>
       </fieldset>
