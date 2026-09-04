@@ -226,7 +226,7 @@ git commit -m "feat: expose voice playback state to interface"
 - `Header({ controller, onOpenVoices })` shows brand, connection presentation, and selected voice.
 - `Conversation({ messages, speakingTurnId, onSpeak, onStopSpeaking, onSuggestion })` owns scrolling and renders messages.
 
-- [ ] **Step 1: Replace the App test with assertions for the approved shell**
+- [x] **Step 1: Replace the App test with assertions for the approved shell**
 
 Cover exact product copy and message semantics:
 
@@ -241,12 +241,12 @@ expect(screen.getByRole("button", { name: /音色：/ })).toBeVisible();
 
 Add an empty-controller test for the welcome copy and suggestions, and assert that clicking “介绍一下你自己” calls `submitText("介绍一下你自己")`.
 
-- [ ] **Step 2: Run the App test and confirm the new expectations fail**
+- [x] **Step 2: Run the App test and confirm the new expectations fail**
 
 Run: `pnpm --dir frontend test -- --run src/__tests__/App.test.tsx`  
 Expected: FAIL on missing heading copy, empty state, and shell controls.
 
-- [ ] **Step 3: Implement the icon, header, conversation, and message components**
+- [x] **Step 3: Implement the icon, header, conversation, and message components**
 
 Use inline SVG with `aria-hidden="true"` inside already-labelled buttons. `Conversation` must use a scroll container ref and this bottom threshold:
 
@@ -256,7 +256,7 @@ const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeig
 
 Only auto-scroll when `nearBottom` is true. Otherwise show a 44px “回到底部” button. `ChatMessage` must render “声灵” for assistant and “用户” for user, keep the “语音输入” and “已停止” tags, show copy for all messages, and show “朗读” or “停止朗读” only for complete assistant messages with a turn id.
 
-- [ ] **Step 4: Compose the shell in `App.tsx`**
+- [x] **Step 4: Compose the shell in `App.tsx`**
 
 Keep the stable lifecycle dependencies:
 
@@ -269,14 +269,14 @@ useEffect(() => {
 
 Own `voicePickerOpen` in `App`, render `Header`, `Conversation`, `ErrorNotice`, `VoiceStatus`, `Composer`, and conditionally `VoicePicker`. Do not render the previous standalone sticky status footer.
 
-- [ ] **Step 5: Run focused tests and typecheck**
+- [x] **Step 5: Run focused tests and typecheck**
 
 Run: `pnpm --dir frontend test -- --run src/__tests__/App.test.tsx`  
 Expected: PASS.  
 Run: `pnpm --dir frontend typecheck`  
 Expected: PASS.
 
-- [ ] **Step 6: Commit the shell and conversation work**
+- [x] **Step 6: Commit the shell and conversation work**
 
 ```powershell
 git add frontend/src/App.tsx frontend/src/components/Icon.tsx frontend/src/components/Header.tsx frontend/src/components/Conversation.tsx frontend/src/components/ChatMessage.tsx frontend/src/__tests__/App.test.tsx

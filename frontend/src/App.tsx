@@ -1,26 +1,44 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
-import { ChatMessage } from "./components/ChatMessage";
 import { Composer } from "./components/Composer";
+import { Conversation } from "./components/Conversation";
+import { Header } from "./components/Header";
 import { VoicePicker } from "./components/VoicePicker";
+import { voiceStatusPresentation } from "./presentation";
 import type { VoiceSessionController } from "./useVoiceSession";
-
-const statusLabels = { idle: "空闲", listening: "正在聆听", transcribing: "正在转写", thinking: "正在思考", speaking: "正在朗读" };
 
 export function App({ controller }: { controller: VoiceSessionController }) {
   const { connect, disconnect } = controller;
+  const [voicePickerOpen, setVoicePickerOpen] = useState(false);
+
   useEffect(() => {
     connect();
     return () => { void disconnect(); };
   }, [connect, disconnect]);
-  const voiceName = controller.voices.find((voice) => voice.voice_key === controller.selectedVoice?.voiceKey)?.display_name;
+
+  const status = voiceStatusPresentation(controller.voiceStatus);
+  const handleSuggestion = (suggestion: string) => {
+    if (suggestion === "开始语音对话") {
+      document.getElementById("microphone-button")?.focus();
+      return;
+    }
+    controller.submitText(suggestion);
+  };
+
   return <main className="app-shell">
-    <header><div><h1>Agent（声灵）</h1><p>本地运行 · {controller.modelId ?? "正在连接"}</p></div><p role="status">{statusLabels[controller.voiceStatus]}</p>{voiceName && <p className="current-voice">{voiceName}</p>}</header>
-    <VoicePicker controller={controller} />
-    <section className="conversation" aria-label="对话记录">
-      {controller.messages.map((message) => <ChatMessage key={message.id} message={message} onSpeak={controller.speakMessage} />)}
-    </section>
-    {controller.error && <p className="session-error" aria-live="polite">{controller.error.message}</p>}
-    <Composer controller={controller} />
+    <Header controller={controller} onOpenVoices={() => setVoicePickerOpen((open) => !open)} />
+    <Conversation
+      messages={controller.messages}
+      speakingTurnId={controller.speakingTurnId}
+      onSpeak={controller.speakMessage}
+      onStopSpeaking={controller.stopSpeaking}
+      onSuggestion={handleSuggestion}
+    />
+    <div className="composer-region">
+      {controller.error && <p className="session-error" aria-live="polite">{controller.error.message}</p>}
+      {status && <div className="voice-status" role="status" data-state={controller.voiceStatus}>{status.label}</div>}
+      <Composer controller={controller} />
+    </div>
+    {voicePickerOpen && <div className="voice-picker-layer"><VoicePicker controller={controller} /></div>}
   </main>;
 }
