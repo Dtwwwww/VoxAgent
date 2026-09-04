@@ -37,20 +37,24 @@
     "private_voice_identifier_exposed": false
   },
   "manual_target_machine_acceptance": {
-    "status": "not_run",
-    "typed_turns": 0,
+    "status": "partial",
+    "typed_turns": 1,
     "normal_voice_endings": 0,
     "incomplete_or_filler_endings": 0,
     "barge_ins": 0,
     "speed_variants_checked": 0,
     "microphone_permission_denial_checked": false,
-    "desktop_layout_checked": false,
-    "mobile_layout_checked": false,
+    "desktop_layout_checked": true,
+    "mobile_layout_checked": true,
+    "desktop_viewport": "1440x900",
+    "mobile_viewport": "390x844",
+    "typed_response_remained_silent": true,
+    "repeated_manual_speech_checked": true,
     "barge_in_stop_ms": {
       "p50": null,
       "p95": null
     },
-    "note": "Requires the user to speak through the physical microphone and visually inspect the browser; no result is inferred from automated tests."
+    "note": "Browser layout, one typed turn, and repeated manual speech were checked with the real local backend. Physical-microphone endings and barge-in timing still require the user to speak; no result is inferred from automated tests."
   },
   "gates": {
     "websocket_connects_before_speech_models_finish_loading": true,
