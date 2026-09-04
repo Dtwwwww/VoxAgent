@@ -6,7 +6,13 @@ from typing import Any
 
 import httpx
 
-from voxagent.conversation.history import SYSTEM_INSTRUCTION, ChatMessage
+from voxagent.conversation.history import (
+    SYSTEM_INSTRUCTION,
+    ChatMessage,
+    TrustedSystemMessage,
+)
+
+ModelMessage = ChatMessage | TrustedSystemMessage | Mapping[str, str]
 
 
 class OllamaStreamError(RuntimeError):
@@ -29,14 +35,9 @@ class OllamaClient:
     async def stream_chat(
         self,
         model: str,
-        messages: Sequence[ChatMessage | Mapping[str, str]],
+        messages: Sequence[ModelMessage],
     ) -> AsyncIterator[str]:
-        serialized: list[dict[str, str]] = []
-        for message in messages:
-            payload = _message_payload(message)
-            if payload["role"] != "system":
-                serialized.append(payload)
-        serialized.insert(0, {"role": "system", "content": SYSTEM_INSTRUCTION})
+        serialized = _serialize_messages(messages)
         payload = {
             "model": model,
             "messages": serialized,
@@ -73,6 +74,54 @@ class OllamaClient:
                 raise OllamaProtocolError(
                     f"Ollama model {model} stream ended without a terminal done frame"
                 )
+
+    async def complete_json(
+        self,
+        model: str,
+        messages: Sequence[ModelMessage],
+        schema: dict[str, object],
+    ) -> str:
+        payload = {
+            "model": model,
+            "messages": _serialize_messages(messages),
+            "format": schema,
+            "stream": False,
+            "think": False,
+            "options": {"num_ctx": 8192, "temperature": 0},
+        }
+        response = await self._http.post("/api/chat", json=payload, timeout=120)
+        response.raise_for_status()
+        try:
+            item = response.json()
+        except (json.JSONDecodeError, TypeError) as error:
+            raise OllamaProtocolError(
+                f"Ollama model {model} returned invalid JSON"
+            ) from error
+        if not isinstance(item, dict):
+            raise OllamaProtocolError(f"Ollama model {model} returned a non-object response")
+        if item.get("error"):
+            raise OllamaStreamError(model, str(item["error"]))
+        content = item.get("message", {}).get("content")
+        if item.get("done") is not True or not isinstance(content, str):
+            raise OllamaProtocolError(f"Ollama model {model} returned incomplete JSON output")
+        return content
+
+
+def _serialize_messages(messages: Sequence[ModelMessage]) -> list[dict[str, str]]:
+    trusted = [
+        message.content for message in messages if isinstance(message, TrustedSystemMessage)
+    ]
+    system = SYSTEM_INSTRUCTION
+    if trusted:
+        system += "\n\n" + "\n\n".join(trusted)
+    serialized: list[dict[str, str]] = [{"role": "system", "content": system}]
+    for message in messages:
+        if isinstance(message, TrustedSystemMessage):
+            continue
+        payload = _message_payload(message)
+        if payload["role"] != "system":
+            serialized.append(payload)
+    return serialized
 
 
 def _message_payload(message: ChatMessage | Mapping[str, str]) -> dict[str, str]:

@@ -7,13 +7,17 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from voxagent.conversation.context import ContextAssembler
 from voxagent.conversation.events import ErrorMessage
 from voxagent.conversation.history import SYSTEM_INSTRUCTION, ChatMessage
 from voxagent.conversation.orchestrator import (
     MAX_UTTERANCE_FRAMES,
     ConversationOrchestrator,
 )
+from voxagent.conversation.persona import DEFAULT_PERSONA
 from voxagent.conversation.state import Phase
+from voxagent.memory.models import MemoryCandidate, MemoryKind
+from voxagent.memory.policy import MemoryPolicy
 from voxagent.speech.asr import AsrResult
 from voxagent.speech.endpoint import EndpointDecision, EndpointDetector
 from voxagent.speech.tts import AudioChunk
@@ -143,6 +147,30 @@ class FakeLlm:
             yield chunk
 
 
+class FakeMemoryProposer:
+    def __init__(
+        self,
+        candidates: tuple[MemoryCandidate, ...] = (),
+        error: Exception | None = None,
+    ) -> None:
+        self.candidates = candidates
+        self.error = error
+        self.calls: list[tuple[str, str, str, int]] = []
+
+    async def propose(
+        self,
+        model_id: str,
+        user_text: str,
+        assistant_text: str,
+        *,
+        source_message_id: int,
+    ) -> tuple[MemoryCandidate, ...]:
+        self.calls.append((model_id, user_text, assistant_text, source_message_id))
+        if self.error is not None:
+            raise self.error
+        return self.candidates
+
+
 @dataclass
 class TtsCall:
     text: str
@@ -230,6 +258,8 @@ def make_orchestrator(
     asr_texts: list[str] | None = None,
     replies: list[list[str]] | None = None,
     tts: FakeTts | None = None,
+    context_assembler: ContextAssembler | None = None,
+    memory_proposer: FakeMemoryProposer | None = None,
     max_utterance_frames: int = MAX_UTTERANCE_FRAMES,
 ) -> tuple[ConversationOrchestrator, FakeLlm, FakeTts]:
     llm = FakeLlm(replies or [["回答。"]])
@@ -244,6 +274,9 @@ def make_orchestrator(
         voice_catalog=catalog(),
         clock_ms=lambda: 1234,
         max_utterance_frames=max_utterance_frames,
+        context_assembler=context_assembler,
+        memory_proposer=memory_proposer,
+        memory_policy=MemoryPolicy() if memory_proposer is not None else None,
     )
     return orchestrator, llm, tts
 
@@ -1057,6 +1090,66 @@ async def test_commit_audio_without_live_voice_is_noop():
 
     assert outputs == []
     assert orchestrator.state.phase is Phase.IDLE
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_context_assembler_supplies_trusted_persona_to_next_reply():
+    assembler = ContextAssembler(
+        DEFAULT_PERSONA,
+        lambda _query, _limit: (),
+        lambda _query, _limit: (),
+    )
+    orchestrator, llm, _ = make_orchestrator(
+        replies=[["有上下文的回答"]], context_assembler=assembler
+    )
+
+    outputs = [item async for item in orchestrator.submit_text("问题", False)]
+
+    assert outputs[-1].type == "assistant.done"
+    assert llm.calls[0].messages[0]["role"] == "system"
+    assert "当前人格" in llm.calls[0].messages[0]["content"]
+    assert llm.calls[0].messages[-1] == {"role": "user", "content": "问题"}
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_reply_emits_only_policy_accepted_memory_proposals() -> None:
+    proposer = FakeMemoryProposer(
+        (
+            MemoryCandidate(MemoryKind.PREFERENCE, "喜欢乌龙茶", 0.8, 1),
+            MemoryCandidate(MemoryKind.PROFILE, "密码是 abc123456", 1, 1),
+        )
+    )
+    orchestrator, _, _ = make_orchestrator(
+        replies=[["已经记下候选。"]], memory_proposer=proposer
+    )
+
+    outputs = [item async for item in orchestrator.submit_text("记住我喜欢乌龙茶", False)]
+
+    assert [item.type for item in outputs] == [
+        "assistant.delta",
+        "memory.proposed",
+        "assistant.done",
+    ]
+    assert outputs[1].content == "喜欢乌龙茶"
+    assert outputs[1].kind == "preference"
+    assert outputs[1].requires_confirmation is False
+    assert proposer.calls == [("qwen-local", "记住我喜欢乌龙茶", "已经记下候选。", 1)]
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_failure_never_changes_successful_reply() -> None:
+    proposer = FakeMemoryProposer(error=ValueError("invalid memory proposal payload"))
+    orchestrator, _, _ = make_orchestrator(
+        replies=[["回答仍然成功"]], memory_proposer=proposer
+    )
+
+    outputs = [item async for item in orchestrator.submit_text("问题", False)]
+
+    assert [item.type for item in outputs] == ["assistant.delta", "assistant.done"]
+    assert orchestrator.history.assistant_text(1) == "回答仍然成功"
     await orchestrator.stop()
 
 

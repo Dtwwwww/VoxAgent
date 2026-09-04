@@ -23,6 +23,14 @@ class ChatMessage:
         return {"role": self.role, "content": self.content}
 
 
+@dataclass(frozen=True, slots=True)
+class TrustedSystemMessage:
+    """A system extension produced only by trusted local application code."""
+
+    content: str
+    role: Literal["system"] = "system"
+
+
 @dataclass(slots=True)
 class _TurnRecord:
     turn_id: int

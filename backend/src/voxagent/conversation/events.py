@@ -169,6 +169,15 @@ class AssistantDone(TurnServerMessage):
     type: Literal["assistant.done"]
 
 
+class MemoryProposed(TurnServerMessage):
+    type: Literal["memory.proposed"]
+    proposal_index: StrictInt = Field(ge=0)
+    kind: Literal["preference", "profile", "habit", "relationship", "event"]
+    content: str = Field(min_length=1, max_length=500)
+    importance: float = Field(ge=0, le=1)
+    requires_confirmation: bool
+
+
 class TtsChunk(TurnServerMessage):
     type: Literal["tts.chunk"]
     sequence: StrictInt = Field(ge=0)
@@ -198,6 +207,7 @@ type ServerEvent = Annotated[
     | AsrFinal
     | AssistantDelta
     | AssistantDone
+    | MemoryProposed
     | TtsChunk
     | TurnCancelled
     | ErrorMessage,

@@ -8,11 +8,13 @@ from typing import TypeVar
 
 import numpy as np
 
+from voxagent.conversation.context import ContextAssembler, MemoryProposalService
 from voxagent.conversation.events import (
     AsrFinal,
     AssistantDelta,
     AssistantDone,
     ErrorMessage,
+    MemoryProposed,
     ServerMessage,
     TtsChunk,
     TurnCancelled,
@@ -25,6 +27,8 @@ from voxagent.conversation.history import ConversationHistory
 from voxagent.conversation.sentence_chunker import SentenceChunker
 from voxagent.conversation.state import Phase, TurnState, TurnToken
 from voxagent.llm.ollama import OllamaClient
+from voxagent.memory.models import PolicyStatus
+from voxagent.memory.policy import MemoryPolicy
 from voxagent.speech.asr import AsrEngine, PartialAsrEngine
 from voxagent.speech.endpoint import EndpointDecision, EndpointDetector
 from voxagent.speech.tts import PUBLIC_TTS_SPEEDS, TtsEngine
@@ -69,6 +73,9 @@ class ConversationOrchestrator:
         history: ConversationHistory | None = None,
         clock_ms: Callable[[], int] | None = None,
         max_utterance_frames: int = MAX_UTTERANCE_FRAMES,
+        context_assembler: ContextAssembler | None = None,
+        memory_proposer: MemoryProposalService | None = None,
+        memory_policy: MemoryPolicy | None = None,
     ) -> None:
         if not 2 <= max_utterance_frames <= MAX_UTTERANCE_FRAMES:
             raise ValueError(
@@ -84,6 +91,11 @@ class ConversationOrchestrator:
         self.voice_catalog = voice_catalog
         self.state = state or TurnState()
         self.history = history or ConversationHistory()
+        self.context_assembler = context_assembler
+        self.memory_proposer = memory_proposer
+        self.memory_policy = memory_policy or (
+            MemoryPolicy() if memory_proposer is not None else None
+        )
         self._clock_ms = clock_ms or (lambda: int(monotonic() * 1000))
         default = next(profile for profile in voice_catalog.public_profiles() if profile.is_default)
         self._voice_key = default.voice_key
@@ -485,9 +497,17 @@ class ConversationOrchestrator:
         sequence = 0
         tts_failed = False
         try:
-            async for delta in self.llm.stream_chat(
-                self.model_id, self.history.messages_for_model()
-            ):
+            history_messages = self.history.messages_for_model()
+            user_text = history_messages[-1].content
+            model_messages = history_messages
+            if self.context_assembler is not None:
+                try:
+                    model_messages = self.context_assembler.build(
+                        user_text, history_messages
+                    ).messages
+                except Exception:
+                    model_messages = history_messages
+            async for delta in self.llm.stream_chat(self.model_id, model_messages):
                 if token.cancelled.is_set():
                     return
                 visible_delta = _text_without_emoji(delta)
@@ -539,11 +559,17 @@ class ConversationOrchestrator:
                     )
             if token.cancelled.is_set():
                 return
-            self.history.complete_assistant(token.turn_id, "".join(answer))
+            assistant_text = "".join(answer)
+            self.history.complete_assistant(token.turn_id, assistant_text)
+            memory_events = await self._memory_proposal_events(
+                token, user_text, assistant_text
+            )
+            if token.cancelled.is_set():
+                return
             await self._emit(
                 _OutputBatch(
                     owner,
-                    (
+                    (*memory_events,
                         AssistantDone(
                             type="assistant.done",
                             session_id=token.session_id,
@@ -564,6 +590,46 @@ class ConversationOrchestrator:
                     terminal=True,
                 )
             )
+
+    async def _memory_proposal_events(
+        self,
+        token: TurnToken,
+        user_text: str,
+        assistant_text: str,
+    ) -> tuple[MemoryProposed, ...]:
+        if self.memory_proposer is None or self.memory_policy is None:
+            return ()
+        try:
+            candidates = await self.memory_proposer.propose(
+                self.model_id,
+                user_text,
+                assistant_text,
+                source_message_id=token.turn_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return ()
+        events: list[MemoryProposed] = []
+        for index, candidate in enumerate(candidates):
+            decision = self.memory_policy.evaluate(candidate)
+            if decision.status is PolicyStatus.REJECT:
+                continue
+            events.append(
+                MemoryProposed(
+                    type="memory.proposed",
+                    session_id=token.session_id,
+                    turn_id=token.turn_id,
+                    proposal_index=index,
+                    kind=candidate.kind.value,
+                    content=candidate.content,
+                    importance=candidate.importance,
+                    requires_confirmation=(
+                        decision.status is PolicyStatus.REQUIRES_CONFIRMATION
+                    ),
+                )
+            )
+        return tuple(events)
 
     async def _synthesize_reply_sentence(
         self,
