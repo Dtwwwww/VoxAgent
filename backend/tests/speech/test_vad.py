@@ -7,7 +7,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from voxagent.speech.vad import ModelAssetError, SherpaVadEngine, VadDecision, VadDetector
+from voxagent.speech.vad import (
+    MIN_SPEECH_DURATION_SECONDS,
+    SILERO_SPEECH_THRESHOLD,
+    ModelAssetError,
+    SherpaVadEngine,
+    VadDecision,
+    VadDetector,
+)
 
 
 class FakeVadEngine:
@@ -108,8 +115,10 @@ def test_sherpa_vad_engine_configures_pinned_cpu_parameters_without_loading_weig
     assert config.provider == "cpu"
     assert config.debug is False
     assert config.silero_vad.model == str(model_path)
-    assert config.silero_vad.threshold == 0.5
-    assert config.silero_vad.min_speech_duration == 0.2
+    assert SILERO_SPEECH_THRESHOLD == 0.35
+    assert MIN_SPEECH_DURATION_SECONDS == 0.1
+    assert config.silero_vad.threshold == SILERO_SPEECH_THRESHOLD
+    assert config.silero_vad.min_speech_duration == MIN_SPEECH_DURATION_SECONDS
 
 
 def test_sherpa_vad_engine_uses_the_bundled_onnxruntime_directory_before_import(

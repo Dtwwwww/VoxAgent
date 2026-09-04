@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "selection_method": "direct_user_choice",
+  "review_seed": 20260830,
+  "selected_sample_id": "voice-005",
+  "tied_engine_sample_ids": [
+    "engine-002",
+    "engine-003",
+    "engine-004"
+  ],
+  "selected_engine": "kokoro",
+  "engine_tie_break": "Kokoro was retained as the approved tie-break among the tied engine samples.",
+  "resolved_native_voice_id": 3,
+  "public_voice": {
+    "voice_key": "default_voice",
+    "display_name": "声灵默认音色",
+    "description": "自然清晰，适合日常对话",
+    "gender": "neutral",
+    "is_default": true,
+    "previewable": true
+  }
+}

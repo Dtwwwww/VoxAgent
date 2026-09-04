@@ -12,7 +12,8 @@ from voxagent.api.protocol import validate_audio_frame
 
 SAMPLE_RATE = 16000
 FRAME_SAMPLES = 320
-MIN_SPEECH_DURATION_SECONDS = 0.2
+SILERO_SPEECH_THRESHOLD = 0.35
+MIN_SPEECH_DURATION_SECONDS = 0.1
 ONNXRUNTIME_VERSION = "1.27.0"
 _ONNXRUNTIME_DLL_DIRECTORIES: list[object] = []
 
@@ -78,7 +79,7 @@ class SherpaVadEngine:
         config = sherpa_onnx.VadModelConfig(
             silero_vad=sherpa_onnx.SileroVadModelConfig(
                 model=str(model_path),
-                threshold=0.5,
+                threshold=SILERO_SPEECH_THRESHOLD,
                 min_speech_duration=MIN_SPEECH_DURATION_SECONDS,
             ),
             sample_rate=sample_rate,
