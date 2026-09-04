@@ -324,6 +324,20 @@ describe("useVoiceSession", () => {
     expect(hook.result.current.connectionStatus).toBe("connected");
   });
 
+  it("distinguishes backend close codes for quick reconnection guidance", () => {
+    const hook = renderHook(() => useVoiceSession({ url: "ws://localhost/v1/voice" }));
+    act(() => hook.result.current.connect());
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.onclose?.(new CloseEvent("close", { code: 4401 })));
+    expect(hook.result.current.connectionStatus).toBe("disconnected");
+    expect(hook.result.current.error?.message).toContain("token");
+
+    act(() => hook.result.current.connect());
+    const busySocket = MockWebSocket.instances.at(-1)!;
+    act(() => busySocket.onclose?.(new CloseEvent("close", { code: 4409 })));
+    expect(hook.result.current.error?.message).toContain("会话占用");
+  });
+
   it("keeps text available and reports a recoverable Chinese error when microphone permission is denied", async () => {
     vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValueOnce(new DOMException("denied", "NotAllowedError"));
     const { hook, socket } = openSession();

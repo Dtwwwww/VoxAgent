@@ -92,7 +92,15 @@ export class MicrophoneCapture {
 
   async start(signal?: AbortSignal): Promise<void> {
     if (this.stream) return;
-    const media = navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    const media = navigator.mediaDevices.getUserMedia({
+      audio: {
+        sampleRate: 16000,
+        channelCount: 1,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: true,
+      },
+    });
     if (signal) void media.then((lateStream) => {
       if (signal.aborted) lateStream.getTracks().forEach((track) => track.stop());
     }, () => undefined);

@@ -144,6 +144,21 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     setError({ code: "invalid_server_event", message: "服务器返回了无效数据，请重试", recoverable: true });
   }, []);
 
+  const failConnection = useCallback((code?: number) => {
+    const byCode: Record<number, { message: string; recoverable: boolean }> = {
+      4401: { message: "语音服务 token 验证失败，请确认启动命令与页面 token 一致", recoverable: true },
+      4409: { message: "当前已有一次会话占用语音服务，请先关闭其他前端页面后再试", recoverable: true },
+      4400: { message: "语音协议握手失败，请刷新页面重试", recoverable: true },
+      1006: { message: "无法连接到语音服务，请确认后端已运行并监听 127.0.0.1:8765", recoverable: true },
+    };
+    const detail = code ? byCode[code] : undefined;
+    if (!detail) {
+      setError({ code: "connection", message: "无法连接语音服务，请重试", recoverable: true });
+      return;
+    }
+    setError({ code: "connection", message: detail.message, recoverable: detail.recoverable });
+  }, []);
+
   const consumeBinary = useCallback(async (data: ArrayBuffer | Blob) => {
     if (discardedPayloadsRef.current > 0) {
       discardedPayloadsRef.current -= 1;
@@ -329,15 +344,19 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       }
     };
     socket.onerror = () => {
-      if (socketRef.current === socket) setError({ code: "connection", message: "无法连接语音服务，请重试", recoverable: true });
+      if (socketRef.current !== socket) return;
+      failConnection(1006);
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (socketRef.current !== socket) return;
       socketRef.current = null;
       void stopLocalResources();
       setConnectionStatus("disconnected");
+      if (event.code !== 1000) {
+        failConnection(event.code);
+      }
     };
-  }, [consumeBinary, failProtocol, handleServerEvent, stopLocalResources, url]);
+  }, [consumeBinary, failConnection, failProtocol, handleServerEvent, stopLocalResources, url]);
 
   const startMicrophone = useCallback((): Promise<void> => {
     if (captureRef.current) return Promise.resolve();

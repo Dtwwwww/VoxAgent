@@ -122,7 +122,10 @@ export class AudioPlayback {
   private makeSource(buffer: AudioBuffer): TaggedSource {
     const source = this.getContext().createBufferSource() as TaggedSource;
     source.buffer = buffer;
-    source.connect(this.getContext().destination);
+    const gain = this.getContext().createGain();
+    gain.gain.value = 1.15;
+    source.connect(gain);
+    gain.connect(this.getContext().destination);
     source.onended = () => this.sources.delete(source);
     this.sources.add(source);
     return source;
