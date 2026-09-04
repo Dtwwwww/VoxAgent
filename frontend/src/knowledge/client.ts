@@ -24,9 +24,10 @@ export interface KnowledgeChunk {
 
 export interface KnowledgeClient {
   listDocuments(): Promise<KnowledgeDocument[]>;
-  importDocument(file: File): Promise<KnowledgeImportResult>;
+  importDocument(file: File, signal?: AbortSignal): Promise<KnowledgeImportResult>;
+  cancelImport(): Promise<void>;
   deleteDocument(documentId: number): Promise<void>;
-  listChunks(documentId: number): Promise<KnowledgeChunk[]>;
+  listChunks(documentId: number, offset?: number): Promise<KnowledgeChunk[]>;
 }
 
 async function requireSuccess(response: Response): Promise<Response> {
@@ -50,14 +51,21 @@ export function createKnowledgeClient(baseUrl: string, token: string): Knowledge
       }));
       return await response.json() as KnowledgeDocument[];
     },
-    async importDocument(file) {
+    async importDocument(file, signal) {
       const query = new URLSearchParams({ filename: file.name });
       const response = await requireSuccess(await fetch(`${baseUrl}/v1/knowledge?${query}`, {
         method: "POST",
         headers: { ...authorization, "Content-Type": "application/octet-stream" },
         body: file,
+        signal,
       }));
       return await response.json() as KnowledgeImportResult;
+    },
+    async cancelImport() {
+      await requireSuccess(await fetch(`${baseUrl}/v1/knowledge/import`, {
+        method: "DELETE",
+        headers: authorization,
+      }));
     },
     async deleteDocument(documentId) {
       await requireSuccess(await fetch(`${baseUrl}/v1/knowledge/${documentId}`, {
@@ -65,9 +73,9 @@ export function createKnowledgeClient(baseUrl: string, token: string): Knowledge
         headers: authorization,
       }));
     },
-    async listChunks(documentId) {
+    async listChunks(documentId, offset = 0) {
       const response = await requireSuccess(await fetch(
-        `${baseUrl}/v1/knowledge/${documentId}/chunks?limit=20`,
+        `${baseUrl}/v1/knowledge/${documentId}/chunks?limit=20&offset=${offset}`,
         { headers: authorization },
       ));
       return await response.json() as KnowledgeChunk[];

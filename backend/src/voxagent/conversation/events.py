@@ -169,9 +169,32 @@ class AssistantDone(TurnServerMessage):
     type: Literal["assistant.done"]
 
 
+class MemorySource(Message):
+    id: StrictInt = Field(ge=1)
+    content: str
+    source_message_id: StrictInt | None = Field(default=None, ge=1)
+    source_text: str | None = None
+    source_turn_id: StrictInt | None = Field(default=None, ge=1)
+
+
+class KnowledgeSource(Message):
+    chunk_id: StrictInt = Field(ge=1)
+    document_id: StrictInt = Field(ge=1)
+    display_name: str
+    content: str
+    page_number: StrictInt | None = Field(default=None, ge=1)
+
+
+class ContextSources(TurnServerMessage):
+    type: Literal["context.sources"]
+    memories: list[MemorySource]
+    knowledge: list[KnowledgeSource]
+
+
 class MemoryProposed(TurnServerMessage):
     type: Literal["memory.proposed"]
     proposal_index: StrictInt = Field(ge=0)
+    source_message_id: StrictInt = Field(ge=1)
     kind: Literal["preference", "profile", "habit", "relationship", "event"]
     content: str = Field(min_length=1, max_length=500)
     importance: float = Field(ge=0, le=1)
@@ -207,6 +230,7 @@ type ServerEvent = Annotated[
     | AsrFinal
     | AssistantDelta
     | AssistantDone
+    | ContextSources
     | MemoryProposed
     | TtsChunk
     | TurnCancelled

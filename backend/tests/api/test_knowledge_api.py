@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -13,6 +15,7 @@ from voxagent.api.app import create_app
 from voxagent.api.knowledge import LocalKnowledgeService
 from voxagent.db.connection import open_database
 from voxagent.db.migrations import migrate
+from voxagent.knowledge.ingest import ImportCancelled
 
 SESSION_TOKEN = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
 AUTH = {"Authorization": f"Bearer {SESSION_TOKEN}"}
@@ -31,6 +34,7 @@ class FakeKnowledgeService:
     def __init__(self) -> None:
         self.uploads: list[tuple[str, bytes]] = []
         self.deleted: list[int] = []
+        self.cancelled = False
 
     async def list_documents(self) -> tuple[dict[str, object], ...]:
         return (
@@ -58,8 +62,12 @@ class FakeKnowledgeService:
         self.deleted.append(document_id)
         return document_id == 7
 
+    async def cancel_import(self) -> bool:
+        self.cancelled = True
+        return True
+
     async def list_chunks(
-        self, document_id: int, limit: int
+        self, document_id: int, limit: int, offset: int
     ) -> tuple[dict[str, object], ...]:
         if document_id != 7:
             return ()
@@ -70,7 +78,7 @@ class FakeKnowledgeService:
                 "page_number": 2,
                 "content": "这是可核对的来源片段",
             },
-        )[:limit]
+        )[offset : offset + limit]
 
 
 def _client(service: FakeKnowledgeService) -> TestClient:
@@ -163,6 +171,16 @@ def test_deletes_an_imported_document():
     assert client.delete("/v1/knowledge/999", headers=AUTH).status_code == 404
 
 
+def test_cancels_the_active_import_without_waiting_for_the_write_lock():
+    service = FakeKnowledgeService()
+    client = _client(service)
+
+    response = client.delete("/v1/knowledge/import", headers=AUTH)
+
+    assert response.status_code == 204
+    assert service.cancelled is True
+
+
 def test_inspects_source_labelled_chunk_excerpts_without_filesystem_paths():
     client = _client(FakeKnowledgeService())
 
@@ -206,4 +224,67 @@ async def test_local_service_imports_lists_and_deletes_without_exposing_a_real_p
     check.close()
     assert stored == "browser-upload:我的资料.txt"
     assert await service.delete_document(int(imported["document_id"])) is True
+    assert await service.list_documents() == ()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_local_import_leaves_no_partial_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class BlockingEmbedder(FakeEmbedder):
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def encode(self, texts: tuple[str, ...]) -> np.ndarray:
+            self.started.set()
+            self.release.wait(timeout=2)
+            return super().encode(texts)
+
+    monkeypatch.setenv("VOXAGENT_DATA_ROOT", str(tmp_path))
+    database_path = tmp_path / "data" / "voxagent.db"
+    connection = open_database(database_path)
+    migrate(connection)
+    connection.close()
+    embedder = BlockingEmbedder()
+    service = LocalKnowledgeService(
+        database_path, tmp_path / "cache" / "uploads", embedder
+    )
+    import_task = asyncio.create_task(
+        service.import_upload("资料.txt", "足够长的本地资料".encode())
+    )
+    assert await asyncio.to_thread(embedder.started.wait, 1)
+
+    assert await service.cancel_import() is True
+    embedder.release.set()
+    with pytest.raises(ImportCancelled):
+        await import_task
+
+    assert await service.list_documents() == ()
+
+
+@pytest.mark.asyncio
+async def test_import_can_be_cancelled_while_waiting_for_the_shared_write_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VOXAGENT_DATA_ROOT", str(tmp_path))
+    database_path = tmp_path / "data" / "voxagent.db"
+    connection = open_database(database_path)
+    migrate(connection)
+    connection.close()
+    gate = asyncio.Lock()
+    await gate.acquire()
+    service = LocalKnowledgeService(
+        database_path, tmp_path / "cache" / "uploads", FakeEmbedder(), gate
+    )
+    import_task = asyncio.create_task(
+        service.import_upload("排队资料.txt", "本地资料".encode())
+    )
+    await asyncio.sleep(0)
+
+    assert await service.cancel_import() is True
+    gate.release()
+    with pytest.raises(ImportCancelled):
+        await import_task
+
     assert await service.list_documents() == ()

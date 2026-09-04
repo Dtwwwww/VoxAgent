@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 _UTC_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
@@ -95,6 +95,14 @@ _MIGRATION_002 = (
     """,
 )
 
+_MIGRATION_003 = (
+    "CREATE UNIQUE INDEX idx_schema_version_singleton ON schema_version((1))",
+    """
+    CREATE UNIQUE INDEX idx_messages_conversation_turn_role
+    ON messages(conversation_id, turn_id, role)
+    """,
+)
+
 
 def migrate(connection: sqlite3.Connection) -> int:
     """Atomically migrate a database to the latest supported schema."""
@@ -123,6 +131,13 @@ def migrate(connection: sqlite3.Connection) -> int:
             for statement in _MIGRATION_002:
                 connection.execute(statement)
             current_version = 2
+            connection.execute(
+                "UPDATE schema_version SET version = ?", (current_version,)
+            )
+        if current_version == 2:
+            for statement in _MIGRATION_003:
+                connection.execute(statement)
+            current_version = 3
             connection.execute(
                 "UPDATE schema_version SET version = ?", (current_version,)
             )

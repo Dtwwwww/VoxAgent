@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from voxagent.conversation.context import ContextAssembler
+from voxagent.conversation.context import ContextAssembler, KnowledgeContext, MemoryContext
 from voxagent.conversation.events import ErrorMessage
 from voxagent.conversation.history import SYSTEM_INSTRUCTION, ChatMessage
 from voxagent.conversation.orchestrator import (
@@ -171,6 +171,25 @@ class FakeMemoryProposer:
         return self.candidates
 
 
+class FakeConversationStore:
+    def __init__(self, source_message_id: int = 42) -> None:
+        self.source_message_id = source_message_id
+        self.calls: list[tuple[object, ...]] = []
+
+    async def add_user(self, turn_id: int, text: str, source: str) -> int:
+        self.calls.append(("user", turn_id, text, source))
+        return self.source_message_id
+
+    async def complete_assistant(self, turn_id: int, text: str) -> None:
+        self.calls.append(("assistant", turn_id, text))
+
+    async def cancel_turn(self, turn_id: int) -> None:
+        self.calls.append(("cancel", turn_id))
+
+    async def reset(self) -> None:
+        self.calls.append(("reset",))
+
+
 @dataclass
 class TtsCall:
     text: str
@@ -260,6 +279,7 @@ def make_orchestrator(
     tts: FakeTts | None = None,
     context_assembler: ContextAssembler | None = None,
     memory_proposer: FakeMemoryProposer | None = None,
+    conversation_store: FakeConversationStore | None = None,
     max_utterance_frames: int = MAX_UTTERANCE_FRAMES,
 ) -> tuple[ConversationOrchestrator, FakeLlm, FakeTts]:
     llm = FakeLlm(replies or [["回答。"]])
@@ -277,6 +297,7 @@ def make_orchestrator(
         context_assembler=context_assembler,
         memory_proposer=memory_proposer,
         memory_policy=MemoryPolicy() if memory_proposer is not None else None,
+        conversation_store=conversation_store,
     )
     return orchestrator, llm, tts
 
@@ -671,7 +692,7 @@ async def test_text_submission_cancels_listening_turn_and_clears_audio():
 
 
 @pytest.mark.asyncio
-async def test_done_but_undrained_old_turn_is_cancelled_and_purged():
+async def test_done_but_undrained_old_turn_is_cancelled_but_kept_in_history():
     orchestrator, llm, _ = make_orchestrator(replies=[["旧回答"], ["新回答"]])
     old = orchestrator.submit_text("旧问题", False)
     old_delta = await anext(old)
@@ -682,8 +703,8 @@ async def test_done_but_undrained_old_turn_is_cancelled_and_purged():
     assert replacement[0].type == "turn.cancelled"
     assert replacement[0].turn_id == old_delta.turn_id
     assert [item async for item in old] == []
-    assert all(
-        message["content"] not in {"旧问题", "旧回答"} for message in llm.calls[-1].messages
+    assert {"旧问题", "旧回答"}.issubset(
+        {message["content"] for message in llm.calls[-1].messages}
     )
     await orchestrator.stop()
 
@@ -1108,8 +1129,33 @@ async def test_context_assembler_supplies_trusted_persona_to_next_reply():
 
     assert outputs[-1].type == "assistant.done"
     assert llm.calls[0].messages[0]["role"] == "system"
-    assert "当前人格" in llm.calls[0].messages[0]["content"]
+    assert "<persona_data>" in llm.calls[0].messages[0]["content"]
     assert llm.calls[0].messages[-1] == {"role": "user", "content": "问题"}
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_reply_emits_the_exact_retrieved_sources_before_answer():
+    assembler = ContextAssembler(
+        DEFAULT_PERSONA,
+        lambda _query, _limit: (
+            MemoryContext(2, "喜欢茶", 0.9, 8, "我喜欢喝茶", 3),
+        ),
+        lambda _query, _limit: (
+            KnowledgeContext(7, 4, "手册.pdf", "八十度水温", 5, 0.8),
+        ),
+    )
+    orchestrator, _, _ = make_orchestrator(
+        replies=[["有来源的回答"]], context_assembler=assembler
+    )
+
+    outputs = [item async for item in orchestrator.submit_text("怎么泡茶", False)]
+
+    source_event = outputs[0]
+    assert source_event.type == "context.sources"
+    assert source_event.memories[0].source_text == "我喜欢喝茶"
+    assert source_event.knowledge[0].display_name == "手册.pdf"
+    assert source_event.knowledge[0].page_number == 5
     await orchestrator.stop()
 
 
@@ -1129,13 +1175,37 @@ async def test_reply_emits_only_policy_accepted_memory_proposals() -> None:
 
     assert [item.type for item in outputs] == [
         "assistant.delta",
-        "memory.proposed",
         "assistant.done",
+        "memory.proposed",
     ]
-    assert outputs[1].content == "喜欢乌龙茶"
-    assert outputs[1].kind == "preference"
-    assert outputs[1].requires_confirmation is False
+    assert outputs[2].content == "喜欢乌龙茶"
+    assert outputs[2].kind == "preference"
+    assert outputs[2].requires_confirmation is False
     assert proposer.calls == [("qwen-local", "记住我喜欢乌龙茶", "已经记下候选。", 1)]
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_reply_persists_messages_and_anchors_proposal_to_database_source() -> None:
+    store = FakeConversationStore(source_message_id=42)
+    proposer = FakeMemoryProposer(
+        (MemoryCandidate(MemoryKind.PREFERENCE, "喜欢乌龙茶", 0.8, None),)
+    )
+    orchestrator, _, _ = make_orchestrator(
+        replies=[["已记录"]],
+        memory_proposer=proposer,
+        conversation_store=store,
+    )
+
+    outputs = [item async for item in orchestrator.submit_text("我喜欢乌龙茶", False)]
+
+    assert store.calls == [
+        ("user", 1, "我喜欢乌龙茶", "text"),
+        ("assistant", 1, "已记录"),
+    ]
+    assert proposer.calls == [("qwen-local", "我喜欢乌龙茶", "已记录", 42)]
+    proposal = next(item for item in outputs if item.type == "memory.proposed")
+    assert proposal.source_message_id == 42
     await orchestrator.stop()
 
 
@@ -1150,6 +1220,51 @@ async def test_memory_proposal_failure_never_changes_successful_reply() -> None:
 
     assert [item.type for item in outputs] == ["assistant.delta", "assistant.done"]
     assert orchestrator.history.assistant_text(1) == "回答仍然成功"
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_new_turn_after_done_keeps_completed_history_while_proposal_is_slow() -> None:
+    class SlowProposer:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def propose(self, *_args, **_kwargs):
+            self.started.set()
+            await asyncio.Event().wait()
+
+    proposer = SlowProposer()
+    orchestrator, llm, _ = make_orchestrator(
+        replies=[["第一答"], ["第二答"]], memory_proposer=proposer
+    )
+    first = orchestrator.submit_text("第一问", False)
+    assert (await anext(first)).type == "assistant.delta"
+    assert (await anext(first)).type == "assistant.done"
+    await proposer.started.wait()
+    orchestrator.memory_proposer = None
+
+    second = [item async for item in orchestrator.submit_text("第二问", False)]
+
+    assert second[-1].type == "assistant.done"
+    assert llm.calls[1].messages[-3:] == [
+        {"role": "user", "content": "第一问"},
+        {"role": "assistant", "content": "第一答"},
+        {"role": "user", "content": "第二问"},
+    ]
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_global_reset_pauses_new_turns_until_database_clear_finishes() -> None:
+    orchestrator, _, _ = make_orchestrator(replies=[["恢复后回答"]])
+
+    await orchestrator.reset_conversation()
+    paused = [item async for item in orchestrator.submit_text("不能插入", False)]
+    await orchestrator.resume_after_reset()
+    resumed = [item async for item in orchestrator.submit_text("可以继续", False)]
+
+    assert paused[0].type == "error"
+    assert resumed[-1].type == "assistant.done"
     await orchestrator.stop()
 
 

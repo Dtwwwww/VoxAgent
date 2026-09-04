@@ -5,7 +5,13 @@ import type { BackupInfo, LocalApiClient } from "../localApi";
 
 const RESET_PHRASE = "删除声灵全部本地数据";
 
-export function DataPanel({ client }: { client: LocalApiClient }) {
+export function DataPanel({
+  client,
+  onReset,
+}: {
+  client: LocalApiClient;
+  onReset?: () => void;
+}) {
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
@@ -52,6 +58,7 @@ export function DataPanel({ client }: { client: LocalApiClient }) {
       <label><span>请输入：{RESET_PHRASE}</span><input aria-label="删除确认短语" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
       <button type="button" className="danger-action" disabled={busy || confirmation !== RESET_PHRASE} onClick={() => { void run(async () => {
         await client.resetAll();
+        onReset?.();
         setBackups([]);
         setConfirmation("");
       }, "全部本地数据已删除"); }}>删除全部本地数据</button>

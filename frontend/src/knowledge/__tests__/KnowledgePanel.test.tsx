@@ -25,6 +25,7 @@ function client(): KnowledgeClient {
       chunk_count: 2,
       sha256: "b".repeat(64),
     })),
+    cancelImport: vi.fn(async () => undefined),
     deleteDocument: vi.fn(async () => undefined),
     listChunks: vi.fn(async () => [{
       id: 11,
@@ -55,7 +56,7 @@ describe("KnowledgePanel", () => {
 
     fireEvent.change(screen.getByLabelText("选择本地文档"), { target: { files: [file] } });
 
-    await waitFor(() => expect(api.importDocument).toHaveBeenCalledWith(file));
+    await waitFor(() => expect(api.importDocument).toHaveBeenCalledWith(file, expect.any(AbortSignal)));
     await waitFor(() => expect(api.listDocuments).toHaveBeenCalledTimes(2));
     expect(screen.getByText("“我的资料.txt”已导入本地知识库")).toBeVisible();
   });
@@ -69,6 +70,19 @@ describe("KnowledgePanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "删除 产品说明.md" }));
 
     await waitFor(() => expect(api.deleteDocument).toHaveBeenCalledWith(7));
+  });
+
+  it("lets the user cancel a long-running import", async () => {
+    const api = client();
+    vi.mocked(api.importDocument).mockImplementation(async () => await new Promise(() => undefined));
+    render(<KnowledgePanel open client={api} onClose={vi.fn()} />);
+    await screen.findByText("产品说明.md");
+    const file = new File(["本地内容"], "大文档.txt", { type: "text/plain" });
+    fireEvent.change(screen.getByLabelText("选择本地文档"), { target: { files: [file] } });
+
+    fireEvent.click(await screen.findByRole("button", { name: "取消导入" }));
+
+    await waitFor(() => expect(api.cancelImport).toHaveBeenCalledOnce());
   });
 
   it("lets the user inspect attributed source excerpts", async () => {

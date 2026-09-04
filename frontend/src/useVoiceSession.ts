@@ -9,6 +9,10 @@ export type ConnectionStatus = "disconnected" | "connecting" | "initializing" | 
 export type VoiceStatus = "idle" | "listening" | "transcribing" | "thinking" | "speaking";
 export type MessageStatus = "streaming" | "complete" | "cancelled";
 
+export type ResponseSource =
+  | { kind: "memory"; id: number; content: string; sourceText: string | null; sourceTurnId: number | null }
+  | { kind: "knowledge"; chunkId: number; documentId: number; displayName: string; content: string; pageNumber: number | null };
+
 export interface ConversationMessage {
   id: string;
   turnId?: number;
@@ -16,6 +20,7 @@ export interface ConversationMessage {
   origin: "text" | "voice" | "assistant";
   text: string;
   status: MessageStatus;
+  sources?: ResponseSource[];
 }
 
 export interface SessionError {
@@ -32,6 +37,7 @@ export interface SelectedVoice {
 export interface MemoryProposal {
   id: string;
   sourceTurnId: number;
+  sourceMessageId: number;
   kind: "preference" | "profile" | "habit" | "relationship" | "event";
   content: string;
   importance: number;
@@ -67,6 +73,7 @@ export interface VoiceSessionController {
   stopVoicePreview(): void;
   cancelActive(): void;
   dismissMemoryProposal(id: string): void;
+  clearLocalData(): void;
 }
 
 type AudioMetadata =
@@ -99,6 +106,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const pendingAudioRef = useRef<AudioMetadata | null>(null);
   const discardedPayloadsRef = useRef(0);
   const assistantDraftsRef = useRef(new Map<number, string>());
+  const responseSourcesRef = useRef(new Map<number, ResponseSource[]>());
   const sessionIdRef = useRef<string | null>(null);
   const maximumTurnIdRef = useRef(0);
   const blockedThroughTurnRef = useRef(0);
@@ -133,6 +141,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     pendingAudioRef.current = null;
     discardedPayloadsRef.current = 0;
     assistantDraftsRef.current.clear();
+    responseSourcesRef.current.clear();
     sessionIdRef.current = null;
     maximumTurnIdRef.current = 0;
     blockedThroughTurnRef.current = 0;
@@ -288,11 +297,30 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           if (index < 0) {
             const id = nextId("assistant");
             assistantDraftsRef.current.set(event.turn_id, id);
-            return [...current, { id, turnId: event.turn_id, role: "assistant", origin: "assistant", text: event.delta, status: "streaming" }];
+            return [...current, { id, turnId: event.turn_id, role: "assistant", origin: "assistant", text: event.delta, status: "streaming", sources: responseSourcesRef.current.get(event.turn_id) ?? [] }];
           }
           return current.map((message, position) => position === index ? { ...message, text: message.text + event.delta } : message);
         });
         setVoiceStatus("thinking");
+        break;
+      case "context.sources":
+        responseSourcesRef.current.set(event.turn_id, [
+          ...event.memories.map((source): ResponseSource => ({
+            kind: "memory",
+            id: source.id,
+            content: source.content,
+            sourceText: source.source_text,
+            sourceTurnId: source.source_turn_id,
+          })),
+          ...event.knowledge.map((source): ResponseSource => ({
+            kind: "knowledge",
+            chunkId: source.chunk_id,
+            documentId: source.document_id,
+            displayName: source.display_name,
+            content: source.content,
+            pageNumber: source.page_number,
+          })),
+        ]);
         break;
       case "assistant.done":
         {
@@ -300,6 +328,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           setMessages((current) => current.map((message) => message.id === draftId ? { ...message, status: "complete" } : message));
         }
         assistantDraftsRef.current.delete(event.turn_id);
+        responseSourcesRef.current.delete(event.turn_id);
         playbackRef.current.finishTurn(event.turn_id);
         setSpeakingTurnId((current) => {
           setVoiceStatus(current === event.turn_id ? "speaking" : "idle");
@@ -310,6 +339,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         const proposal: MemoryProposal = {
           id: `${event.turn_id}:${event.proposal_index}`,
           sourceTurnId: event.turn_id,
+          sourceMessageId: event.source_message_id,
           kind: event.kind,
           content: event.content,
           importance: event.importance,
@@ -331,6 +361,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           setMessages((current) => current.map((message) => message.id === draftId ? { ...message, status: "cancelled" } : message));
         }
         assistantDraftsRef.current.delete(event.turn_id);
+        responseSourcesRef.current.delete(event.turn_id);
         setVoiceStatus("idle");
         break;
       case "error":
@@ -551,6 +582,16 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     setMemoryProposals((current) => current.filter((proposal) => proposal.id !== id));
   }, []);
 
+  const clearLocalData = useCallback(() => {
+    cancelActive();
+    assistantDraftsRef.current.clear();
+    responseSourcesRef.current.clear();
+    setMessages([]);
+    setMemoryProposals([]);
+    setError(null);
+    setVoiceStatus("idle");
+  }, [cancelActive]);
+
   const disconnect = useCallback(async () => {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "session.stop" }));
@@ -597,5 +638,6 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     stopVoicePreview,
     cancelActive,
     dismissMemoryProposal,
+    clearLocalData,
   };
 }

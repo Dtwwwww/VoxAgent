@@ -30,6 +30,22 @@ export interface VoiceInfo {
 
 type TurnFields = { session_id: string; turn_id: number };
 
+export interface ContextMemorySource {
+  id: number;
+  content: string;
+  source_message_id: number | null;
+  source_text: string | null;
+  source_turn_id: number | null;
+}
+
+export interface ContextKnowledgeSource {
+  chunk_id: number;
+  document_id: number;
+  display_name: string;
+  content: string;
+  page_number: number | null;
+}
+
 export type ServerEvent =
   | { type: "session.ready"; session_id: string; model_id: string; offline: true; input_audio: InputAudioFormat }
   | { type: "voices.available"; voices: VoiceInfo[] }
@@ -40,9 +56,11 @@ export type ServerEvent =
   | ({ type: "asr.final"; text: string } & TurnFields)
   | ({ type: "assistant.delta"; delta: string } & TurnFields)
   | ({ type: "assistant.done" } & TurnFields)
+  | ({ type: "context.sources"; memories: ContextMemorySource[]; knowledge: ContextKnowledgeSource[] } & TurnFields)
   | ({
       type: "memory.proposed";
       proposal_index: number;
+      source_message_id: number;
       kind: "preference" | "profile" | "habit" | "relationship" | "event";
       content: string;
       importance: number;
@@ -146,7 +164,7 @@ export function parseClientEvent(value: unknown): ClientEvent {
   }
 }
 
-const STRICT_INTEGER_TOKEN = /("(?:turn_id|proposal_index|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
+const STRICT_INTEGER_TOKEN = /("(?:id|turn_id|source_turn_id|source_message_id|document_id|chunk_id|page_number|proposal_index|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
 
 function parseProtocolJson(raw: string): unknown {
   if (typeof raw !== "string") throw new TypeError("event JSON must be a string");
@@ -210,8 +228,39 @@ export function parseServerEvent(value: unknown): ServerEvent {
       const object = turnObject(value, ["delta"]);
       return { type, session_id: object.session_id as string, turn_id: object.turn_id as number, delta: string(object.delta, "delta") };
     }
+    case "context.sources": {
+      const object = turnObject(value, ["memories", "knowledge"]);
+      if (!Array.isArray(object.memories) || !Array.isArray(object.knowledge)) {
+        throw new TypeError("context sources must be arrays");
+      }
+      const memories = object.memories.map((item) => {
+        const source = objectWithExactKeys(item, ["id", "content", "source_message_id", "source_text", "source_turn_id"]);
+        if (source.source_message_id !== null) positiveInteger(source.source_message_id, "source_message_id");
+        if (source.source_turn_id !== null) positiveInteger(source.source_turn_id, "source_turn_id");
+        if (source.source_text !== null) string(source.source_text, "source_text");
+        return {
+          id: positiveInteger(source.id, "id"),
+          content: string(source.content, "content"),
+          source_message_id: source.source_message_id as number | null,
+          source_text: source.source_text as string | null,
+          source_turn_id: source.source_turn_id as number | null,
+        };
+      });
+      const knowledge = object.knowledge.map((item) => {
+        const source = objectWithExactKeys(item, ["chunk_id", "document_id", "display_name", "content", "page_number"]);
+        if (source.page_number !== null) positiveInteger(source.page_number, "page_number");
+        return {
+          chunk_id: positiveInteger(source.chunk_id, "chunk_id"),
+          document_id: positiveInteger(source.document_id, "document_id"),
+          display_name: string(source.display_name, "display_name"),
+          content: string(source.content, "content"),
+          page_number: source.page_number as number | null,
+        };
+      });
+      return { type, session_id: object.session_id as string, turn_id: object.turn_id as number, memories, knowledge };
+    }
     case "memory.proposed": {
-      const object = turnObject(value, ["proposal_index", "kind", "content", "importance", "requires_confirmation"]);
+      const object = turnObject(value, ["proposal_index", "source_message_id", "kind", "content", "importance", "requires_confirmation"]);
       const kind = string(object.kind, "kind");
       if (!["preference", "profile", "habit", "relationship", "event"].includes(kind)) {
         throw new TypeError("memory kind is unsupported");
@@ -221,6 +270,7 @@ export function parseServerEvent(value: unknown): ServerEvent {
         session_id: object.session_id as string,
         turn_id: object.turn_id as number,
         proposal_index: integer(object.proposal_index, "proposal_index", 0),
+        source_message_id: positiveInteger(object.source_message_id, "source_message_id"),
         kind: kind as "preference" | "profile" | "habit" | "relationship" | "event",
         content: string(object.content, "content"),
         importance: boundedNumber(object.importance, "importance", 0, 1),

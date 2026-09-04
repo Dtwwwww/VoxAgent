@@ -53,7 +53,7 @@ class SqliteVectorRetriever:
             """
             SELECT id, embedding FROM document_chunks
             WHERE embedding IS NOT NULL AND embedding_dim = ?
-            ORDER BY id LIMIT ?
+            ORDER BY id DESC LIMIT ?
             """,
             MAX_DOCUMENT_CHUNKS,
             top_k,

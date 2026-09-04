@@ -61,6 +61,10 @@ class Orchestrator(Protocol):
 
     async def stop(self) -> None: ...
 
+    async def reset_conversation(self) -> None: ...
+
+    async def resume_after_reset(self) -> None: ...
+
 
 OrchestratorFactory = Callable[[], Orchestrator]
 _Output = object | bytes
@@ -382,6 +386,18 @@ def create_app(
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
+    active_orchestrators: set[Orchestrator] = set()
+
+    async def reset_active_conversations() -> None:
+        if knowledge_service is not None:
+            await knowledge_service.cancel_import()
+        for orchestrator in tuple(active_orchestrators):
+            await orchestrator.reset_conversation()
+
+    async def resume_active_conversations() -> None:
+        for orchestrator in tuple(active_orchestrators):
+            await orchestrator.resume_after_reset()
+
     if knowledge_service is not None:
         register_knowledge_routes(app, knowledge_service, expected_token)
     if memory_service is not None:
@@ -389,7 +405,13 @@ def create_app(
     if persona_service is not None:
         register_persona_routes(app, persona_service, expected_token)
     if data_service is not None:
-        register_data_routes(app, data_service, expected_token)
+        register_data_routes(
+            app,
+            data_service,
+            expected_token,
+            on_reset=reset_active_conversations,
+            on_reset_complete=resume_active_conversations,
+        )
     slot_lock = asyncio.Lock()
     session_active = False
 
@@ -437,6 +459,7 @@ def create_app(
                 )
                 await socket.close(code=1011)
                 return
+            active_orchestrators.add(orchestrator)
             writer = _SocketWriter(socket)
             writer.start()
             microphone = _MicrophoneWorker(orchestrator, writer, producers.add)
@@ -525,6 +548,8 @@ def create_app(
                 finally:
                     if writer is not None:
                         await writer.close()
+                    if orchestrator is not None:
+                        active_orchestrators.discard(orchestrator)
             finally:
                 async with slot_lock:
                     session_active = False

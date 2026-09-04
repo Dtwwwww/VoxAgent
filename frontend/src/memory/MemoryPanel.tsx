@@ -32,6 +32,7 @@ export function MemoryProposalNotice({
         content: proposal.content,
         importance: proposal.importance,
         source_turn_id: proposal.sourceTurnId,
+        source_message_id: proposal.sourceMessageId,
         confirmed: true,
       });
       onDismiss(proposal.id);
@@ -134,6 +135,7 @@ export function MemoryPanel({ client }: { client: LocalApiClient }) {
         {editing === item.id
           ? <textarea aria-label={`编辑 ${item.content}`} value={editContent} onChange={(event) => setEditContent(event.target.value)} />
           : <p>{item.content}</p>}
+        {item.source && <blockquote className="memory-card__source">原话：{item.source.content}</blockquote>}
         <div className="memory-card__actions">
           {editing === item.id
             ? <button type="button" onClick={() => { void saveEdit(item); }}>保存修改</button>

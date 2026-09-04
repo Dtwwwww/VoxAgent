@@ -22,6 +22,7 @@ from voxagent.conversation.context import (
     SqliteContextSource,
 )
 from voxagent.conversation.orchestrator import ConversationOrchestrator
+from voxagent.conversation.persistence import SqliteConversationStore
 from voxagent.db.backup import DailyBackupManager
 from voxagent.db.connection import open_database
 from voxagent.db.migrations import migrate
@@ -162,11 +163,12 @@ def _create_production_app(session_token: str):
     database_path = paths.data / "voxagent.db"
     database = open_database(database_path)
     migrate(database)
+    mutation_lock = asyncio.Lock()
     embedder = BgeSmallZhEmbedder.from_path(
         paths.models / "embeddings" / "bge-small-zh-v1.5"
     )
-    context_source = SqliteContextSource(database, embedder)
-    persona_service = LocalPersonaService(database_path)
+    context_source = SqliteContextSource(database_path, embedder)
+    persona_service = LocalPersonaService(database_path, mutation_lock)
     context_assembler = ContextAssembler(
         persona_service.load_config,
         context_source.search_memories,
@@ -176,10 +178,10 @@ def _create_production_app(session_token: str):
     ollama = OllamaClient(http)
     memory_proposer = LocalMemoryProposalService(ollama, MemoryProposalParser())
     knowledge_service = LocalKnowledgeService(
-        database_path, paths.temp / "knowledge-uploads", embedder
+        database_path, paths.temp / "knowledge-uploads", embedder, mutation_lock
     )
-    memory_service = LocalMemoryService(database_path, embedder)
-    data_service = LocalDataService(database_path, paths.data)
+    memory_service = LocalMemoryService(database_path, embedder, mutation_lock)
+    data_service = LocalDataService(database_path, paths.data, mutation_lock)
     backup_manager = DailyBackupManager(paths.data / "backups")
 
     def orchestrator_factory() -> ConversationOrchestrator:
@@ -228,6 +230,7 @@ def _create_production_app(session_token: str):
             voice_catalog=catalog,
             context_assembler=context_assembler,
             memory_proposer=memory_proposer,
+            conversation_store=SqliteConversationStore(database_path, mutation_lock),
         )
 
     async def shutdown() -> None:

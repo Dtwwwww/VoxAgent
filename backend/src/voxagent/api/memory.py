@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -21,12 +22,20 @@ class MemoryConflictError(RuntimeError):
     pass
 
 
+class MemoryDuplicateError(MemoryConflictError):
+    def __init__(self, existing: dict[str, object], similarity: float) -> None:
+        super().__init__("已存在内容相近的记忆，请先检查现有记录")
+        self.existing = existing
+        self.similarity = similarity
+
+
 class MemoryCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: MemoryKind
     content: str = Field(min_length=1, max_length=500)
     importance: float = Field(ge=0, le=1)
+    source_message_id: int | None = Field(default=None, ge=1)
     source_turn_id: int | None = Field(default=None, ge=1)
     confirmed: bool = False
 
@@ -55,24 +64,32 @@ def _utc_text(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _public_memory(record: MemoryRecord) -> dict[str, object]:
+def _public_memory(
+    record: MemoryRecord, source: dict[str, object] | None = None
+) -> dict[str, object]:
     return {
         "id": record.id,
         "kind": record.kind.value,
         "content": record.content,
         "importance": record.importance,
         "source_turn_id": record.source_turn_id,
+        "source": source,
         "created_at_utc": _utc_text(record.created_at_utc),
         "updated_at_utc": _utc_text(record.updated_at_utc),
     }
 
 
 class LocalMemoryService:
-    def __init__(self, database_path: Path, embedder: Embedder) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        embedder: Embedder,
+        mutation_lock: asyncio.Lock | None = None,
+    ) -> None:
         self._database_path = database_path
         self._embedder = embedder
         self._policy = MemoryPolicy()
-        self._write_lock = asyncio.Lock()
+        self._write_lock = mutation_lock or asyncio.Lock()
 
     async def list_memories(
         self, limit: int, offset: int
@@ -83,7 +100,7 @@ class LocalMemoryService:
         connection = open_database(self._database_path)
         try:
             return tuple(
-                _public_memory(item)
+                _public_memory(item, self._source(connection, item))
                 for item in MemoryRepository(connection).list(limit=limit, offset=offset)
             )
         finally:
@@ -94,7 +111,7 @@ class LocalMemoryService:
             request.kind,
             request.content,
             request.importance,
-            None,
+            request.source_message_id,
             user_explicit=request.confirmed,
             source_turn_id=request.source_turn_id,
         )
@@ -110,13 +127,34 @@ class LocalMemoryService:
         vector = np.asarray(self._embedder.encode((candidate.content,))[0], dtype=np.float32)
         connection = open_database(self._database_path)
         try:
-            record = MemoryRepository(connection).create(
+            source = self._source(connection, candidate)
+            if (candidate.source_message_id is None) != (
+                candidate.source_turn_id is None
+            ):
+                raise ValueError("记忆来源信息不完整")
+            if candidate.source_message_id is not None and source is None:
+                raise ValueError("记忆来源与原始用户消息不匹配")
+            repository = MemoryRepository(connection)
+            duplicate = repository.find_duplicate(
+                candidate.kind,
+                embedding=vector.tobytes(),
+                embedding_dim=EMBEDDING_DIMENSION,
+            )
+            if duplicate is not None:
+                raise MemoryDuplicateError(
+                    _public_memory(
+                        duplicate.memory,
+                        self._source(connection, duplicate.memory),
+                    ),
+                    duplicate.similarity,
+                )
+            record = repository.create(
                 candidate,
                 embedding=vector.tobytes(),
                 embedding_dim=EMBEDDING_DIMENSION,
                 now_utc=datetime.now(UTC),
             )
-            return _public_memory(record)
+            return _public_memory(record, source)
         finally:
             connection.close()
 
@@ -146,16 +184,18 @@ class LocalMemoryService:
             vector = np.asarray(
                 self._embedder.encode((request.content,))[0], dtype=np.float32
             )
-            return _public_memory(
-                repository.update(
-                    memory_id,
-                    content=request.content,
-                    importance=request.importance,
-                    embedding=vector.tobytes(),
-                    embedding_dim=EMBEDDING_DIMENSION,
-                    now_utc=datetime.now(UTC),
-                )
+            now_utc = max(
+                datetime.now(UTC), current.updated_at_utc + timedelta(milliseconds=1)
             )
+            updated = repository.update(
+                memory_id,
+                content=request.content,
+                importance=request.importance,
+                embedding=vector.tobytes(),
+                embedding_dim=EMBEDDING_DIMENSION,
+                now_utc=now_utc,
+            )
+            return _public_memory(updated, self._source(connection, updated))
         except KeyError as error:
             raise LookupError(memory_id) from error
         finally:
@@ -171,6 +211,29 @@ class LocalMemoryService:
             return MemoryRepository(connection).delete(memory_id, now_utc=datetime.now(UTC))
         finally:
             connection.close()
+
+    @staticmethod
+    def _source(
+        connection: sqlite3.Connection, record: MemoryCandidate | MemoryRecord
+    ) -> dict[str, object] | None:
+        if record.source_message_id is None or record.source_turn_id is None:
+            return None
+        row = connection.execute(
+            """
+            SELECT id, conversation_id, turn_id, content
+            FROM messages
+            WHERE id = ? AND turn_id = ? AND role = 'user'
+            """,
+            (record.source_message_id, record.source_turn_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "message_id": int(row["id"]),
+            "conversation_id": int(row["conversation_id"]),
+            "turn_id": int(row["turn_id"]),
+            "content": row["content"],
+        }
 
 
 def register_memory_routes(app: FastAPI, service: MemoryService, session_token: str) -> None:
@@ -193,6 +256,16 @@ def register_memory_routes(app: FastAPI, service: MemoryService, session_token: 
         require_bearer(authorization, expected_token)
         try:
             return await service.create_memory(request)
+        except MemoryDuplicateError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "memory_duplicate",
+                    "message": str(error),
+                    "similarity": error.similarity,
+                    "existing": error.existing,
+                },
+            ) from error
         except MemoryConflictError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ValueError as error:

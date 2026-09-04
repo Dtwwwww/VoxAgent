@@ -36,9 +36,11 @@ def _payload(config: PersonaConfig, revision: int) -> dict[str, object]:
 
 
 class LocalPersonaService:
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self, database_path: Path, mutation_lock: asyncio.Lock | None = None
+    ) -> None:
         self._database_path = database_path
-        self._write_lock = asyncio.Lock()
+        self._write_lock = mutation_lock or asyncio.Lock()
 
     async def get_persona(self) -> dict[str, object]:
         return await asyncio.to_thread(self._get_persona)

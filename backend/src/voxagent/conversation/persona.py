@@ -8,7 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 _POLICY_OVERRIDE = re.compile(
     r"(?:(?:忽略|绕过|关闭|取消|泄露|上传|发送).{0,12}"
     r"(?:安全|隐私|确认|规则|政策|系统提示|本地文件|任意命令|工具)"
-    r"|本地文件.{0,12}(?:上传|发送))",
+    r"|本地文件.{0,12}(?:上传|发送)"
+    r"|(?:ignore|bypass|disable|override|reveal|upload|send).{0,30}"
+    r"(?:system|safety|privacy|policy|rules?|instructions?|files?|confirmation))",
     re.IGNORECASE,
 )
 

@@ -13,10 +13,15 @@ from voxagent.memory.models import (
 _WHITESPACE = re.compile(r"\s+")
 _PRIVATE_KEY = re.compile(r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----", re.IGNORECASE)
 _API_SECRET = re.compile(
-    r"(?:\b(?:sk|ghp|xoxb)[-_][A-Za-z0-9_-]{8,}\b|\bgithub_pat_[A-Za-z0-9_]{8,}\b)",
+    r"(?:\b(?:sk|ghp|xoxb)[-_][A-Za-z0-9_-]{8,}\b"
+    r"|\bgithub_pat_[A-Za-z0-9_]{8,}\b"
+    r"|\bbearer\s+[A-Za-z0-9._~-]{8,}\b)",
     re.IGNORECASE,
 )
-_PASSWORD = re.compile(r"(?:密码|口令|password)\s*(?:是|[:：=])\s*\S+", re.IGNORECASE)
+_PASSWORD = re.compile(
+    r"(?:密码|口令|password)\s*(?:(?:是|为|[:：=])\s*)?[A-Za-z0-9!@#$%^&*._~-]{6,}",
+    re.IGNORECASE,
+)
 _GOVERNMENT_ID = re.compile(r"(?<!\d)(?:\d{17}[0-9Xx]|\d{15})(?!\d)")
 _PAYMENT_DATA = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
 _HEALTH_DIAGNOSIS = re.compile(r"(?:医生|医院)?.{0,8}(?:确诊|诊断为|患有).{1,30}")

@@ -12,10 +12,12 @@ export function SettingsPanel({
   open,
   client,
   onClose,
+  onReset,
 }: {
   open: boolean;
   client: LocalApiClient;
   onClose(): void;
+  onReset(): void;
 }) {
   const [tab, setTab] = useState<SettingsTab>("persona");
   useEffect(() => {
@@ -47,7 +49,7 @@ export function SettingsPanel({
       <div className="settings-panel__body">
         {tab === "persona" && <PersonaPanel client={client} />}
         {tab === "memory" && <MemoryPanel client={client} />}
-        {tab === "data" && <DataPanel client={client} />}
+        {tab === "data" && <DataPanel client={client} onReset={onReset} />}
       </div>
     </section>
   </div>;

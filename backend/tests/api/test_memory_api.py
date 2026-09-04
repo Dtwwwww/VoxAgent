@@ -68,7 +68,20 @@ def test_memory_and_persona_routes_require_bearer_authentication(
 def test_memory_crud_reembeds_updates_and_preserves_source_turn(
     client: tuple[TestClient, Path],
 ) -> None:
-    web, _ = client
+    web, database_path = client
+    connection = open_database(database_path)
+    conversation_id = connection.execute(
+        "INSERT INTO conversations(title) VALUES ('茶') RETURNING id"
+    ).fetchone()[0]
+    source_message_id = connection.execute(
+        """
+        INSERT INTO messages(conversation_id, turn_id, role, content)
+        VALUES (?, 12, 'user', '我喜欢无糖咖啡') RETURNING id
+        """,
+        (conversation_id,),
+    ).fetchone()[0]
+    connection.commit()
+    connection.close()
     created = web.post(
         "/v1/memories",
         headers=AUTH,
@@ -77,6 +90,7 @@ def test_memory_crud_reembeds_updates_and_preserves_source_turn(
             "content": "我喜欢无糖咖啡",
             "importance": 0.8,
             "source_turn_id": 12,
+            "source_message_id": source_message_id,
             "confirmed": True,
         },
     )
@@ -84,6 +98,12 @@ def test_memory_crud_reembeds_updates_and_preserves_source_turn(
     assert created.status_code == 201
     memory = created.json()
     assert memory["source_turn_id"] == 12
+    assert memory["source"] == {
+        "message_id": source_message_id,
+        "conversation_id": conversation_id,
+        "turn_id": 12,
+        "content": "我喜欢无糖咖啡",
+    }
     assert "embedding" not in memory
     listed = web.get("/v1/memories?limit=20&offset=0", headers=AUTH)
     assert listed.json() == [memory]
@@ -101,6 +121,40 @@ def test_memory_crud_reembeds_updates_and_preserves_source_turn(
     assert updated.json()["content"] == "我喜欢无糖乌龙茶"
     assert web.delete(f"/v1/memories/{memory['id']}", headers=AUTH).status_code == 204
     assert web.get("/v1/memories", headers=AUTH).json() == []
+
+
+def test_memory_rejects_a_source_that_does_not_match_the_turn(
+    client: tuple[TestClient, Path],
+) -> None:
+    web, database_path = client
+    connection = open_database(database_path)
+    conversation_id = connection.execute(
+        "INSERT INTO conversations(title) VALUES ('来源') RETURNING id"
+    ).fetchone()[0]
+    source_message_id = connection.execute(
+        """
+        INSERT INTO messages(conversation_id, turn_id, role, content)
+        VALUES (?, 7, 'user', '来源原话') RETURNING id
+        """,
+        (conversation_id,),
+    ).fetchone()[0]
+    connection.commit()
+    connection.close()
+
+    response = web.post(
+        "/v1/memories",
+        headers=AUTH,
+        json={
+            "kind": "profile",
+            "content": "长期事实",
+            "importance": 0.8,
+            "source_message_id": source_message_id,
+            "source_turn_id": 8,
+            "confirmed": True,
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_memory_policy_cannot_be_bypassed_by_confirming_a_secret(
@@ -149,6 +203,38 @@ def test_memory_update_rejects_a_stale_optimistic_revision(
     )
 
     assert response.status_code == 409
+
+
+def test_semantic_duplicate_returns_the_existing_memory_for_review(
+    client: tuple[TestClient, Path],
+) -> None:
+    web, _ = client
+    first = web.post(
+        "/v1/memories",
+        headers=AUTH,
+        json={
+            "kind": "preference",
+            "content": "我喜欢喝乌龙茶",
+            "importance": 0.8,
+            "confirmed": True,
+        },
+    )
+
+    duplicate = web.post(
+        "/v1/memories",
+        headers=AUTH,
+        json={
+            "kind": "preference",
+            "content": "我平时爱喝乌龙",
+            "importance": 0.7,
+            "confirmed": True,
+        },
+    )
+
+    assert first.status_code == 201
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"]["code"] == "memory_duplicate"
+    assert duplicate.json()["detail"]["existing"]["id"] == first.json()["id"]
 
 
 def test_persona_defaults_update_and_optimistic_conflict(

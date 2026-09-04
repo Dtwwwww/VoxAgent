@@ -20,6 +20,21 @@ export function ChatMessage({ message, speaking, onSpeak, onStopSpeaking }: Chat
       {message.status === "cancelled" && <span className="message__tag">已停止</span>}
     </div>
     <div className="message__bubble"><p>{message.text}</p></div>
+    {isAssistant && message.sources && message.sources.length > 0 && <details className="message-sources">
+      <summary>查看引用来源（{message.sources.length}）</summary>
+      <div className="message-sources__list">
+        {message.sources.map((source) => source.kind === "memory"
+          ? <section key={`memory-${source.id}`}>
+              <strong>长期记忆</strong>
+              <p>{source.content}</p>
+              {source.sourceText && <blockquote>原话：{source.sourceText}</blockquote>}
+            </section>
+          : <section key={`knowledge-${source.chunkId}`}>
+              <strong>{source.displayName}{source.pageNumber ? ` · 第 ${source.pageNumber} 页` : ""}</strong>
+              <p>{source.content}</p>
+            </section>)}
+      </div>
+    </details>}
     <div className="message__actions">
       <button className="message-action" type="button" aria-label="复制" onClick={() => void copy()}><Icon name="copy" size={16} /><span>复制</span></button>
       {isAssistant && message.status === "complete" && message.turnId !== undefined && (speaking

@@ -13,6 +13,7 @@ from voxagent.conversation.events import (
     AsrFinal,
     AssistantDelta,
     AssistantDone,
+    ContextSources,
     ErrorMessage,
     MemoryProposed,
     ServerMessage,
@@ -24,6 +25,7 @@ from voxagent.conversation.events import (
     VoiceSelected,
 )
 from voxagent.conversation.history import ConversationHistory
+from voxagent.conversation.persistence import ConversationStore
 from voxagent.conversation.sentence_chunker import SentenceChunker
 from voxagent.conversation.state import Phase, TurnState, TurnToken
 from voxagent.llm.ollama import OllamaClient
@@ -76,6 +78,7 @@ class ConversationOrchestrator:
         context_assembler: ContextAssembler | None = None,
         memory_proposer: MemoryProposalService | None = None,
         memory_policy: MemoryPolicy | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         if not 2 <= max_utterance_frames <= MAX_UTTERANCE_FRAMES:
             raise ValueError(
@@ -96,6 +99,8 @@ class ConversationOrchestrator:
         self.memory_policy = memory_policy or (
             MemoryPolicy() if memory_proposer is not None else None
         )
+        self.conversation_store = conversation_store
+        self._source_message_ids: dict[int, int] = {}
         self._clock_ms = clock_ms or (lambda: int(monotonic() * 1000))
         default = next(profile for profile in voice_catalog.public_profiles() if profile.is_default)
         self._voice_key = default.voice_key
@@ -121,6 +126,7 @@ class ConversationOrchestrator:
         self._preview_id = 0
         self._stopping = False
         self._stopped = False
+        self._reset_paused = False
 
     async def accept_audio(self, frame: bytes) -> AsyncIterator[Output]:
         async with self._action_lock:
@@ -304,6 +310,12 @@ class ConversationOrchestrator:
                         self._error("asr_empty", "没有识别到有效语音，请重试"),
                     )
                 else:
+                    if self.conversation_store is not None:
+                        self._source_message_ids[token.turn_id] = (
+                            await self.conversation_store.add_user(
+                                token.turn_id, text, "voice"
+                            )
+                        )
                     self.history.add_user(token.turn_id, text, "voice")
                     self.state.begin_reply(token)
                     await self._start_reply(token, speak_response=True, pending_history=True)
@@ -350,6 +362,12 @@ class ConversationOrchestrator:
                 cancelled = await self._cancel_conversation()
                 await self._cancel_preview()
                 token = self.state.begin_text_turn()
+                if self.conversation_store is not None:
+                    self._source_message_ids[token.turn_id] = (
+                        await self.conversation_store.add_user(
+                            token.turn_id, normalized, "text"
+                        )
+                    )
                 self.history.add_user(token.turn_id, normalized, "text")
                 await self._start_reply(
                     token, speak_response=speak_response, pending_history=True
@@ -460,6 +478,27 @@ class ConversationOrchestrator:
             await self._cancel_preview()
             return cancelled
 
+    async def reset_conversation(self) -> None:
+        async with self._action_lock:
+            if self._is_closed():
+                return
+            await self._cancel_conversation()
+            await self._cancel_preview()
+            if self.conversation_store is not None:
+                await self.conversation_store.reset()
+            self.history.clear()
+            self._source_message_ids.clear()
+            self._audio_frames.clear()
+            self._partial_text = ""
+            self._waiting_silence = False
+            self._reset_paused = True
+            await self._clear_all_outputs()
+
+    async def resume_after_reset(self) -> None:
+        async with self._action_lock:
+            if not self._stopped and not self._stopping:
+                self._reset_paused = False
+
     async def stop(self) -> None:
         if self._stopped:
             return
@@ -471,6 +510,7 @@ class ConversationOrchestrator:
             await self._cancel_preview()
             self.state.stop()
             self.history.clear()
+            self._source_message_ids.clear()
             self._audio_frames.clear()
             self._partial_text = ""
             self._waiting_silence = False
@@ -500,13 +540,48 @@ class ConversationOrchestrator:
             history_messages = self.history.messages_for_model()
             user_text = history_messages[-1].content
             model_messages = history_messages
+            context_sources = ContextSources(
+                type="context.sources",
+                session_id=token.session_id,
+                turn_id=token.turn_id,
+                memories=[],
+                knowledge=[],
+            )
             if self.context_assembler is not None:
                 try:
-                    model_messages = self.context_assembler.build(
-                        user_text, history_messages
-                    ).messages
+                    bundle = await self._await_sync(
+                        self.context_assembler.build, user_text, history_messages
+                    )
+                    model_messages = bundle.messages
+                    context_sources = ContextSources(
+                        type="context.sources",
+                        session_id=token.session_id,
+                        turn_id=token.turn_id,
+                        memories=[
+                            {
+                                "id": item.id,
+                                "content": item.content,
+                                "source_message_id": item.source_message_id,
+                                "source_text": item.source_text,
+                                "source_turn_id": item.source_turn_id,
+                            }
+                            for item in bundle.memory_sources
+                        ],
+                        knowledge=[
+                            {
+                                "chunk_id": item.chunk_id,
+                                "document_id": item.document_id,
+                                "display_name": item.display_name,
+                                "content": item.content,
+                                "page_number": item.page_number,
+                            }
+                            for item in bundle.knowledge_sources
+                        ],
+                    )
                 except Exception:
-                    model_messages = history_messages
+                    model_messages = (history_messages[0], history_messages[-1])
+            if context_sources.memories or context_sources.knowledge:
+                await self._emit(_OutputBatch(owner, (context_sources,)))
             async for delta in self.llm.stream_chat(self.model_id, model_messages):
                 if token.cancelled.is_set():
                     return
@@ -560,7 +635,26 @@ class ConversationOrchestrator:
             if token.cancelled.is_set():
                 return
             assistant_text = "".join(answer)
+            if self.conversation_store is not None:
+                await self.conversation_store.complete_assistant(
+                    token.turn_id, assistant_text
+                )
             self.history.complete_assistant(token.turn_id, assistant_text)
+            # From here onward the completed pair must survive cancellation of
+            # the optional, slower memory-proposal follow-up.
+            self._active_has_pending_history = False
+            await self._emit(
+                _OutputBatch(
+                    owner,
+                    (
+                        AssistantDone(
+                            type="assistant.done",
+                            session_id=token.session_id,
+                            turn_id=token.turn_id,
+                        ),
+                    ),
+                )
+            )
             memory_events = await self._memory_proposal_events(
                 token, user_text, assistant_text
             )
@@ -569,20 +663,14 @@ class ConversationOrchestrator:
             await self._emit(
                 _OutputBatch(
                     owner,
-                    (*memory_events,
-                        AssistantDone(
-                            type="assistant.done",
-                            session_id=token.session_id,
-                            turn_id=token.turn_id,
-                        ),
-                    ),
+                    memory_events,
                     terminal=True,
                 )
             )
         except asyncio.CancelledError:
             raise
         except Exception:
-            self.history.cancel_turn(token.turn_id)
+            await self._discard_pending_turn(token.turn_id)
             await self._emit(
                 _OutputBatch(
                     owner,
@@ -600,12 +688,14 @@ class ConversationOrchestrator:
         if self.memory_proposer is None or self.memory_policy is None:
             return ()
         try:
-            candidates = await self.memory_proposer.propose(
-                self.model_id,
-                user_text,
-                assistant_text,
-                source_message_id=token.turn_id,
-            )
+            source_message_id = self._source_message_ids.get(token.turn_id, token.turn_id)
+            async with asyncio.timeout(15):
+                candidates = await self.memory_proposer.propose(
+                    self.model_id,
+                    user_text,
+                    assistant_text,
+                    source_message_id=source_message_id,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -621,6 +711,7 @@ class ConversationOrchestrator:
                     session_id=token.session_id,
                     turn_id=token.turn_id,
                     proposal_index=index,
+                    source_message_id=source_message_id,
                     kind=candidate.kind.value,
                     content=candidate.content,
                     importance=candidate.importance,
@@ -828,7 +919,7 @@ class ConversationOrchestrator:
             except asyncio.CancelledError:
                 pass
         if self._active_has_pending_history:
-            self.history.cancel_turn(token.turn_id)
+            await self._discard_pending_turn(token.turn_id)
         self._audio_frames.clear()
         self._reset_partial_locked()
         owner = ("turn", token.turn_id)
@@ -841,6 +932,12 @@ class ConversationOrchestrator:
             session_id=token.session_id,
             turn_id=token.turn_id,
         )
+
+    async def _discard_pending_turn(self, turn_id: int) -> None:
+        self.history.cancel_turn(turn_id)
+        self._source_message_ids.pop(turn_id, None)
+        if self.conversation_store is not None:
+            await self.conversation_store.cancel_turn(turn_id)
 
     async def _cancel_preview(self) -> None:
         task = self._preview_task
@@ -1004,7 +1101,7 @@ class ConversationOrchestrator:
         return ErrorMessage(type="error", code=code, message=message, recoverable=True)
 
     def _is_closed(self) -> bool:
-        return self._stopping or self._stopped
+        return self._stopping or self._stopped or self._reset_paused
 
     @staticmethod
     def _stopped_error() -> ErrorMessage:

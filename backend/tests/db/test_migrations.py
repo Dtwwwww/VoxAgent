@@ -22,9 +22,9 @@ def database(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> sqlite3.Connect
 def test_new_database_migrates_to_latest_version_idempotently(
     database: sqlite3.Connection,
 ) -> None:
-    assert migrate(database) == 2
-    assert migrate(database) == 2
-    assert database.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+    assert migrate(database) == 3
+    assert migrate(database) == 3
+    assert database.execute("SELECT version FROM schema_version").fetchone()[0] == 3
 
     tables = {
         row[0]
@@ -47,6 +47,9 @@ def test_new_database_migrates_to_latest_version_idempotently(
         row[1] for row in database.execute("PRAGMA table_info(memories)").fetchall()
     }
     assert "source_turn_id" in memory_columns
+
+    with pytest.raises(sqlite3.IntegrityError):
+        database.execute("INSERT INTO schema_version(version) VALUES (3)")
 
 
 def test_persona_table_enforces_exactly_one_versioned_row(
@@ -178,4 +181,6 @@ def test_required_indexes_exist(database: sqlite3.Connection) -> None:
         "idx_memories_normalized_content",
         "idx_documents_sha256",
         "idx_document_chunks_parent_ordinal",
+        "idx_messages_conversation_turn_role",
+        "idx_schema_version_singleton",
     } <= indexes

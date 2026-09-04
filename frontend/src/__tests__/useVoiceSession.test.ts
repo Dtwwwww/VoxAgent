@@ -215,11 +215,25 @@ describe("the frozen WebSocket protocol", () => {
       session_id: SESSION_ID,
       turn_id: 4,
       proposal_index: 0,
+      source_message_id: 19,
       kind: "preference",
       content: "用户喜欢无糖咖啡",
       importance: 0.8,
       requires_confirmation: false,
     })).toMatchObject({ type: "memory.proposed", turn_id: 4, content: "用户喜欢无糖咖啡" });
+  });
+
+  it("parses exact reviewable context sources", () => {
+    const event = parseServerEvent({
+      type: "context.sources",
+      session_id: SESSION_ID,
+      turn_id: 4,
+      memories: [{ id: 2, content: "喜欢茶", source_message_id: 8, source_text: "我喜欢喝茶", source_turn_id: 3 }],
+      knowledge: [{ chunk_id: 7, document_id: 4, display_name: "手册.pdf", content: "八十度水温", page_number: 5 }],
+    });
+
+    expect(event).toMatchObject({ type: "context.sources", turn_id: 4 });
+    expect(() => parseServerEvent({ ...event, local_path: "D:\\secret.pdf" })).toThrow();
   });
 });
 
@@ -375,6 +389,20 @@ describe("queued native-rate playback", () => {
 });
 
 describe("useVoiceSession", () => {
+  it("binds retrieved sources to the matching assistant answer", () => {
+    const { hook, socket } = openSession();
+    emit(socket, {
+      type: "context.sources",
+      session_id: SESSION_ID,
+      turn_id: 2,
+      memories: [{ id: 2, content: "喜欢茶", source_message_id: 8, source_text: "我喜欢喝茶", source_turn_id: 3 }],
+      knowledge: [{ chunk_id: 7, document_id: 4, display_name: "手册.pdf", content: "八十度水温", page_number: 5 }],
+    });
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 2, delta: "回答" });
+
+    expect(hook.result.current.messages.at(-1)?.sources).toHaveLength(2);
+    expect(hook.result.current.messages.at(-1)?.sources?.[1]).toMatchObject({ kind: "knowledge", displayName: "手册.pdf" });
+  });
   it("surfaces and dismisses reviewable memory proposals", () => {
     const { hook, socket } = openSession();
 
@@ -383,6 +411,7 @@ describe("useVoiceSession", () => {
       session_id: SESSION_ID,
       turn_id: 4,
       proposal_index: 0,
+      source_message_id: 19,
       kind: "preference",
       content: "用户喜欢无糖咖啡",
       importance: 0.8,
@@ -393,6 +422,7 @@ describe("useVoiceSession", () => {
     expect(hook.result.current.memoryProposals[0]).toMatchObject({
       id: "4:0",
       sourceTurnId: 4,
+      sourceMessageId: 19,
       content: "用户喜欢无糖咖啡",
     });
     act(() => hook.result.current.dismissMemoryProposal("4:0"));

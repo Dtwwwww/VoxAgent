@@ -533,6 +533,7 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
     knowledge = object()
     memory = object()
     data_service = object()
+    conversation_store = object()
     backup_calls: list[tuple[object, object]] = []
     captured: dict[str, object] = {}
 
@@ -567,13 +568,35 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
         lambda connection: captured.setdefault("migrated", connection),
     )
     monkeypatch.setattr(cli.BgeSmallZhEmbedder, "from_path", fake_load_embedder)
-    monkeypatch.setattr(cli, "SqliteContextSource", lambda connection, model: source)
+    monkeypatch.setattr(cli, "SqliteContextSource", lambda database_path, model: source)
     monkeypatch.setattr(cli, "ContextAssembler", lambda persona, memories, documents: assembler)
     monkeypatch.setattr(cli, "LocalMemoryProposalService", lambda client, parser: proposer)
-    monkeypatch.setattr(cli, "LocalKnowledgeService", lambda database_path, temp, model: knowledge)
-    monkeypatch.setattr(cli, "LocalMemoryService", lambda database_path, model: memory)
-    monkeypatch.setattr(cli, "LocalPersonaService", lambda database_path: persona_service)
-    monkeypatch.setattr(cli, "LocalDataService", lambda database_path, data: data_service)
+    gates: list[object] = []
+    monkeypatch.setattr(
+        cli,
+        "LocalKnowledgeService",
+        lambda database_path, temp, model, gate: (gates.append(gate), knowledge)[1],
+    )
+    monkeypatch.setattr(
+        cli,
+        "LocalMemoryService",
+        lambda database_path, model, gate: (gates.append(gate), memory)[1],
+    )
+    monkeypatch.setattr(
+        cli,
+        "LocalPersonaService",
+        lambda database_path, gate: (gates.append(gate), persona_service)[1],
+    )
+    monkeypatch.setattr(
+        cli,
+        "LocalDataService",
+        lambda database_path, data, gate: (gates.append(gate), data_service)[1],
+    )
+    monkeypatch.setattr(
+        cli,
+        "SqliteConversationStore",
+        lambda database_path, gate: (gates.append(gate), conversation_store)[1],
+    )
     monkeypatch.setattr(
         cli,
         "DailyBackupManager",
@@ -603,6 +626,7 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
     assert captured["persona_service"] is persona_service
     assert captured["data_service"] is data_service
     assert captured["token"] == SESSION_TOKEN
+    assert len({id(gate) for gate in gates[:4]}) == 1
     asyncio.run(captured["on_shutdown"]())
     assert database.closed is True
     assert fake_http.closed is True

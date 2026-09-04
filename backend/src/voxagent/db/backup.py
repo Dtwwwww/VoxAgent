@@ -24,18 +24,22 @@ class DailyBackupManager:
         self._directory.mkdir(parents=True, exist_ok=True)
         target = self._directory / f"voxagent-{local_day.isoformat()}.db"
         if target.exists():
-            return None
+            if self._is_valid(target):
+                return None
+            target.unlink()
         temporary = self._directory / f".{target.name}.tmp"
         temporary.unlink(missing_ok=True)
-        destination = sqlite3.connect(temporary)
         try:
-            source.backup(destination)
+            destination = sqlite3.connect(temporary)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+            if not self._is_valid(temporary):
+                return None
+            temporary.replace(target)
         finally:
-            destination.close()
-        if not self._integrity_check(temporary):
             temporary.unlink(missing_ok=True)
-            return None
-        temporary.replace(target)
         self._rotate()
         return target
 
@@ -43,7 +47,11 @@ class DailyBackupManager:
         if not self._directory.exists():
             return ()
         return tuple(
-            sorted(self._directory.glob("voxagent-????-??-??.db"), reverse=True)
+            path
+            for path in sorted(
+                self._directory.glob("voxagent-????-??-??.db"), reverse=True
+            )
+            if self._is_valid(path)
         )
 
     def delete(self, filename: str) -> bool:
@@ -58,9 +66,32 @@ class DailyBackupManager:
         candidate.unlink()
         return True
 
+    def purge_all(self) -> None:
+        if not self._directory.exists():
+            return
+        for candidate in self._directory.glob("voxagent-????-??-??.db"):
+            candidate.unlink(missing_ok=True)
+        for temporary in self._directory.glob(".voxagent-????-??-??.db.tmp"):
+            temporary.unlink(missing_ok=True)
+
     def _rotate(self) -> None:
-        for expired in self.list()[self._retention :]:
+        candidates = tuple(
+            sorted(self._directory.glob("voxagent-????-??-??.db"), reverse=True)
+        )
+        valid: list[Path] = []
+        for candidate in candidates:
+            if self._is_valid(candidate):
+                valid.append(candidate)
+            else:
+                candidate.unlink(missing_ok=True)
+        for expired in valid[self._retention :]:
             expired.unlink()
+
+    def _is_valid(self, path: Path) -> bool:
+        try:
+            return self._integrity_check(path)
+        except (OSError, sqlite3.DatabaseError):
+            return False
 
     @staticmethod
     def _has_valid_integrity(path: Path) -> bool:

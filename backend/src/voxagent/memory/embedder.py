@@ -75,5 +75,9 @@ class BgeSmallZhEmbedder:
         hidden_state = np.asarray(self._session.run(None, feed)[0], dtype=np.float32)
         if hidden_state.ndim != 3 or hidden_state.shape[2] != EMBEDDING_DIMENSION:
             raise ValueError("BGE model output must contain 512-dimensional token vectors")
-        cls_vectors = hidden_state[:, 0, :]
-        return l2_normalize_rows(cls_vectors)
+        mask = attention_mask.astype(np.float32)[..., None]
+        token_counts = mask.sum(axis=1)
+        if np.any(token_counts == 0):
+            raise ValueError("BGE tokenizer produced an empty attention mask")
+        pooled = (hidden_state * mask).sum(axis=1) / token_counts
+        return l2_normalize_rows(pooled)

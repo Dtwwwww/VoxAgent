@@ -17,6 +17,7 @@ function api(): LocalApiClient {
       content: "喜欢乌龙茶",
       importance: 0.8,
       source_turn_id: 3,
+      source: { message_id: 9, conversation_id: 2, turn_id: 3, content: "我喜欢乌龙茶" },
       created_at_utc: "2026-09-04T08:00:00.000Z",
       updated_at_utc: "2026-09-04T08:00:00.000Z",
     }]),
@@ -26,6 +27,7 @@ function api(): LocalApiClient {
       content: input.content,
       importance: input.importance,
       source_turn_id: input.source_turn_id ?? null,
+      source: null,
       created_at_utc: "2026-09-04T08:00:00.000Z",
       updated_at_utc: "2026-09-04T08:00:00.000Z",
     })),
@@ -48,6 +50,7 @@ describe("MemoryPanel", () => {
 
     expect(await screen.findByText("喜欢乌龙茶")).toBeVisible();
     expect(screen.getByText("来自第 3 轮对话")).toBeVisible();
+    expect(screen.getByText("原话：我喜欢乌龙茶")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "删除 喜欢乌龙茶" }));
     await waitFor(() => expect(local.deleteMemory).toHaveBeenCalledWith(1));
   });
@@ -58,6 +61,7 @@ describe("MemoryPanel", () => {
     const proposal: MemoryProposal = {
       id: "4:0",
       sourceTurnId: 4,
+      sourceMessageId: 19,
       kind: "preference",
       content: "用户喜欢无糖咖啡",
       importance: 0.8,
@@ -71,6 +75,7 @@ describe("MemoryPanel", () => {
       content: "用户喜欢无糖咖啡",
       importance: 0.8,
       source_turn_id: 4,
+      source_message_id: 19,
       confirmed: true,
     }));
     expect(dismiss).toHaveBeenCalledWith("4:0");

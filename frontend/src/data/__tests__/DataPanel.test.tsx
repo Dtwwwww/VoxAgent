@@ -15,7 +15,8 @@ it("exports data and gates full reset behind the exact phrase", async () => {
     listBackups: vi.fn(async () => [{ filename: "voxagent-2026-09-04.db", date: "2026-09-04", size_bytes: 1024 }]),
     deleteBackup: vi.fn(async () => undefined),
   } as unknown as LocalApiClient;
-  render(<DataPanel client={client} />);
+  const onReset = vi.fn();
+  render(<DataPanel client={client} onReset={onReset} />);
 
   expect(await screen.findByText("2026-09-04")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "导出本地数据" }));
@@ -28,4 +29,5 @@ it("exports data and gates full reset behind the exact phrase", async () => {
   expect(reset).toBeEnabled();
   fireEvent.click(reset);
   await waitFor(() => expect(client.resetAll).toHaveBeenCalledOnce());
+  expect(onReset).toHaveBeenCalledOnce();
 });

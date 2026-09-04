@@ -16,8 +16,10 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const importAbortRef = useRef<AbortController | null>(null);
   const [openDocumentId, setOpenDocumentId] = useState<number | null>(null);
   const [chunks, setChunks] = useState<KnowledgeChunk[]>([]);
+  const [hasMoreChunks, setHasMoreChunks] = useState(false);
 
   const loadDocuments = async () => {
     setLoading(true);
@@ -39,11 +41,25 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        if (importing) {
+          importAbortRef.current?.abort();
+          void client.cancelImport();
+        }
+        onClose();
+      }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
+  }, [open, importing, client, onClose]);
+
+  const closePanel = () => {
+    if (importing) {
+      importAbortRef.current?.abort();
+      void client.cancelImport();
+    }
+    onClose();
+  };
 
   if (!open) return null;
 
@@ -52,15 +68,19 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
     setImporting(true);
     setError(null);
     setMessage(null);
+    const controller = new AbortController();
+    importAbortRef.current = controller;
     try {
-      const result = await client.importDocument(file);
+      const result = await client.importDocument(file, controller.signal);
       setMessage(result.created
         ? `“${result.display_name}”已导入本地知识库`
         : `“${result.display_name}”已经存在`);
       await loadDocuments();
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "文档导入失败");
+      if (controller.signal.aborted) setMessage("文档导入已取消");
+      else setError(uploadError instanceof Error ? uploadError.message : "文档导入失败");
     } finally {
+      if (importAbortRef.current === controller) importAbortRef.current = null;
       setImporting(false);
       if (inputRef.current) inputRef.current.value = "";
     }
@@ -81,19 +101,34 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
     if (openDocumentId === document.id) {
       setOpenDocumentId(null);
       setChunks([]);
+      setHasMoreChunks(false);
       return;
     }
     setError(null);
     try {
-      setChunks(await client.listChunks(document.id));
+      const firstPage = await client.listChunks(document.id, 0);
+      setChunks(firstPage);
+      setHasMoreChunks(firstPage.length === 20);
       setOpenDocumentId(document.id);
     } catch (inspectError) {
       setError(inspectError instanceof Error ? inspectError.message : "无法读取知识片段");
     }
   };
 
+  const loadMore = async () => {
+    if (openDocumentId === null) return;
+    setError(null);
+    try {
+      const page = await client.listChunks(openDocumentId, chunks.length);
+      setChunks((current) => [...current, ...page]);
+      setHasMoreChunks(page.length === 20);
+    } catch (inspectError) {
+      setError(inspectError instanceof Error ? inspectError.message : "无法读取更多知识片段");
+    }
+  };
+
   return <div className="knowledge-layer" role="presentation" onMouseDown={(event) => {
-    if (event.target === event.currentTarget) onClose();
+    if (event.target === event.currentTarget) closePanel();
   }}>
     <section className="knowledge-panel" role="dialog" aria-modal="true" aria-labelledby="knowledge-title">
       <header className="knowledge-panel__header">
@@ -101,7 +136,7 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
           <h2 id="knowledge-title">本地知识库</h2>
           <p>导入的内容只在这台电脑上解析和检索。</p>
         </div>
-        <button type="button" className="icon-button" aria-label="关闭知识库" onClick={onClose}>
+        <button type="button" className="icon-button" aria-label="关闭知识库" onClick={closePanel}>
           <Icon name="close" />
         </button>
       </header>
@@ -118,6 +153,12 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
           onChange={(event) => { void importFile(event.target.files?.[0]); }}
         />
       </label>
+      {importing && <button type="button" className="knowledge-cancel" onClick={() => {
+        importAbortRef.current?.abort();
+        void client.cancelImport();
+      }}>
+        取消导入
+      </button>}
       <p className="knowledge-panel__hint">支持 TXT、Markdown、文本 PDF、DOCX，单个文件不超过 20 MB</p>
 
       {message && <p className="knowledge-panel__success" role="status">{message}</p>}
@@ -155,6 +196,7 @@ export function KnowledgePanel({ open, client, onClose }: KnowledgePanelProps) {
               <span>{chunk.page_number ? `第 ${chunk.page_number} 页 · ` : ""}片段 {chunk.ordinal + 1}</span>
               <p>{chunk.content}</p>
             </section>)}
+            {hasMoreChunks && <button type="button" className="knowledge-card__inspect" onClick={() => { void loadMore(); }}>加载更多</button>}
           </div>}
         </article>)}
       </div>

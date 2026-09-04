@@ -4,6 +4,8 @@ import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+
 from voxagent.db.backup import DailyBackupManager
 
 
@@ -61,6 +63,58 @@ def test_integrity_failure_removes_the_incomplete_backup(tmp_path: Path) -> None
     assert created is None
     assert manager.list() == ()
     assert not tuple((tmp_path / "backups").glob("*.tmp"))
+    source.close()
+
+
+def test_backup_exception_removes_the_temporary_database(tmp_path: Path) -> None:
+    class FailingSource:
+        def backup(self, _destination: sqlite3.Connection) -> None:
+            raise sqlite3.OperationalError("backup failed")
+
+    manager = DailyBackupManager(tmp_path / "backups")
+
+    with pytest.raises(sqlite3.OperationalError, match="backup failed"):
+        manager.create(FailingSource(), date(2026, 9, 4))  # type: ignore[arg-type]
+
+    assert not tuple((tmp_path / "backups").glob("*.tmp"))
+
+
+def test_purge_all_removes_valid_corrupt_and_temporary_backups(tmp_path: Path) -> None:
+    directory = tmp_path / "backups"
+    directory.mkdir()
+    (directory / "voxagent-2026-09-04.db").write_bytes(b"database")
+    (directory / ".voxagent-2026-09-05.db.tmp").write_bytes(b"temporary private data")
+    manager = DailyBackupManager(directory)
+
+    manager.purge_all()
+
+    assert not tuple(directory.iterdir())
+
+
+def test_replaces_a_corrupt_existing_same_day_backup(tmp_path: Path) -> None:
+    source = _database(tmp_path / "voxagent.db")
+    directory = tmp_path / "backups"
+    directory.mkdir()
+    target = directory / "voxagent-2026-09-04.db"
+    target.write_bytes(b"not sqlite")
+
+    created = DailyBackupManager(directory).create(source, date(2026, 9, 4))
+
+    assert created == target
+    copy = sqlite3.connect(target)
+    assert copy.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    copy.close()
+    source.close()
+
+
+def test_list_hides_a_backup_that_became_corrupt_after_creation(tmp_path: Path) -> None:
+    source = _database(tmp_path / "voxagent.db")
+    manager = DailyBackupManager(tmp_path / "backups")
+    created = manager.create(source, date(2026, 9, 4))
+    assert created is not None
+    created.write_bytes(b"corrupt after creation")
+
+    assert manager.list() == ()
     source.close()
 
 

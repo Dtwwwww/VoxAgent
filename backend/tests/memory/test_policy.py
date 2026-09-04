@@ -46,6 +46,14 @@ def test_allows_stable_user_memory(kind: MemoryKind, content: str) -> None:
             "api_secret",
         ),
         (
+            MemoryCandidate(MemoryKind.PROFILE, "Authorization Bearer abcDEF123456", 1, 1),
+            "api_secret",
+        ),
+        (
+            MemoryCandidate(MemoryKind.PROFILE, "我的密码 abc123456", 1, 1),
+            "password_secret",
+        ),
+        (
             MemoryCandidate(
                 MemoryKind.PROFILE,
                 "-----BEGIN PRIVATE KEY----- abc",

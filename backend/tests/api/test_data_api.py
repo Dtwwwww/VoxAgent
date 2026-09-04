@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -9,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from voxagent.api.app import create_app
@@ -20,12 +22,21 @@ AUTH = {"Authorization": f"Bearer {SESSION_TOKEN}"}
 
 
 class FakeOrchestrator:
-    model_id = "qwen-local"
-    state = SimpleNamespace(session_id=uuid4())
-    voice_catalog = SimpleNamespace(public_profiles=lambda: ())
+    def __init__(self) -> None:
+        self.model_id = "qwen-local"
+        self.state = SimpleNamespace(session_id=uuid4())
+        self.voice_catalog = SimpleNamespace(public_profiles=lambda: ())
+        self.reset_count = 0
+        self.resume_count = 0
 
     async def stop(self) -> None:
         return None
+
+    async def reset_conversation(self) -> None:
+        self.reset_count += 1
+
+    async def resume_after_reset(self) -> None:
+        self.resume_count += 1
 
 
 def _database(path: Path) -> None:
@@ -132,3 +143,45 @@ def test_lists_and_deletes_backups_without_exposing_paths(tmp_path: Path) -> Non
         "/v1/backups/voxagent-2026-09-04.db", headers=AUTH
     ).status_code == 204
     assert service.list_backups() == ()
+
+
+@pytest.mark.asyncio
+async def test_reset_waits_for_the_shared_application_mutation_gate(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "data" / "voxagent.db"
+    _database(database_path)
+    gate = asyncio.Lock()
+    service = LocalDataService(database_path, tmp_path / "data", gate)
+    await gate.acquire()
+
+    reset = asyncio.create_task(service.reset_all())
+    await asyncio.sleep(0.01)
+    assert not reset.done()
+
+    gate.release()
+    await reset
+
+
+def test_full_reset_clears_the_active_orchestrator_history(tmp_path: Path) -> None:
+    database_path = tmp_path / "data" / "voxagent.db"
+    _database(database_path)
+    orchestrator = FakeOrchestrator()
+    service = LocalDataService(database_path, tmp_path / "data")
+    app = create_app(lambda: orchestrator, SESSION_TOKEN, data_service=service)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/v1/voice?token={SESSION_TOKEN}") as socket:
+            socket.send_json({"type": "session.start"})
+            socket.receive_json()
+            socket.receive_json()
+            response = client.request(
+                "DELETE",
+                "/v1/data",
+                headers=AUTH,
+                json={"confirmation": "删除声灵全部本地数据"},
+            )
+
+    assert response.status_code == 204
+    assert orchestrator.reset_count == 1
+    assert orchestrator.resume_count == 1

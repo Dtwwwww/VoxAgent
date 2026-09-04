@@ -6,6 +6,12 @@ export interface MemoryRecord {
   content: string;
   importance: number;
   source_turn_id: number | null;
+  source: {
+    message_id: number;
+    conversation_id: number;
+    turn_id: number;
+    content: string;
+  } | null;
   created_at_utc: string;
   updated_at_utc: string;
 }
@@ -15,6 +21,7 @@ export interface MemoryCreate {
   content: string;
   importance: number;
   source_turn_id?: number;
+  source_message_id?: number;
   confirmed: boolean;
 }
 
@@ -58,8 +65,9 @@ async function checked(response: Response): Promise<Response> {
   if (response.ok) return response;
   let message = "本地数据操作失败，请重试";
   try {
-    const body = await response.json() as { detail?: string };
-    if (body.detail) message = body.detail;
+    const body = await response.json() as { detail?: string | { message?: string } };
+    if (typeof body.detail === "string") message = body.detail;
+    else if (body.detail?.message) message = body.detail.message;
   } catch {
     // Keep the stable message for non-JSON failures.
   }

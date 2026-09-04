@@ -189,7 +189,7 @@ class MemoryRepository:
             """
             SELECT * FROM memories
             WHERE kind = ? AND embedding IS NOT NULL AND embedding_dim = ?
-            ORDER BY id LIMIT 2000
+            ORDER BY id DESC LIMIT 2000
             """,
             (kind.value, embedding_dim),
         ).fetchall()

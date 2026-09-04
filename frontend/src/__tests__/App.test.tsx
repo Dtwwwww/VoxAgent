@@ -41,6 +41,7 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     stopVoicePreview: vi.fn(),
     cancelActive: vi.fn(),
     dismissMemoryProposal: vi.fn(),
+    clearLocalData: vi.fn(),
     ...overrides,
   };
 }
@@ -72,6 +73,7 @@ describe("App", () => {
     const knowledgeClient: KnowledgeClient = {
       listDocuments: vi.fn(async () => []),
       importDocument: vi.fn(),
+      cancelImport: vi.fn(async () => undefined),
       deleteDocument: vi.fn(),
       listChunks: vi.fn(),
     };

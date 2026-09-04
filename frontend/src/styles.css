@@ -792,6 +792,18 @@ button:active:not(:disabled) {
   cursor: wait;
 }
 
+.knowledge-cancel {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 12px;
+  color: var(--color-danger);
+  background: #fff1f1;
+  border: 1px solid rgb(226 85 85 / 24%);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
 .knowledge-upload input {
   position: absolute;
   width: 1px;
@@ -1163,6 +1175,17 @@ button:active:not(:disabled) {
   margin: 9px 0;
   font-size: 13px;
   line-height: 1.55;
+}
+
+.memory-card__source {
+  padding: 8px 10px;
+  margin: 8px 0 0;
+  color: var(--color-text-soft);
+  font-size: 12px;
+  line-height: 1.55;
+  background: #f7f6fc;
+  border-left: 3px solid var(--color-primary-soft);
+  border-radius: 0 8px 8px 0;
 }
 
 .memory-card__actions {
@@ -1752,4 +1775,39 @@ button:active:not(:disabled) {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+.message-sources {
+  max-width: min(34rem, 78vw);
+  margin-top: 0.45rem;
+  color: var(--color-text-soft);
+  font-size: 0.78rem;
+}
+
+.message-sources summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.message-sources__list {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.45rem;
+}
+
+.message-sources__list section {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.65rem;
+  background: var(--color-page);
+}
+
+.message-sources__list p,
+.message-sources__list blockquote {
+  margin: 0.25rem 0 0;
+  white-space: pre-wrap;
+}
+
+.message-sources__list blockquote {
+  padding-left: 0.55rem;
+  border-left: 2px solid var(--color-primary);
 }

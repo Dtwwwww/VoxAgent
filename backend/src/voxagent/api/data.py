@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 import threading
 import zipfile
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Protocol
@@ -49,17 +50,26 @@ class DataService(Protocol):
 
 
 class LocalDataService:
-    def __init__(self, database_path: Path, data_directory: Path) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        data_directory: Path,
+        mutation_lock: asyncio.Lock | None = None,
+    ) -> None:
         self._database_path = database_path
         self._data_directory = data_directory
         self._exports_directory = data_directory / "exports"
         self._backup_manager = DailyBackupManager(data_directory / "backups")
         self._tickets: dict[str, tuple[Path, datetime]] = {}
         self._tickets_lock = threading.Lock()
-        self._write_lock = asyncio.Lock()
+        self._write_lock = mutation_lock or asyncio.Lock()
+        if self._exports_directory.exists():
+            for orphan in self._exports_directory.glob("export-*.zip"):
+                orphan.unlink(missing_ok=True)
 
     async def create_export(self) -> dict[str, object]:
-        return await asyncio.to_thread(self._create_export)
+        async with self._write_lock:
+            return await asyncio.to_thread(self._create_export)
 
     def _create_export(self) -> dict[str, object]:
         self._exports_directory.mkdir(parents=True, exist_ok=True)
@@ -88,6 +98,7 @@ class LocalDataService:
         connection = sqlite3.connect(self._database_path)
         connection.row_factory = sqlite3.Row
         try:
+            connection.execute("BEGIN")
             version = int(
                 connection.execute("SELECT version FROM schema_version").fetchone()[0]
             )
@@ -105,7 +116,11 @@ class LocalDataService:
                     }
                     for row in rows
                 ]
+            connection.commit()
             return payload
+        except BaseException:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -144,13 +159,18 @@ class LocalDataService:
             ):
                 connection.execute(f"DELETE FROM {table}")
             connection.commit()
+            remaining = sum(
+                int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                for table in _EXPORT_TABLES
+            )
+            if remaining:
+                raise RuntimeError("local data reset verification failed")
         except BaseException:
             connection.rollback()
             raise
         finally:
             connection.close()
-        for backup in self._backup_manager.list():
-            backup.unlink()
+        self._backup_manager.purge_all()
         if self._exports_directory.exists():
             for archive in self._exports_directory.glob("export-*.zip"):
                 archive.unlink()
@@ -175,8 +195,15 @@ def _delete_download(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
-def register_data_routes(app: FastAPI, service: DataService, session_token: str) -> None:
+def register_data_routes(
+    app: FastAPI,
+    service: DataService,
+    session_token: str,
+    on_reset: Callable[[], Awaitable[None]] | None = None,
+    on_reset_complete: Callable[[], Awaitable[None]] | None = None,
+) -> None:
     expected_token = session_token.encode("ascii")
+    reset_lock = asyncio.Lock()
 
     @app.post("/v1/data/export", status_code=status.HTTP_201_CREATED)
     async def create_export(
@@ -207,7 +234,14 @@ def register_data_routes(app: FastAPI, service: DataService, session_token: str)
         authorization: str | None = Header(default=None),
     ) -> Response:
         require_bearer(authorization, expected_token)
-        await service.reset_all()
+        async with reset_lock:
+            try:
+                if on_reset is not None:
+                    await on_reset()
+                await service.reset_all()
+            finally:
+                if on_reset_complete is not None:
+                    await on_reset_complete()
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/v1/backups")

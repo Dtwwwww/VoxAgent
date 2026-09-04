@@ -73,6 +73,7 @@ export function App({ controller, knowledgeClient, localApiClient }: AppProps) {
       client={localApiClient}
       open={settingsOpen}
       onClose={() => setSettingsOpen(false)}
+      onReset={controller.clearLocalData}
     />}
   </main>;
 }
