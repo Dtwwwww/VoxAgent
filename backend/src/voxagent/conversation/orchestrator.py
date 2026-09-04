@@ -32,6 +32,7 @@ from voxagent.speech.vad import SAMPLE_RATE, VadDecision, VadDetector
 from voxagent.speech.voice_catalog import VoiceCatalog, VoiceCatalogError
 
 PREVIEW_TEXT = "你好，我是声灵，很高兴陪你一起聊天。"
+EMPTY_VISIBLE_REPLY = "我暂时没有生成有效回答，请再试一次。"
 MAX_UTTERANCE_FRAMES = 6000
 Output = ServerMessage | bytes
 _Owner = tuple[str, int]
@@ -489,7 +490,10 @@ class ConversationOrchestrator:
             ):
                 if token.cancelled.is_set():
                     return
-                answer.append(delta)
+                visible_delta = _text_without_emoji(delta)
+                if not visible_delta.strip():
+                    continue
+                answer.append(visible_delta)
                 await self._emit(
                     _OutputBatch(
                         owner,
@@ -498,13 +502,33 @@ class ConversationOrchestrator:
                                 type="assistant.delta",
                                 session_id=token.session_id,
                                 turn_id=token.turn_id,
-                                delta=delta,
+                                delta=visible_delta,
                             ),
                         ),
                     )
                 )
                 if speak_response:
-                    for sentence in chunker.feed(delta):
+                    for sentence in chunker.feed(visible_delta):
+                        sequence, tts_failed = await self._synthesize_reply_sentence(
+                            token, sentence, sequence, tts_failed
+                        )
+            if not answer:
+                answer.append(EMPTY_VISIBLE_REPLY)
+                await self._emit(
+                    _OutputBatch(
+                        owner,
+                        (
+                            AssistantDelta(
+                                type="assistant.delta",
+                                session_id=token.session_id,
+                                turn_id=token.turn_id,
+                                delta=EMPTY_VISIBLE_REPLY,
+                            ),
+                        ),
+                    )
+                )
+                if speak_response:
+                    for sentence in chunker.feed(EMPTY_VISIBLE_REPLY):
                         sequence, tts_failed = await self._synthesize_reply_sentence(
                             token, sentence, sequence, tts_failed
                         )
@@ -921,8 +945,8 @@ class ConversationOrchestrator:
         return ConversationOrchestrator._error("session_stopped", "会话已经结束")
 
 
-def _text_for_tts(text: str) -> str:
-    """Remove emoji presentation characters without changing display text."""
+def _text_without_emoji(text: str) -> str:
+    """Remove emoji presentation characters while preserving ordinary spacing."""
     cleaned: list[str] = []
     index = 0
     while index < len(text):
@@ -942,4 +966,8 @@ def _text_for_tts(text: str) -> str:
             continue
         cleaned.append(character)
         index += 1
-    return "".join(cleaned).strip()
+    return "".join(cleaned)
+
+
+def _text_for_tts(text: str) -> str:
+    return _text_without_emoji(text).strip()

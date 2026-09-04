@@ -333,7 +333,7 @@ async def test_speak_message_requires_completed_assistant_and_does_not_add_histo
 
 
 @pytest.mark.asyncio
-async def test_auto_tts_strips_emoji_without_changing_streamed_or_stored_response():
+async def test_assistant_response_strips_emoji_from_stream_history_and_tts():
     response_text = "你好😀，欢迎来到 VoxAgent！"
     orchestrator, _, tts = make_orchestrator(replies=[[response_text]])
 
@@ -344,8 +344,8 @@ async def test_auto_tts_strips_emoji_without_changing_streamed_or_stored_respons
 
     assert [
         item.delta for item in outputs if getattr(item, "type", None) == "assistant.delta"
-    ] == [response_text]
-    assert orchestrator.history.assistant_text(turn_id) == response_text
+    ] == ["你好，欢迎来到 VoxAgent！"]
+    assert orchestrator.history.assistant_text(turn_id) == "你好，欢迎来到 VoxAgent！"
     assert [call.text for call in tts.calls] == ["你好，欢迎来到 VoxAgent！"]
     await orchestrator.stop()
 
@@ -368,7 +368,7 @@ async def test_replay_tts_strips_emoji_from_completed_assistant_message():
 
 
 @pytest.mark.asyncio
-async def test_emoji_only_assistant_response_skips_tts():
+async def test_emoji_only_assistant_response_uses_plain_text_fallback():
     response_text = "👩🏽‍💻 🇨🇳 1️⃣"
     orchestrator, _, tts = make_orchestrator(replies=[[response_text]])
 
@@ -380,14 +380,22 @@ async def test_emoji_only_assistant_response_skips_tts():
 
     assert [
         item.delta for item in outputs if getattr(item, "type", None) == "assistant.delta"
-    ] == [response_text]
-    assert orchestrator.history.assistant_text(turn_id) == response_text
+    ] == ["我暂时没有生成有效回答，请再试一次。"]
+    assert orchestrator.history.assistant_text(turn_id) == "我暂时没有生成有效回答，请再试一次。"
     assert [item.type if hasattr(item, "type") else "binary" for item in outputs] == [
         "assistant.delta",
+        "tts.chunk",
+        "binary",
         "assistant.done",
     ]
-    assert replay == []
-    assert tts.calls == []
+    assert [item.type if hasattr(item, "type") else "binary" for item in replay] == [
+        "tts.chunk",
+        "binary",
+    ]
+    assert [call.text for call in tts.calls] == [
+        "我暂时没有生成有效回答，请再试一次。",
+        "我暂时没有生成有效回答，请再试一次。",
+    ]
     await orchestrator.stop()
 
 
