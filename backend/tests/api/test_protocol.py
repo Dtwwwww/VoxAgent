@@ -20,7 +20,18 @@ def test_protocol_fixtures_match_contract():
     server_messages = [parse_server_message(payload) for payload in fixtures["valid_server"]]
 
     assert client_messages[1].text == "hello"
-    assert len(server_messages) == 12
+    assert len(server_messages) == 15
+    assert {
+        message.turn_id for message in server_messages if message.type == "tts.started"
+    } == {1}
+    assert {
+        message.turn_id for message in server_messages if message.type == "tts.done"
+    } == {1}
+    assert {
+        message.request_id
+        for message in server_messages
+        if message.type in {"tts.started", "tts.chunk", "tts.done", "tts.error"}
+    } == {7}
     for payload in fixtures["invalid_client"]:
         with pytest.raises(ValidationError):
             parse_client_message(payload)

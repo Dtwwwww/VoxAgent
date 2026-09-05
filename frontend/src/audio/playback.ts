@@ -56,6 +56,11 @@ export class AudioPlayback {
 
   constructor(private readonly onCompletion: (completion: PlaybackCompletion) => void = () => undefined) {}
 
+  async unlock(): Promise<void> {
+    const context = this.getContext();
+    if (context.state === "suspended") await context.resume();
+  }
+
   async enqueue(metadata: PlaybackMetadata, bytes: ArrayBuffer): Promise<boolean> {
     if (nativeWavSampleRate(bytes) !== metadata.sampleRate) throw new Error("WAV sample rate does not match metadata");
     if (metadata.kind === "preview") {
@@ -168,7 +173,7 @@ export class AudioPlayback {
     const source = this.getContext().createBufferSource() as TaggedSource;
     source.buffer = buffer;
     const gain = this.getContext().createGain();
-    gain.gain.value = 1.15;
+    gain.gain.value = 1;
     source.connect(gain);
     gain.connect(this.getContext().destination);
     source.outputGain = gain;

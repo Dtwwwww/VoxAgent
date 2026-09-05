@@ -8,13 +8,13 @@
     "engine-003",
     "engine-004"
   ],
-  "selected_engine": "kokoro",
-  "engine_tie_break": "Kokoro was retained as the approved tie-break among the tied engine samples.",
-  "resolved_native_voice_id": 3,
+  "selected_engine": "melo",
+  "engine_tie_break": "Melo was selected after the user prioritized lower response latency among the tied engine samples.",
+  "resolved_native_voice_id": 0,
   "public_voice": {
     "voice_key": "default_voice",
-    "display_name": "声灵默认音色",
-    "description": "自然清晰，适合日常对话",
+    "display_name": "声灵快速音色",
+    "description": "响应更快，适合日常对话",
     "gender": "neutral",
     "is_default": true,
     "previewable": true

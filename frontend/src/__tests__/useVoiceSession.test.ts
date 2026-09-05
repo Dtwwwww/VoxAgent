@@ -9,7 +9,7 @@ import { useVoiceSession } from "../useVoiceSession";
 
 const SESSION_ID = "00000000-0000-4000-8000-000000000001";
 const fixtures = JSON.parse(fixtureSource.replace(
-  /("(?:turn_id|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?\d+)\.0(?=\s*[,}])/gu,
+  /("(?:turn_id|request_id|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?\d+)\.0(?=\s*[,}])/gu,
   "$1\"$2.0\"",
 )) as {
   valid_client: unknown[];
@@ -88,6 +88,7 @@ class MockAudioContext {
   static resumeGates: Array<Promise<void>> = [];
   static closeGates: Array<Promise<void>> = [];
   readonly sampleRate = 48_000;
+  readonly state = "suspended";
   readonly currentTime = 0;
   readonly destination = {} as AudioDestinationNode;
   readonly audioWorklet = { addModule: vi.fn(async () => {
@@ -206,6 +207,8 @@ describe("the frozen WebSocket protocol", () => {
     expect(() => parseClientEventJson('{"type":"assistant.speak","turn_id":7.0}')).toThrow();
     expect(() => parseServerEventJson(`{"type":"vad.started","session_id":"${SESSION_ID}","turn_id":1e0}`)).toThrow();
     expect(() => parseClientEventJson('{"type":"assistant.speak","turn_id":7.0e0}')).toThrow();
+    expect(() => parseClientEventJson('{"type":"assistant.speak","turn_id":7,"request_id":1.0}')).toThrow();
+    expect(() => parseServerEventJson(`{"type":"tts.done","session_id":"${SESSION_ID}","turn_id":1,"request_id":1e0}`)).toThrow();
     expect(() => parseServerEventJson(`{"type":"tts.chunk","session_id":"${SESSION_ID}","turn_id":1,"sequence":0.0e0,"sample_rate":24000,"mime_type":"audio/wav","byte_length":46}`)).toThrow();
   });
 
@@ -264,6 +267,18 @@ describe("PCM microphone framing", () => {
 });
 
 describe("queued native-rate playback", () => {
+  it("preserves completion when tts done arrives before final audio decode", async () => {
+    const completed = vi.fn();
+    const playback = new AudioPlayback(completed);
+
+    playback.finishTurn(2);
+    expect(completed).not.toHaveBeenCalled();
+    await playback.enqueue({ kind: "turn", turnId: 2, sequence: 0, sampleRate: 24_000 }, wavBytes());
+    MockAudioContext.instances[0].sources[0].onended?.();
+
+    expect(completed).toHaveBeenCalledWith({ kind: "turn", turnId: 2 });
+  });
+
   it("reports natural completion only after the final scheduled source ends", async () => {
     const completed = vi.fn();
     const playback = new AudioPlayback(completed);
@@ -632,29 +647,211 @@ describe("useVoiceSession", () => {
     emit(socket, { type: "asr.final", session_id: SESSION_ID, turn_id: 1, text: "你好" });
     expect(hook.result.current.voiceStatus).toBe("thinking");
     const wav = wavBytes();
+    emit(socket, { type: "tts.started", session_id: SESSION_ID, turn_id: 1 });
+    expect(hook.result.current.voiceStatus).toBe("preparing");
     emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 1, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
     await act(async () => socket.receive(wav));
     expect(hook.result.current.voiceStatus).toBe("speaking");
     emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 1 });
     expect(hook.result.current.voiceStatus).toBe("speaking");
+    emit(socket, { type: "tts.done", session_id: SESSION_ID, turn_id: 1 });
     act(() => MockAudioContext.instances[0].sources[0].onended?.());
     expect(hook.result.current.voiceStatus).toBe("idle");
   });
 
-  it("requests speech for an existing assistant message", () => {
+  it("requests speech for an existing assistant message", async () => {
     const { hook, socket } = openSession();
     act(() => hook.result.current.speakMessage(7));
-    expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 7 });
+    await waitFor(() => expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 7, request_id: 1 }));
   });
 
-  it("prepares a turn for replay before requesting its speech", () => {
+  it("prepares a turn for replay before requesting its speech", async () => {
     const prepareTurnReplay = vi.spyOn(AudioPlayback.prototype, "prepareTurnReplay");
     const { hook, socket } = openSession();
 
     act(() => hook.result.current.speakMessage(7));
 
     expect(prepareTurnReplay).toHaveBeenCalledWith(7);
-    expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 7 });
+    await waitFor(() => expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 7, request_id: 1 }));
+  });
+
+  it("unlocks audio and shows preparing before replay audio arrives", () => {
+    const { hook, socket } = openSession();
+
+    act(() => hook.result.current.speakMessage(7));
+
+    expect(MockAudioContext.instances).toHaveLength(1);
+    expect(MockAudioContext.instances[0].resume).toHaveBeenCalledOnce();
+    expect(hook.result.current.speakingTurnId).toBe(7);
+    expect(hook.result.current.voiceStatus).toBe("preparing");
+    emit(socket, { type: "tts.started", session_id: SESSION_ID, turn_id: 7 });
+    expect(hook.result.current.voiceStatus).toBe("preparing");
+  });
+
+  it("waits for audio unlock before sending replay and does not send after stop", async () => {
+    const resumeGate = deferred();
+    MockAudioContext.resumeGates = [resumeGate.promise];
+    const { hook, socket } = openSession();
+
+    act(() => hook.result.current.speakMessage(7));
+    expect(socket.jsonMessages()).not.toContainEqual({ type: "assistant.speak", turn_id: 7 });
+    act(() => hook.result.current.stopSpeaking(7));
+    resumeGate.resolve();
+    await act(async () => resumeGate.promise);
+
+    expect(socket.jsonMessages()).not.toContainEqual({ type: "assistant.speak", turn_id: 7 });
+  });
+
+  it("does not reactivate a replay stopped before late tts events arrive", () => {
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.speakMessage(7));
+    act(() => hook.result.current.stopSpeaking(7));
+
+    emit(socket, { type: "tts.started", session_id: SESSION_ID, turn_id: 7, request_id: 1 });
+    emit(socket, { type: "tts.done", session_id: SESSION_ID, turn_id: 7, request_id: 1 });
+
+    expect(hook.result.current.speakingTurnId).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+  });
+
+  it("rejects late audio from an older replay request of the same turn", async () => {
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(socket.jsonMessages().at(-1)).toMatchObject({ type: "assistant.speak", turn_id: 7 }));
+    const firstRequest = socket.jsonMessages().at(-1)!.request_id as number;
+    act(() => hook.result.current.stopSpeaking(7));
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(socket.jsonMessages().at(-1)?.request_id).not.toBe(firstRequest));
+    const secondRequest = socket.jsonMessages().at(-1)!.request_id as number;
+    const wav = wavBytes();
+
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: firstRequest, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances[0].sources).toHaveLength(0);
+
+    emit(socket, { type: "tts.started", session_id: SESSION_ID, turn_id: 7, request_id: secondRequest });
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: secondRequest, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances[0].sources).toHaveLength(1);
+  });
+
+  it("does not accept automatic request zero audio during a manual replay", async () => {
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(socket.jsonMessages().at(-1)).toMatchObject({ type: "assistant.speak", turn_id: 7 }));
+    const requestId = socket.jsonMessages().at(-1)!.request_id as number;
+    const wav = wavBytes();
+
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: 0, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances[0].sources).toHaveLength(0);
+
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: requestId, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances[0].sources).toHaveLength(1);
+  });
+
+  it("starts decoded replay audio when matching tts done arrives during decoding", async () => {
+    const decoded = deferred<AudioBuffer>();
+    MockAudioContext.decoder = () => decoded.promise;
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(socket.jsonMessages().at(-1)).toMatchObject({ type: "assistant.speak", turn_id: 7 }));
+    const requestId = socket.jsonMessages().at(-1)!.request_id as number;
+    const wav = wavBytes();
+
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: requestId, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    const receiving = act(async () => socket.receive(wav));
+    emit(socket, { type: "tts.done", session_id: SESSION_ID, turn_id: 7, request_id: requestId });
+    decoded.resolve({ duration: 0.1, sampleRate: 48_000 } as AudioBuffer);
+    await receiving;
+
+    expect(MockAudioContext.instances[0].sources[0].start).toHaveBeenCalledOnce();
+    expect(MockAudioContext.instances[0].sources[0].stop).not.toHaveBeenCalled();
+    expect(hook.result.current.voiceStatus).toBe("speaking");
+  });
+
+  it("keeps speaking until playback ends after tts done", async () => {
+    const { hook, socket } = openSession();
+    const wav = wavBytes();
+    act(() => hook.result.current.speakMessage(7));
+    emit(socket, { type: "tts.started", session_id: SESSION_ID, turn_id: 7, request_id: 1 });
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: 1, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(hook.result.current.voiceStatus).toBe("speaking");
+
+    emit(socket, { type: "tts.done", session_id: SESSION_ID, turn_id: 7, request_id: 1 });
+    expect(hook.result.current.voiceStatus).toBe("speaking");
+    act(() => MockAudioContext.instances[0].sources[0].onended?.());
+
+    expect(hook.result.current.speakingTurnId).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+  });
+
+  it("ignores a stale tts done event while a newer replay is preparing", () => {
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.speakMessage(7));
+    emit(socket, { type: "turn.cancelled", session_id: SESSION_ID, turn_id: 7 });
+    act(() => hook.result.current.speakMessage(8));
+
+    emit(socket, { type: "tts.done", session_id: SESSION_ID, turn_id: 7 });
+
+    expect(hook.result.current.speakingTurnId).toBe(8);
+    expect(hook.result.current.voiceStatus).toBe("preparing");
+  });
+
+  it("preserves a newer replay when an old turn is cancelled", () => {
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.speakMessage(7));
+    act(() => hook.result.current.speakMessage(8));
+
+    emit(socket, { type: "turn.cancelled", session_id: SESSION_ID, turn_id: 7 });
+
+    expect(hook.result.current.speakingTurnId).toBe(8);
+    expect(hook.result.current.voiceStatus).toBe("preparing");
+  });
+
+  it("does not replace playback status with thinking for a later text delta", async () => {
+    const { hook, socket } = openSession();
+    const wav = wavBytes();
+    act(() => hook.result.current.speakMessage(7));
+    emit(socket, { type: "tts.started", session_id: SESSION_ID, turn_id: 7, request_id: 1 });
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: 1, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 9, delta: "新回答" });
+
+    expect(hook.result.current.voiceStatus).toBe("speaking");
+  });
+
+  it("stops queued playback when tts synthesis fails", async () => {
+    const { hook, socket } = openSession();
+    const wav = wavBytes();
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(socket.jsonMessages().at(-1)).toMatchObject({ type: "assistant.speak", turn_id: 7 }));
+    const requestId = socket.jsonMessages().at(-1)!.request_id as number;
+    emit(socket, { type: "tts.started", session_id: SESSION_ID, turn_id: 7, request_id: requestId });
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: requestId, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    const source = MockAudioContext.instances[0].sources[0];
+
+    emit(socket, { type: "tts.error", session_id: SESSION_ID, turn_id: 7, request_id: requestId, code: "tts_failed", message: "朗读失败", recoverable: true });
+
+    expect(source.stop).toHaveBeenCalledOnce();
+    expect(hook.result.current.speakingTurnId).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+  });
+
+  it("leaves preparing state when cleanup finds no speakable text", async () => {
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(socket.jsonMessages().at(-1)).toMatchObject({ type: "assistant.speak", turn_id: 7 }));
+    const requestId = socket.jsonMessages().at(-1)!.request_id as number;
+
+    emit(socket, { type: "tts.error", session_id: SESSION_ID, turn_id: 7, request_id: requestId, code: "tts_empty", message: "没有可朗读文字", recoverable: true });
+
+    expect(hook.result.current.speakingTurnId).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
   });
 
   it("exposes the active spoken turn and stops it locally", async () => {
@@ -663,7 +860,7 @@ describe("useVoiceSession", () => {
     const wav = wavBytes();
 
     act(() => hook.result.current.speakMessage(3));
-    expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 3 });
+    await waitFor(() => expect(socket.jsonMessages().at(-1)).toEqual({ type: "assistant.speak", turn_id: 3, request_id: 1 }));
     emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 3, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
     await act(async () => socket.receive(wav));
     expect(hook.result.current.speakingTurnId).toBe(3);
@@ -701,6 +898,7 @@ describe("useVoiceSession", () => {
     await act(async () => socket.receive(wav));
     expect(hook.result.current.speakingTurnId).toBe(3);
     emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 3 });
+    emit(socket, { type: "tts.done", session_id: SESSION_ID, turn_id: 3 });
 
     act(() => MockAudioContext.instances[0].sources[0].onended?.());
 

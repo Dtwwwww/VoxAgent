@@ -6,7 +6,7 @@ import { type ServerEvent, type VoiceInfo, type VoiceSpeed, parseServerEventJson
 import { loadVoiceSettings, reconcileVoiceSettings, saveVoiceSettings } from "./voiceSettings";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "initializing" | "connected";
-export type VoiceStatus = "idle" | "listening" | "transcribing" | "thinking" | "speaking";
+export type VoiceStatus = "idle" | "listening" | "transcribing" | "thinking" | "preparing" | "speaking";
 export type MessageStatus = "streaming" | "complete" | "cancelled";
 
 export type ResponseSource =
@@ -77,7 +77,7 @@ export interface VoiceSessionController {
 }
 
 type AudioMetadata =
-  | { kind: "turn"; turnId: number; sequence: number; sampleRate: number; byteLength: number; valid: boolean }
+  | { kind: "turn"; turnId: number; requestId: number; sequence: number; sampleRate: number; byteLength: number; valid: boolean }
   | { kind: "preview"; previewId: number; sampleRate: number; byteLength: number; valid: boolean };
 
 function binaryData(value: unknown): value is ArrayBuffer | Blob {
@@ -112,19 +112,34 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const blockedThroughTurnRef = useRef(0);
   const cancelledTurnsRef = useRef(new Set<number>());
   const allowedReplayTurnsRef = useRef(new Set<number>());
+  const manualReplayTurnsRef = useRef(new Set<number>());
+  const sentReplayTurnsRef = useRef(new Set<number>());
+  const activeReplayTurnRef = useRef<number | null>(null);
+  const activeReplayRequestRef = useRef(0);
+  const replayRequestCounterRef = useRef(0);
   const previewRequestedRef = useRef(false);
   const activePreviewIdRef = useRef<number | null>(null);
   const expectedPreviewIdRef = useRef(0);
   const messageIdRef = useRef(0);
   const handlePlaybackCompletion = useCallback((completion: { kind: "turn"; turnId: number } | { kind: "preview"; previewId: number }) => {
     if (completion.kind === "turn") {
-      setSpeakingTurnId((current) => current === completion.turnId ? null : current);
+      setSpeakingTurnId((current) => {
+        if (current !== completion.turnId) return current;
+        if (activeReplayTurnRef.current === completion.turnId) {
+          activeReplayTurnRef.current = null;
+          activeReplayRequestRef.current = 0;
+        }
+        allowedReplayTurnsRef.current.delete(completion.turnId);
+        sentReplayTurnsRef.current.delete(completion.turnId);
+        setVoiceStatus("idle");
+        return null;
+      });
     } else if (completion.previewId === activePreviewIdRef.current) {
       previewRequestedRef.current = false;
       activePreviewIdRef.current = null;
       setPreviewingVoiceKey(null);
+      setVoiceStatus("idle");
     }
-    setVoiceStatus("idle");
   }, []);
   const playbackRef = useRef(new AudioPlayback(handlePlaybackCompletion));
 
@@ -147,6 +162,11 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     blockedThroughTurnRef.current = 0;
     cancelledTurnsRef.current.clear();
     allowedReplayTurnsRef.current.clear();
+    manualReplayTurnsRef.current.clear();
+    sentReplayTurnsRef.current.clear();
+    activeReplayTurnRef.current = null;
+    activeReplayRequestRef.current = 0;
+    replayRequestCounterRef.current = 0;
     previewRequestedRef.current = false;
     activePreviewIdRef.current = null;
     expectedPreviewIdRef.current = 0;
@@ -195,6 +215,15 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     setError({ code: "connection", message: detail.message, recoverable: detail.recoverable });
   }, []);
 
+  const acceptsTtsTurn = useCallback((turnId: number, requestId: number): boolean => {
+    if (activeReplayTurnRef.current === turnId && allowedReplayTurnsRef.current.has(turnId)) {
+      return requestId === activeReplayRequestRef.current;
+    }
+    return requestId === 0
+      && turnId > blockedThroughTurnRef.current
+      && !cancelledTurnsRef.current.has(turnId);
+  }, []);
+
   const consumeBinary = useCallback(async (data: ArrayBuffer | Blob) => {
     if (discardedPayloadsRef.current > 0) {
       discardedPayloadsRef.current -= 1;
@@ -216,8 +245,11 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       if (metadata.kind === "turn") {
         const started = await playbackRef.current.enqueue({ kind: "turn", turnId: metadata.turnId, sequence: metadata.sequence, sampleRate: metadata.sampleRate }, bytes);
         if (!started) return;
+        if (!acceptsTtsTurn(metadata.turnId, metadata.requestId)) {
+          playbackRef.current.stopTurn(metadata.turnId);
+          return;
+        }
         setSpeakingTurnId(metadata.turnId);
-        if (allowedReplayTurnsRef.current.has(metadata.turnId)) playbackRef.current.finishTurn(metadata.turnId);
       } else {
         const started = await playbackRef.current.enqueue({ kind: "preview", previewId: metadata.previewId, sampleRate: metadata.sampleRate }, bytes);
         if (!started) return;
@@ -226,7 +258,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     } catch {
       setError({ code: "audio_playback", message: "音频播放失败，请重试", recoverable: true });
     }
-  }, [failProtocol]);
+  }, [acceptsTtsTurn, failProtocol]);
 
   const handleServerEvent = useCallback((event: ServerEvent) => {
     if ("turn_id" in event) maximumTurnIdRef.current = Math.max(maximumTurnIdRef.current, event.turn_id);
@@ -238,6 +270,11 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         blockedThroughTurnRef.current = 0;
         cancelledTurnsRef.current.clear();
         allowedReplayTurnsRef.current.clear();
+        manualReplayTurnsRef.current.clear();
+        sentReplayTurnsRef.current.clear();
+        activeReplayTurnRef.current = null;
+        activeReplayRequestRef.current = 0;
+        replayRequestCounterRef.current = 0;
         previewRequestedRef.current = false;
         activePreviewIdRef.current = null;
         expectedPreviewIdRef.current = 0;
@@ -270,14 +307,31 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         };
         break;
       case "tts.chunk": {
-        const valid = allowedReplayTurnsRef.current.has(event.turn_id)
-          || (event.turn_id > blockedThroughTurnRef.current && !cancelledTurnsRef.current.has(event.turn_id));
-        pendingAudioRef.current = { kind: "turn", turnId: event.turn_id, sequence: event.sequence, sampleRate: event.sample_rate, byteLength: event.byte_length, valid };
+        const valid = acceptsTtsTurn(event.turn_id, event.request_id);
+        pendingAudioRef.current = { kind: "turn", turnId: event.turn_id, requestId: event.request_id, sequence: event.sequence, sampleRate: event.sample_rate, byteLength: event.byte_length, valid };
+        break;
+      }
+      case "tts.started": {
+        const valid = acceptsTtsTurn(event.turn_id, event.request_id);
+        if (valid) {
+          setSpeakingTurnId(event.turn_id);
+          setVoiceStatus("preparing");
+        }
+        break;
+      }
+      case "tts.done": {
+        const valid = acceptsTtsTurn(event.turn_id, event.request_id);
+        if (valid) {
+          playbackRef.current.finishTurn(event.turn_id);
+        }
         break;
       }
       case "vad.started":
         blockedThroughTurnRef.current = Math.max(blockedThroughTurnRef.current, event.turn_id - 1);
         allowedReplayTurnsRef.current.clear();
+        sentReplayTurnsRef.current.clear();
+        activeReplayTurnRef.current = null;
+        activeReplayRequestRef.current = 0;
         if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
         playbackRef.current.stopConversation();
         setSpeakingTurnId(null);
@@ -288,7 +342,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         break;
       case "asr.final":
         setMessages((current) => [...current, { id: nextId("voice-user"), turnId: event.turn_id, role: "user", origin: "voice", text: event.text, status: "complete" }]);
-        setVoiceStatus("thinking");
+        setVoiceStatus((current) => current === "preparing" || current === "speaking" ? current : "thinking");
         break;
       case "assistant.delta":
         setMessages((current) => {
@@ -301,7 +355,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           }
           return current.map((message, position) => position === index ? { ...message, text: message.text + event.delta } : message);
         });
-        setVoiceStatus("thinking");
+        setVoiceStatus((current) => current === "preparing" || current === "speaking" ? current : "thinking");
         break;
       case "context.sources":
         responseSourcesRef.current.set(event.turn_id, [
@@ -329,11 +383,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         }
         assistantDraftsRef.current.delete(event.turn_id);
         responseSourcesRef.current.delete(event.turn_id);
-        playbackRef.current.finishTurn(event.turn_id);
-        setSpeakingTurnId((current) => {
-          setVoiceStatus(current === event.turn_id ? "speaking" : "idle");
-          return current;
-        });
+        setVoiceStatus((current) => current === "thinking" ? "idle" : current);
         break;
       case "memory.proposed": {
         const proposal: MemoryProposal = {
@@ -351,18 +401,44 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         break;
       }
       case "turn.cancelled":
+        if (
+          activeReplayTurnRef.current === event.turn_id
+          && allowedReplayTurnsRef.current.has(event.turn_id)
+        ) break;
         cancelledTurnsRef.current.add(event.turn_id);
         allowedReplayTurnsRef.current.delete(event.turn_id);
+        sentReplayTurnsRef.current.delete(event.turn_id);
+        if (activeReplayTurnRef.current === event.turn_id) {
+          activeReplayTurnRef.current = null;
+          activeReplayRequestRef.current = 0;
+        }
         if (pendingAudioRef.current?.kind === "turn" && pendingAudioRef.current.turnId === event.turn_id) pendingAudioRef.current.valid = false;
         playbackRef.current.stopTurn(event.turn_id);
-        setSpeakingTurnId((current) => current === event.turn_id ? null : current);
+        setSpeakingTurnId((current) => {
+          if (current !== event.turn_id) return current;
+          setVoiceStatus("idle");
+          return null;
+        });
         {
           const draftId = assistantDraftsRef.current.get(event.turn_id);
           setMessages((current) => current.map((message) => message.id === draftId ? { ...message, status: "cancelled" } : message));
         }
         assistantDraftsRef.current.delete(event.turn_id);
         responseSourcesRef.current.delete(event.turn_id);
-        setVoiceStatus("idle");
+        break;
+      case "tts.error":
+        if (acceptsTtsTurn(event.turn_id, event.request_id)) {
+          allowedReplayTurnsRef.current.delete(event.turn_id);
+          sentReplayTurnsRef.current.delete(event.turn_id);
+          if (activeReplayTurnRef.current === event.turn_id) {
+            activeReplayTurnRef.current = null;
+            activeReplayRequestRef.current = 0;
+          }
+          playbackRef.current.stopTurn(event.turn_id);
+          setSpeakingTurnId((current) => current === event.turn_id ? null : current);
+          setVoiceStatus("idle");
+          setError({ code: event.code, message: event.message, recoverable: event.recoverable });
+        }
         break;
       case "error":
         if (previewRequestedRef.current && ["conversation_busy", "preview_failed", "voice_not_previewable", "unknown_voice", "invalid_voice_speed"].includes(event.code)) {
@@ -376,7 +452,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setError({ code: event.code, message: event.message, recoverable: event.recoverable });
         break;
     }
-  }, [nextId]);
+  }, [acceptsTtsTurn, nextId]);
 
   const connect = useCallback(() => {
     if (socketRef.current && socketRef.current.readyState < WebSocket.CLOSING) return;
@@ -516,6 +592,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
     blockedThroughTurnRef.current = Math.max(blockedThroughTurnRef.current, maximumTurnIdRef.current);
     allowedReplayTurnsRef.current.clear();
+    sentReplayTurnsRef.current.clear();
+    activeReplayTurnRef.current = null;
+    activeReplayRequestRef.current = 0;
     playbackRef.current.stopConversation();
     setSpeakingTurnId(null);
     setMessages((current) => [...current, { id: nextId("text-user"), role: "user", origin: "text", text, status: "complete" }]);
@@ -524,19 +603,63 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [nextId, send]);
 
   const speakMessage = useCallback((turnId: number) => {
-    playbackRef.current.prepareTurnReplay(turnId);
+    const playback = playbackRef.current;
+    if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
+    playback.stopConversation();
+    playback.prepareTurnReplay(turnId);
+    manualReplayTurnsRef.current.add(turnId);
     allowedReplayTurnsRef.current.add(turnId);
-    send({ type: "assistant.speak", turn_id: turnId });
+    activeReplayTurnRef.current = turnId;
+    const requestId = ++replayRequestCounterRef.current;
+    activeReplayRequestRef.current = requestId;
+    setSpeakingTurnId(turnId);
+    setVoiceStatus("preparing");
+    void playback.unlock().then(() => {
+      if (
+        activeReplayTurnRef.current !== turnId
+        || activeReplayRequestRef.current !== requestId
+        || !allowedReplayTurnsRef.current.has(turnId)
+      ) return;
+      if (send({ type: "assistant.speak", turn_id: turnId, request_id: requestId })) {
+        sentReplayTurnsRef.current.add(turnId);
+        return;
+      }
+      allowedReplayTurnsRef.current.delete(turnId);
+      activeReplayTurnRef.current = null;
+      activeReplayRequestRef.current = 0;
+      setSpeakingTurnId(null);
+      setVoiceStatus("idle");
+    }).catch(() => {
+      if (activeReplayTurnRef.current !== turnId || activeReplayRequestRef.current !== requestId) return;
+      allowedReplayTurnsRef.current.delete(turnId);
+      activeReplayTurnRef.current = null;
+      activeReplayRequestRef.current = 0;
+      playback.stopTurn(turnId);
+      setSpeakingTurnId((current) => current === turnId ? null : current);
+      setVoiceStatus("idle");
+      setError({ code: "audio_playback", message: "浏览器无法启用音频播放，请重试", recoverable: true });
+    });
   }, [send]);
 
   const stopSpeaking = useCallback((turnId: number) => {
     if (pendingAudioRef.current?.kind === "turn" && pendingAudioRef.current.turnId === turnId) {
       pendingAudioRef.current.valid = false;
     }
+    allowedReplayTurnsRef.current.delete(turnId);
+    cancelledTurnsRef.current.add(turnId);
+    if (activeReplayTurnRef.current === turnId) {
+      activeReplayTurnRef.current = null;
+      activeReplayRequestRef.current = 0;
+    }
+    const wasSent = sentReplayTurnsRef.current.delete(turnId);
     playbackRef.current.stopTurn(turnId);
-    setSpeakingTurnId((current) => current === turnId ? null : current);
-    setVoiceStatus("idle");
-  }, []);
+    setSpeakingTurnId((current) => {
+      if (current !== turnId) return current;
+      setVoiceStatus("idle");
+      return null;
+    });
+    if (wasSent) send({ type: "turn.cancel" });
+  }, [send]);
 
   const selectVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     const selection = { voiceKey, speed };
@@ -572,6 +695,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if (pendingAudioRef.current) pendingAudioRef.current.valid = false;
     blockedThroughTurnRef.current = Math.max(blockedThroughTurnRef.current, maximumTurnIdRef.current);
     allowedReplayTurnsRef.current.clear();
+    sentReplayTurnsRef.current.clear();
+    activeReplayTurnRef.current = null;
+    activeReplayRequestRef.current = 0;
     playbackRef.current.stopAll();
     setSpeakingTurnId(null);
     setPreviewingVoiceKey(null);

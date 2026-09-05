@@ -324,8 +324,10 @@ async def test_voice_turn_emits_exact_metadata_and_audio_order():
         "vad.stopped",
         "asr.final",
         "assistant.delta",
+        "tts.started",
         "tts.chunk",
         "binary",
+        "tts.done",
         "assistant.done",
     ]
     await orchestrator.stop()
@@ -377,12 +379,60 @@ async def test_speak_message_requires_completed_assistant_and_does_not_add_histo
     missing = [item async for item in orchestrator.speak_message(999)]
 
     assert [item.type if hasattr(item, "type") else "binary" for item in replay] == [
+        "tts.started",
         "tts.chunk",
         "binary",
+        "tts.done",
     ]
     assert tts.calls[-1].text == "完成回答"
     assert len(llm.calls) == calls_before
     assert isinstance(missing[0], ErrorMessage) and missing[0].recoverable
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_speak_message_emits_one_started_done_pair_and_splits_long_text():
+    response = "第一段。" + "较长的朗读内容" * 20
+    orchestrator, _, tts = make_orchestrator(replies=[[response]])
+    done = [event async for event in orchestrator.submit_text("问题", False)]
+    turn_id = next(item.turn_id for item in done if item.type == "assistant.done")
+
+    replay = [item async for item in orchestrator.speak_message(turn_id)]
+
+    event_types = [item.type if hasattr(item, "type") else "binary" for item in replay]
+    assert event_types[0] == "tts.started"
+    assert event_types[-1] == "tts.done"
+    assert event_types.count("tts.started") == 1
+    assert event_types.count("tts.done") == 1
+    assert len(tts.calls) >= 2
+    assert all(len(call.text) <= 120 for call in tts.calls)
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_speak_message_echoes_request_id_on_every_tts_event():
+    orchestrator, _, _ = make_orchestrator(replies=[["需要朗读"]])
+    done = [event async for event in orchestrator.submit_text("问题", False)]
+    turn_id = next(item.turn_id for item in done if item.type == "assistant.done")
+
+    replay = [item async for item in orchestrator.speak_message(turn_id, request_id=42)]
+
+    events = [item for item in replay if hasattr(item, "type")]
+    assert {item.request_id for item in events} == {42}
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_speak_message_rejects_text_that_is_empty_after_tts_cleanup():
+    orchestrator, _, _ = make_orchestrator(replies=[["```python\nprint('hidden')\n```"]])
+    done = [event async for event in orchestrator.submit_text("问题", False)]
+    turn_id = next(item.turn_id for item in done if item.type == "assistant.done")
+
+    replay = [item async for item in orchestrator.speak_message(turn_id)]
+
+    assert [item.type for item in replay] == ["tts.error"]
+    assert replay[0].code == "tts_empty"
+    assert replay[0].recoverable is True
     await orchestrator.stop()
 
 
@@ -414,8 +464,10 @@ async def test_replay_tts_strips_emoji_from_completed_assistant_message():
     replay = [item async for item in orchestrator.speak_message(turn_id)]
 
     assert [item.type if hasattr(item, "type") else "binary" for item in replay] == [
+        "tts.started",
         "tts.chunk",
         "binary",
+        "tts.done",
     ]
     assert tts.calls[-1].text == "Great job ! 继续加油。"
     await orchestrator.stop()
@@ -438,13 +490,17 @@ async def test_emoji_only_assistant_response_uses_plain_text_fallback():
     assert orchestrator.history.assistant_text(turn_id) == "我暂时没有生成有效回答，请再试一次。"
     assert [item.type if hasattr(item, "type") else "binary" for item in outputs] == [
         "assistant.delta",
+        "tts.started",
         "tts.chunk",
         "binary",
+        "tts.done",
         "assistant.done",
     ]
     assert [item.type if hasattr(item, "type") else "binary" for item in replay] == [
+        "tts.started",
         "tts.chunk",
         "binary",
+        "tts.done",
     ]
     assert [call.text for call in tts.calls] == [
         "我暂时没有生成有效回答，请再试一次。",
@@ -466,8 +522,10 @@ async def test_speak_message_reports_speaking_phase_while_replay_runs():
 
     assert orchestrator.state.phase is Phase.SPEAKING
     blocking_tts.release.set()
-    assert (await first_output).type == "tts.chunk"
+    assert (await first_output).type == "tts.started"
+    assert (await anext(replay)).type == "tts.chunk"
     assert isinstance(await anext(replay), bytes)
+    assert (await anext(replay)).type == "tts.done"
     with pytest.raises(StopAsyncIteration):
         await anext(replay)
     assert orchestrator.state.phase is Phase.IDLE
@@ -481,15 +539,17 @@ async def test_cancelled_replay_owner_can_be_reused_before_old_generator_resumes
     turn_id = next(item.turn_id for item in done if item.type == "assistant.done")
     old_replay = orchestrator.speak_message(turn_id)
     old_metadata = await anext(old_replay)
-    assert old_metadata.type == "tts.chunk"
+    assert old_metadata.type == "tts.started"
 
     cancelled = await orchestrator.cancel_active()
     new_replay = [item async for item in orchestrator.speak_message(turn_id)]
 
     assert cancelled is not None and cancelled.turn_id == turn_id
     assert [item.type if hasattr(item, "type") else "binary" for item in new_replay] == [
+        "tts.started",
         "tts.chunk",
         "binary",
+        "tts.done",
     ]
     assert [item async for item in old_replay] == []
     await orchestrator.stop()
@@ -664,7 +724,8 @@ async def test_tts_failure_keeps_completed_text_history_and_emits_done():
 
     assert [item.type for item in failed_speech] == [
         "assistant.delta",
-        "error",
+        "tts.started",
+        "tts.error",
         "assistant.done",
     ]
     assert llm.calls[-1].messages[-3:] == [
@@ -1284,8 +1345,10 @@ async def test_commit_audio_finishes_buffered_turn_through_normal_reply_path():
         "vad.stopped",
         "asr.final",
         "assistant.delta",
+        "tts.started",
         "tts.chunk",
         "binary",
+        "tts.done",
         "assistant.done",
     ]
     assert outputs[1].text == "手动停止录音"

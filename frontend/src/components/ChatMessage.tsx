@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+
 import type { ConversationMessage } from "../useVoiceSession";
 import { Icon } from "./Icon";
 
@@ -8,10 +10,49 @@ interface ChatMessageProps {
   onStopSpeaking(turnId: number): void;
 }
 
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Browser permissions can reject the modern API; use the local fallback.
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    return document.execCommand?.("copy") ?? false;
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+  }
+}
+
 export function ChatMessage({ message, speaking, onSpeak, onStopSpeaking }: ChatMessageProps) {
   const isAssistant = message.role === "assistant";
   const side = isAssistant ? "left" : "right";
-  const copy = async () => { await navigator.clipboard?.writeText(message.text); };
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (copyTimer.current !== null) clearTimeout(copyTimer.current);
+  }, []);
+  const copy = async () => {
+    const copied = await copyText(message.text);
+    setCopyState(copied ? "copied" : "failed");
+    if (copyTimer.current !== null) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(
+      () => setCopyState("idle"),
+      copied ? 1500 : 2500,
+    );
+  };
+  const copyLabel = copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败" : "复制";
   return <article className={`message message--${side}`} data-side={side} aria-label={isAssistant ? "声灵消息" : "用户消息"}>
     <div className="message__meta">
       {isAssistant && <span className="message__avatar"><Icon name="spark" size={14} /></span>}
@@ -36,7 +77,7 @@ export function ChatMessage({ message, speaking, onSpeak, onStopSpeaking }: Chat
       </div>
     </details>}
     <div className="message__actions">
-      <button className="message-action" type="button" aria-label="复制" onClick={() => void copy()}><Icon name="copy" size={16} /><span>复制</span></button>
+      <button className="message-action" type="button" aria-label={copyLabel} data-state={copyState} onClick={() => void copy()}><Icon name="copy" size={16} /><span>{copyLabel}</span></button>
       {isAssistant && message.status === "complete" && message.turnId !== undefined && (speaking
         ? <button className="message-action message-action--danger" type="button" aria-label="停止朗读" onClick={() => onStopSpeaking(message.turnId!)}><Icon name="stop" size={14} /><span>停止朗读</span></button>
         : <button className="message-action" type="button" aria-label="朗读" onClick={() => onSpeak(message.turnId!)}><Icon name="volume" size={16} /><span>朗读</span></button>)}

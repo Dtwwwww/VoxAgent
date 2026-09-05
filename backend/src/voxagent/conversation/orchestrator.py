@@ -18,6 +18,9 @@ from voxagent.conversation.events import (
     MemoryProposed,
     ServerMessage,
     TtsChunk,
+    TtsDone,
+    TtsError,
+    TtsStarted,
     TurnCancelled,
     VadStarted,
     VadStopped,
@@ -33,6 +36,7 @@ from voxagent.memory.models import PolicyStatus
 from voxagent.memory.policy import MemoryPolicy
 from voxagent.speech.asr import AsrEngine, PartialAsrEngine
 from voxagent.speech.endpoint import EndpointDecision, EndpointDetector
+from voxagent.speech.text_normalization import normalize_tts_text, split_tts_text, strip_emoji
 from voxagent.speech.tts import PUBLIC_TTS_SPEEDS, TtsEngine
 from voxagent.speech.vad import SAMPLE_RATE, VadDecision, VadDetector
 from voxagent.speech.voice_catalog import VoiceCatalog, VoiceCatalogError
@@ -43,11 +47,6 @@ MAX_UTTERANCE_FRAMES = 6000
 Output = ServerMessage | bytes
 _Owner = tuple[str, int]
 _T = TypeVar("_T")
-_EMOJI_RANGES = (
-    (0x1F000, 0x1FAFF),
-    (0x2600, 0x27BF),
-)
-_EMOJI_COMPONENTS = frozenset({0x200D, 0x20E3, 0xFE0F})
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,7 +390,9 @@ class ConversationOrchestrator:
         self._speed = float(speed)
         return VoiceSelected(type="voice.selected", voice_key=voice_key, speed=float(speed))
 
-    async def speak_message(self, turn_id: int) -> AsyncIterator[Output]:
+    async def speak_message(
+        self, turn_id: int, request_id: int = 0
+    ) -> AsyncIterator[Output]:
         async with self._action_lock:
             if self._is_closed():
                 error = self._stopped_error()
@@ -417,7 +418,8 @@ class ConversationOrchestrator:
                     self._active_has_pending_history = False
                     self.state.phase = Phase.SPEAKING
                     self._active_task = self._task_group.create_task(
-                        self._speech_worker(token, text), name=f"replay-{turn_id}"
+                        self._speech_worker(token, text, request_id),
+                        name=f"replay-{turn_id}-{request_id}",
                     )
         if error is not None or token is None:
             yield error or self._stopped_error()
@@ -536,6 +538,7 @@ class ConversationOrchestrator:
         answer: list[str] = []
         sequence = 0
         tts_failed = False
+        tts_started = False
         try:
             history_messages = self.history.messages_for_model()
             user_text = history_messages[-1].content
@@ -585,7 +588,7 @@ class ConversationOrchestrator:
             async for delta in self.llm.stream_chat(self.model_id, model_messages):
                 if token.cancelled.is_set():
                     return
-                visible_delta = _text_without_emoji(delta)
+                visible_delta = strip_emoji(delta)
                 if not visible_delta.strip():
                     continue
                 answer.append(visible_delta)
@@ -604,8 +607,8 @@ class ConversationOrchestrator:
                 )
                 if speak_response:
                     for sentence in chunker.feed(visible_delta):
-                        sequence, tts_failed = await self._synthesize_reply_sentence(
-                            token, sentence, sequence, tts_failed
+                        sequence, tts_failed, tts_started = await self._synthesize_reply_sentence(
+                            token, sentence, sequence, tts_failed, tts_started
                         )
             if not answer:
                 answer.append(EMPTY_VISIBLE_REPLY)
@@ -624,16 +627,30 @@ class ConversationOrchestrator:
                 )
                 if speak_response:
                     for sentence in chunker.feed(EMPTY_VISIBLE_REPLY):
-                        sequence, tts_failed = await self._synthesize_reply_sentence(
-                            token, sentence, sequence, tts_failed
+                        sequence, tts_failed, tts_started = await self._synthesize_reply_sentence(
+                            token, sentence, sequence, tts_failed, tts_started
                         )
             if speak_response:
                 for sentence in chunker.flush():
-                    sequence, tts_failed = await self._synthesize_reply_sentence(
-                        token, sentence, sequence, tts_failed
+                    sequence, tts_failed, tts_started = await self._synthesize_reply_sentence(
+                        token, sentence, sequence, tts_failed, tts_started
                     )
             if token.cancelled.is_set():
                 return
+            if speak_response and tts_started and not tts_failed:
+                await self._emit(
+                    _OutputBatch(
+                        owner,
+                        (
+                            TtsDone(
+                                type="tts.done",
+                                session_id=token.session_id,
+                                turn_id=token.turn_id,
+                                request_id=0,
+                            ),
+                        ),
+                    )
+                )
             assistant_text = "".join(answer)
             if self.conversation_store is not None:
                 await self.conversation_store.complete_assistant(
@@ -728,57 +745,160 @@ class ConversationOrchestrator:
         text: str,
         sequence: int,
         already_failed: bool,
-    ) -> tuple[int, bool]:
+        already_started: bool,
+    ) -> tuple[int, bool, bool]:
         if already_failed:
-            return sequence, True
+            return sequence, True, already_started
+        speech_text = normalize_tts_text(text)
+        if not speech_text:
+            return sequence, False, already_started
         try:
             self.state.begin_speaking(token)
-            sequence = await self._synthesize_turn(token, text, sequence)
-            return sequence, False
+            if not already_started:
+                await self._emit(
+                    _OutputBatch(
+                        ("turn", token.turn_id),
+                        (
+                            TtsStarted(
+                                type="tts.started",
+                                session_id=token.session_id,
+                                turn_id=token.turn_id,
+                                request_id=0,
+                            ),
+                        ),
+                    )
+                )
+                already_started = True
+            sequence = await self._synthesize_turn(
+                token, speech_text, sequence, request_id=0
+            )
+            return sequence, False, already_started
         except asyncio.CancelledError:
             raise
         except Exception:
             await self._emit(
                 _OutputBatch(
                     ("turn", token.turn_id),
-                    (self._error("tts_failed", "朗读失败，文字回答仍然可用"),),
+                    (
+                        TtsError(
+                            type="tts.error",
+                            session_id=token.session_id,
+                            turn_id=token.turn_id,
+                            request_id=0,
+                            code="tts_failed",
+                            message="朗读失败，文字回答仍然可用",
+                            recoverable=True,
+                        ),
+                    ),
                 )
             )
-            return sequence, True
+            return sequence, True, already_started
 
-    async def _synthesize_turn(self, token: TurnToken, text: str, sequence: int) -> int:
-        speech_text = _text_for_tts(text)
-        if not speech_text:
-            return sequence
-        audio = await self._await_sync(
-            self.tts.synthesize, speech_text, self._voice_key, self._speed
-        )
-        if token.cancelled.is_set():
-            return sequence
-        event = TtsChunk(
-            type="tts.chunk",
-            session_id=token.session_id,
-            turn_id=token.turn_id,
-            sequence=sequence,
-            sample_rate=audio.sample_rate,
-            mime_type="audio/wav",
-            byte_length=len(audio.wav_bytes),
-        )
-        await self._emit(_OutputBatch(("turn", token.turn_id), (event, audio.wav_bytes)))
-        return sequence + 1
+    async def _synthesize_turn(
+        self,
+        token: TurnToken,
+        text: str,
+        sequence: int,
+        *,
+        request_id: int,
+    ) -> int:
+        speech_text = normalize_tts_text(text)
+        for sentence in split_tts_text(speech_text):
+            audio = await self._await_sync(
+                self.tts.synthesize, sentence, self._voice_key, self._speed
+            )
+            if token.cancelled.is_set():
+                return sequence
+            event = TtsChunk(
+                type="tts.chunk",
+                session_id=token.session_id,
+                turn_id=token.turn_id,
+                request_id=request_id,
+                sequence=sequence,
+                sample_rate=audio.sample_rate,
+                mime_type="audio/wav",
+                byte_length=len(audio.wav_bytes),
+            )
+            await self._emit(
+                _OutputBatch(("turn", token.turn_id), (event, audio.wav_bytes))
+            )
+            sequence += 1
+        return sequence
 
-    async def _speech_worker(self, token: TurnToken, text: str) -> None:
+    async def _speech_worker(
+        self, token: TurnToken, text: str, request_id: int
+    ) -> None:
         owner = ("turn", token.turn_id)
         try:
-            await self._synthesize_turn(token, text, 0)
-            await self._emit(_OutputBatch(owner, (), terminal=True))
+            speech_text = normalize_tts_text(text)
+            if not split_tts_text(speech_text):
+                await self._emit(
+                    _OutputBatch(
+                        owner,
+                        (
+                            TtsError(
+                                type="tts.error",
+                                session_id=token.session_id,
+                                turn_id=token.turn_id,
+                                request_id=request_id,
+                                code="tts_empty",
+                                message="这条回答没有可朗读的文字",
+                                recoverable=True,
+                            ),
+                        ),
+                        terminal=True,
+                    )
+                )
+                return
+            await self._emit(
+                _OutputBatch(
+                    owner,
+                    (
+                        TtsStarted(
+                            type="tts.started",
+                            session_id=token.session_id,
+                            turn_id=token.turn_id,
+                            request_id=request_id,
+                        ),
+                    ),
+                )
+            )
+            await self._synthesize_turn(
+                token, speech_text, 0, request_id=request_id
+            )
+            if token.cancelled.is_set():
+                return
+            await self._emit(
+                _OutputBatch(
+                    owner,
+                    (
+                        TtsDone(
+                            type="tts.done",
+                            session_id=token.session_id,
+                            turn_id=token.turn_id,
+                            request_id=request_id,
+                        ),
+                    ),
+                    terminal=True,
+                )
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             await self._emit(
                 _OutputBatch(
                     owner,
-                    (self._error("tts_failed", "朗读失败，文字回答仍然可用"),),
+                    (
+                        TtsError(
+                            type="tts.error",
+                            session_id=token.session_id,
+                            turn_id=token.turn_id,
+                            request_id=request_id,
+                            code="tts_failed",
+                            message="朗读失败，文字回答仍然可用",
+                            recoverable=True,
+                        ),
+                    ),
                     terminal=True,
                 )
             )
@@ -1106,31 +1226,3 @@ class ConversationOrchestrator:
     @staticmethod
     def _stopped_error() -> ErrorMessage:
         return ConversationOrchestrator._error("session_stopped", "会话已经结束")
-
-
-def _text_without_emoji(text: str) -> str:
-    """Remove emoji presentation characters while preserving ordinary spacing."""
-    cleaned: list[str] = []
-    index = 0
-    while index < len(text):
-        character = text[index]
-        if character in "0123456789#*":
-            keycap_end = index + 1
-            if keycap_end < len(text) and text[keycap_end] == "\ufe0f":
-                keycap_end += 1
-            if keycap_end < len(text) and text[keycap_end] == "\u20e3":
-                index = keycap_end + 1
-                continue
-        code_point = ord(character)
-        if code_point in _EMOJI_COMPONENTS or any(
-            start <= code_point <= end for start, end in _EMOJI_RANGES
-        ):
-            index += 1
-            continue
-        cleaned.append(character)
-        index += 1
-    return "".join(cleaned)
-
-
-def _text_for_tts(text: str) -> str:
-    return _text_without_emoji(text).strip()

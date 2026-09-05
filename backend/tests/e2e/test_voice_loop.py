@@ -202,12 +202,14 @@ def test_real_socket_keeps_text_and_voice_in_one_history_and_hides_native_voice_
         "vad.stopped",
         "asr.final",
         "assistant.delta",
+        "tts.started",
         "tts.chunk",
+        "tts.done",
         "assistant.done",
     ]
     assert voice_events[1]["text"] == "语音问题"
     assert len(voice_audio) == 1
-    assert voice_events[3]["byte_length"] == len(voice_audio[0])
+    assert voice_events[4]["byte_length"] == len(voice_audio[0])
     assert llm.calls[1].messages[-3:] == (
         ("user", "文字问题"),
         ("assistant", "文字回答。"),
@@ -241,16 +243,19 @@ def test_text_barge_in_cancels_a_turn_blocked_in_tts_without_stale_audio():
                 )
                 replacement_events, replacement_audio = receive_turn(socket)
 
-                assert replacement_events[0]["type"] == "turn.cancelled"
-                assert replacement_events[0]["turn_id"] == old_delta["turn_id"]
-                assert [event["type"] for event in replacement_events[1:]] == [
+                assert [event["type"] for event in replacement_events[:2]] == [
+                    "tts.started",
+                    "turn.cancelled",
+                ]
+                assert replacement_events[1]["turn_id"] == old_delta["turn_id"]
+                assert [event["type"] for event in replacement_events[2:]] == [
                     "assistant.delta",
                     "assistant.done",
                 ]
                 assert replacement_audio == []
                 assert all(
                     event.get("turn_id") != old_delta["turn_id"]
-                    or event["type"] == "turn.cancelled"
+                    or event["type"] in {"tts.started", "turn.cancelled"}
                     for event in replacement_events
                 )
     finally:

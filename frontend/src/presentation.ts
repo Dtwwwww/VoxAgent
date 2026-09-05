@@ -21,7 +21,8 @@ export function voiceStatusPresentation(status: VoiceStatus) {
     listening: { icon: "wave", label: "正在聆听，点击停止" },
     transcribing: { icon: "spinner", label: "正在识别你的语音" },
     thinking: { icon: "thinking", label: "声灵正在思考" },
-    speaking: { icon: "wave", label: "正在回复" },
+    preparing: { icon: "spinner", label: "正在生成朗读…" },
+    speaking: { icon: "wave", label: "正在朗读" },
   } as const;
   return status === "idle" ? null : values[status];
 }

@@ -42,6 +42,7 @@ class TextSubmit(ClientMessage):
 class AssistantSpeak(ClientMessage):
     type: Literal["assistant.speak"]
     turn_id: StrictInt
+    request_id: StrictInt = Field(default=0, ge=0)
 
 
 class VoiceSelect(ClientMessage):
@@ -203,10 +204,29 @@ class MemoryProposed(TurnServerMessage):
 
 class TtsChunk(TurnServerMessage):
     type: Literal["tts.chunk"]
+    request_id: StrictInt = Field(default=0, ge=0)
     sequence: StrictInt = Field(ge=0)
     sample_rate: StrictInt = Field(gt=0)
     mime_type: Literal["audio/wav"]
     byte_length: StrictInt = Field(gt=0)
+
+
+class TtsStarted(TurnServerMessage):
+    type: Literal["tts.started"]
+    request_id: StrictInt = Field(default=0, ge=0)
+
+
+class TtsDone(TurnServerMessage):
+    type: Literal["tts.done"]
+    request_id: StrictInt = Field(default=0, ge=0)
+
+
+class TtsError(TurnServerMessage):
+    type: Literal["tts.error"]
+    request_id: StrictInt = Field(default=0, ge=0)
+    code: Literal["tts_failed", "tts_empty"]
+    message: str
+    recoverable: bool
 
 
 class TurnCancelled(TurnServerMessage):
@@ -233,6 +253,9 @@ type ServerEvent = Annotated[
     | ContextSources
     | MemoryProposed
     | TtsChunk
+    | TtsStarted
+    | TtsDone
+    | TtsError
     | TurnCancelled
     | ErrorMessage,
     Field(discriminator="type"),

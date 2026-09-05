@@ -57,8 +57,8 @@ class FakeOrchestrator:
             type="error", code="submitted_text", message="test", recoverable=True
         )
 
-    async def speak_message(self, turn_id: int):
-        self.calls.append(("speak_message", turn_id))
+    async def speak_message(self, turn_id: int, request_id: int = 0):
+        self.calls.append(("speak_message", turn_id, request_id))
         yield ErrorMessage(
             type="error", code="spoke_message", message="test", recoverable=True
         )
@@ -348,7 +348,7 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
     payloads = (
         {"type": "session.start"},
         {"type": "text.submit", "text": "  你好  ", "speak_response": True},
-        {"type": "assistant.speak", "turn_id": 3},
+        {"type": "assistant.speak", "turn_id": 3, "request_id": 9},
         {"type": "voice.select", "voice_key": "clear_female", "speed": 1.2},
         {"type": "voice.preview", "voice_key": "clear_female", "speed": 0.8},
         {"type": "turn.cancel"},
@@ -369,7 +369,7 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
     assert should_stop is True
     assert orchestrator.calls == [
         ("submit_text", "你好", True),
-        ("speak_message", 3),
+        ("speak_message", 3, 9),
         ("select_voice", "clear_female", 1.2),
         ("preview_voice", "clear_female", 0.8),
         ("cancel_active",),

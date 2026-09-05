@@ -3,7 +3,7 @@ export type VoiceSpeed = 0.8 | 1.0 | 1.2;
 export type ClientEvent =
   | { type: "session.start" }
   | { type: "text.submit"; text: string; speak_response?: boolean }
-  | { type: "assistant.speak"; turn_id: number }
+  | { type: "assistant.speak"; turn_id: number; request_id?: number }
   | { type: "voice.select"; voice_key: string; speed: VoiceSpeed }
   | { type: "voice.preview"; voice_key: string; speed: VoiceSpeed }
   | { type: "turn.cancel" }
@@ -51,6 +51,8 @@ export type ServerEvent =
   | { type: "voices.available"; voices: VoiceInfo[] }
   | { type: "voice.selected"; voice_key: string; speed: VoiceSpeed }
   | { type: "voice.preview.chunk"; preview_id: number; sample_rate: number; mime_type: "audio/wav"; byte_length: number }
+  | ({ type: "tts.started"; request_id: number } & TurnFields)
+  | ({ type: "tts.done"; request_id: number } & TurnFields)
   | ({ type: "vad.started" } & TurnFields)
   | ({ type: "vad.stopped" } & TurnFields)
   | ({ type: "asr.final"; text: string } & TurnFields)
@@ -66,7 +68,8 @@ export type ServerEvent =
       importance: number;
       requires_confirmation: boolean;
     } & TurnFields)
-  | ({ type: "tts.chunk"; sequence: number; sample_rate: number; mime_type: "audio/wav"; byte_length: number } & TurnFields)
+  | ({ type: "tts.chunk"; request_id: number; sequence: number; sample_rate: number; mime_type: "audio/wav"; byte_length: number } & TurnFields)
+  | ({ type: "tts.error"; request_id: number; code: "tts_failed" | "tts_empty"; message: string; recoverable: boolean } & TurnFields)
   | ({ type: "turn.cancelled" } & TurnFields)
   | { type: "error"; code: string; message: string; recoverable: boolean };
 
@@ -123,8 +126,8 @@ function uuid(value: unknown): string {
   return candidate;
 }
 
-function turnObject(value: unknown, extra: readonly string[] = []): JsonObject {
-  const object = objectWithExactKeys(value, ["type", "session_id", "turn_id", ...extra]);
+function turnObject(value: unknown, extra: readonly string[] = [], optional: readonly string[] = []): JsonObject {
+  const object = objectWithExactKeys(value, ["type", "session_id", "turn_id", ...extra], optional);
   uuid(object.session_id);
   integer(object.turn_id, "turn_id");
   return object;
@@ -151,8 +154,11 @@ export function parseClientEvent(value: unknown): ClientEvent {
         : { type, text, speak_response: object.speak_response as boolean };
     }
     case "assistant.speak": {
-      const object = objectWithExactKeys(value, ["type", "turn_id"]);
-      return { type, turn_id: integer(object.turn_id, "turn_id") };
+      const object = objectWithExactKeys(value, ["type", "turn_id"], ["request_id"]);
+      const turnId = integer(object.turn_id, "turn_id");
+      return object.request_id === undefined
+        ? { type, turn_id: turnId }
+        : { type, turn_id: turnId, request_id: integer(object.request_id, "request_id", 0) };
     }
     case "voice.select":
     case "voice.preview": {
@@ -164,7 +170,7 @@ export function parseClientEvent(value: unknown): ClientEvent {
   }
 }
 
-const STRICT_INTEGER_TOKEN = /("(?:id|turn_id|source_turn_id|source_message_id|document_id|chunk_id|page_number|proposal_index|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
+const STRICT_INTEGER_TOKEN = /("(?:id|turn_id|request_id|source_turn_id|source_message_id|document_id|chunk_id|page_number|proposal_index|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
 
 function parseProtocolJson(raw: string): unknown {
   if (typeof raw !== "string") throw new TypeError("event JSON must be a string");
@@ -219,6 +225,16 @@ export function parseServerEvent(value: unknown): ServerEvent {
     case "turn.cancelled": {
       const object = turnObject(value);
       return { type, session_id: object.session_id as string, turn_id: object.turn_id as number };
+    }
+    case "tts.started":
+    case "tts.done": {
+      const object = turnObject(value, [], ["request_id"]);
+      return {
+        type,
+        session_id: object.session_id as string,
+        turn_id: object.turn_id as number,
+        request_id: object.request_id === undefined ? 0 : integer(object.request_id, "request_id", 0),
+      };
     }
     case "asr.final": {
       const object = turnObject(value, ["text"]);
@@ -278,16 +294,31 @@ export function parseServerEvent(value: unknown): ServerEvent {
       };
     }
     case "tts.chunk": {
-      const object = turnObject(value, ["sequence", "sample_rate", "mime_type", "byte_length"]);
+      const object = turnObject(value, ["sequence", "sample_rate", "mime_type", "byte_length"], ["request_id"]);
       if (object.mime_type !== "audio/wav") throw new TypeError("TTS payload must be WAV");
       return {
         type,
         session_id: object.session_id as string,
         turn_id: object.turn_id as number,
+        request_id: object.request_id === undefined ? 0 : integer(object.request_id, "request_id", 0),
         sequence: integer(object.sequence, "sequence", 0),
         sample_rate: positiveInteger(object.sample_rate, "sample_rate"),
         mime_type: "audio/wav",
         byte_length: positiveInteger(object.byte_length, "byte_length"),
+      };
+    }
+    case "tts.error": {
+      const object = turnObject(value, ["code", "message", "recoverable"], ["request_id"]);
+      const code = string(object.code, "code");
+      if (code !== "tts_failed" && code !== "tts_empty") throw new TypeError("unknown TTS error code");
+      return {
+        type,
+        session_id: object.session_id as string,
+        turn_id: object.turn_id as number,
+        request_id: object.request_id === undefined ? 0 : integer(object.request_id, "request_id", 0),
+        code,
+        message: string(object.message, "message"),
+        recoverable: bool(object.recoverable, "recoverable"),
       };
     }
     case "error": {
