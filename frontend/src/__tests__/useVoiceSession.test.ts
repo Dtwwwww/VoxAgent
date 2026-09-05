@@ -28,6 +28,18 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+function microphoneStream(stop = vi.fn()): MediaStream {
+  const track = {
+    readyState: "live",
+    getSettings: () => ({}),
+    stop,
+  } as unknown as MediaStreamTrack;
+  return {
+    getAudioTracks: () => [track],
+    getTracks: () => [track],
+  } as unknown as MediaStream;
+}
+
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
   static readonly CONNECTING = 0;
@@ -188,7 +200,16 @@ beforeEach(() => {
   vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:worklet"), revokeObjectURL: vi.fn() });
   Object.defineProperty(globalThis.navigator, "mediaDevices", {
     configurable: true,
-    value: { getUserMedia: vi.fn() },
+    value: {
+      getUserMedia: vi.fn(),
+      getSupportedConstraints: () => ({
+        deviceId: true,
+        channelCount: true,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      }),
+    },
   });
   localStorage.clear();
 });
@@ -263,6 +284,63 @@ describe("PCM microphone framing", () => {
 
     expect(chunked).toHaveLength(1);
     expect(new Int16Array(chunked[0])).toEqual(new Int16Array(contiguous[0]));
+  });
+
+  it("uses one selected track for diagnostics, levels, and optional PCM forwarding", async () => {
+    const stop = vi.fn();
+    const settings = { deviceId: "realtek", channelCount: 1 } as MediaTrackSettings;
+    const track = { getSettings: vi.fn(() => settings), stop } as unknown as MediaStreamTrack;
+    const stream = {
+      getAudioTracks: () => [track],
+      getTracks: () => [track],
+    } as unknown as MediaStream;
+    const onFrame = vi.fn();
+    const onLevel = vi.fn();
+    const onSettings = vi.fn();
+    Object.assign(navigator.mediaDevices, {
+      getSupportedConstraints: () => ({
+        deviceId: true,
+        channelCount: true,
+        echoCancellation: true,
+        autoGainControl: true,
+      }),
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(stream);
+    const capture = new MicrophoneCapture({
+      deviceId: "realtek",
+      forwardPcm: false,
+      onFrame,
+      onLevel,
+      onSettings,
+    });
+
+    await expect(capture.start()).resolves.toBe(track);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({
+      audio: {
+        deviceId: { exact: "realtek" },
+        channelCount: 1,
+        echoCancellation: true,
+        autoGainControl: true,
+      },
+    });
+    expect(onSettings).toHaveBeenCalledWith(settings);
+
+    const worklet = (capture as unknown as { worklet: MockAudioWorkletNode }).worklet;
+    worklet.port.onmessage?.(new MessageEvent("message", { data: new Float32Array(960).fill(0.5) }));
+    expect(onLevel).toHaveBeenLastCalledWith(0.5);
+    expect(onFrame).not.toHaveBeenCalled();
+
+    capture.setForwardPcm(true);
+    worklet.port.onmessage?.(new MessageEvent("message", { data: new Float32Array(960).fill(0.5) }));
+    expect(onFrame).toHaveBeenCalledOnce();
+    expect(onFrame.mock.calls[0][0].byteLength).toBe(640);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce();
+
+    capture.setForwardPcm(false);
+    worklet.port.onmessage?.(new MessageEvent("message", { data: new Float32Array(960).fill(0.5) }));
+    expect(onFrame).toHaveBeenCalledOnce();
+    await capture.stop();
+    expect(stop).toHaveBeenCalledOnce();
   });
 });
 
@@ -487,9 +565,7 @@ describe("useVoiceSession", () => {
 
   it("commits audio and closes microphone tracks without closing the socket", async () => {
     const stop = vi.fn();
-    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValueOnce({
-      getTracks: () => [{ stop }],
-    } as unknown as MediaStream);
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValueOnce(microphoneStream(stop));
     const { hook, socket } = openSession();
 
     await act(async () => hook.result.current.startMicrophone());
@@ -526,7 +602,7 @@ describe("useVoiceSession", () => {
     });
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce();
     await act(async () => hook.result.current.disconnect());
-    resolveMedia({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    resolveMedia(microphoneStream(stop));
     await act(async () => Promise.all([first, second]));
 
     expect(stop).toHaveBeenCalledOnce();
@@ -541,7 +617,7 @@ describe("useVoiceSession", () => {
     let pending!: Promise<void>;
     act(() => { pending = hook.result.current.startMicrophone(); });
     hook.unmount();
-    resolveMedia({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    resolveMedia(microphoneStream(stop));
     await pending;
     expect(stop).toHaveBeenCalledOnce();
   });
@@ -549,8 +625,14 @@ describe("useVoiceSession", () => {
   it("cleans a local audio context and worklet URL when microphone setup fails", async () => {
     const stop = vi.fn();
     MockAudioContext.workletFailure = new Error("worklet failed");
-    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({ getTracks: () => [{ stop }] } as unknown as MediaStream);
-    const capture = new MicrophoneCapture(vi.fn());
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream(stop));
+    const capture = new MicrophoneCapture({
+      deviceId: null,
+      forwardPcm: true,
+      onFrame: vi.fn(),
+      onLevel: vi.fn(),
+      onSettings: vi.fn(),
+    });
 
     await expect(capture.start()).rejects.toThrow("worklet failed");
 
@@ -565,8 +647,8 @@ describe("useVoiceSession", () => {
     const oldStop = vi.fn();
     const newStop = vi.fn();
     vi.mocked(navigator.mediaDevices.getUserMedia)
-      .mockResolvedValueOnce({ getTracks: () => [{ stop: oldStop }] } as unknown as MediaStream)
-      .mockResolvedValueOnce({ getTracks: () => [{ stop: newStop }] } as unknown as MediaStream);
+      .mockResolvedValueOnce(microphoneStream(oldStop))
+      .mockResolvedValueOnce(microphoneStream(newStop));
     const { hook } = openSession();
     let oldStart!: Promise<void>;
     act(() => { oldStart = hook.result.current.startMicrophone(); });
@@ -595,7 +677,7 @@ describe("useVoiceSession", () => {
     const resumeGate = deferred();
     MockAudioContext.resumeGates = [resumeGate.promise];
     const stop = vi.fn();
-    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream(stop));
     const hook = renderHook(() => useVoiceSession({ url: "ws://localhost/v1/voice" }));
     let pending!: Promise<void>;
     act(() => { pending = hook.result.current.startMicrophone(); });
@@ -1030,7 +1112,7 @@ describe("useVoiceSession", () => {
 
   it("tears down microphone and playback on an unexpected socket close", async () => {
     const stop = vi.fn();
-    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream(stop));
     const { hook, socket } = openSession();
     await act(async () => hook.result.current.startMicrophone());
     const wav = wavBytes();
@@ -1048,7 +1130,7 @@ describe("useVoiceSession", () => {
   it("does not let delayed old-socket cleanup clear an immediately reconnected draft", async () => {
     const oldClose = deferred();
     MockAudioContext.closeGates = [oldClose.promise];
-    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream);
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
     const { hook, socket: oldSocket } = openSession();
     await act(async () => hook.result.current.startMicrophone());
 
@@ -1083,7 +1165,7 @@ describe("useVoiceSession", () => {
 
   it("persists only public voice settings and disconnects every local resource", async () => {
     const stop = vi.fn();
-    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValueOnce({ getTracks: () => [{ stop }] } as unknown as MediaStream);
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValueOnce(microphoneStream(stop));
     const { hook, socket } = openSession();
     await act(async () => hook.result.current.startMicrophone());
     act(() => hook.result.current.selectVoice("clear_female", 0.8));

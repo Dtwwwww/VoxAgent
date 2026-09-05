@@ -539,9 +539,15 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     const lifecycle = captureLifecycleRef.current;
     const abort = new AbortController();
     captureAbortRef.current = abort;
-    const capture = new MicrophoneCapture((frame) => {
-      const socket = socketRef.current;
-      if (socket?.readyState === WebSocket.OPEN) socket.send(frame);
+    const capture = new MicrophoneCapture({
+      deviceId: null,
+      forwardPcm: true,
+      onFrame(frame) {
+        const socket = socketRef.current;
+        if (socket?.readyState === WebSocket.OPEN) socket.send(frame);
+      },
+      onLevel() {},
+      onSettings() {},
     });
     let operation!: Promise<void>;
     operation = (async () => {

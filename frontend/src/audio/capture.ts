@@ -1,3 +1,5 @@
+import { microphoneConstraints } from "./devices";
+
 const TARGET_SAMPLE_RATE = 16_000;
 const FRAME_SAMPLES = 320;
 
@@ -81,26 +83,30 @@ registerProcessor("voxagent-capture", VoxAgentCaptureProcessor);
 `;
 
 export class MicrophoneCapture {
+  private forwardPcm: boolean;
   private context: AudioContext | null = null;
   private stream: MediaStream | null = null;
+  private track: MediaStreamTrack | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private worklet: AudioWorkletNode | null = null;
   private sink: GainNode | null = null;
   private workletUrl: string | null = null;
 
-  constructor(private readonly onFrame: (frame: ArrayBuffer) => void) {}
+  constructor(private readonly options: MicrophoneCaptureOptions) {
+    this.forwardPcm = options.forwardPcm;
+  }
 
-  async start(signal?: AbortSignal): Promise<void> {
-    if (this.stream) return;
-    const media = navigator.mediaDevices.getUserMedia({
-      audio: {
-        sampleRate: 16000,
-        channelCount: 1,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: true,
-      },
-    });
+  async start(signal?: AbortSignal): Promise<MediaStreamTrack> {
+    if (this.track) return this.track;
+    const supported = navigator.mediaDevices.getSupportedConstraints();
+    const requested = microphoneConstraints(this.options.deviceId).audio as MediaTrackConstraints;
+    const audio: MediaTrackConstraints = {};
+    if (this.options.deviceId) audio.deviceId = requested.deviceId;
+    if (supported.channelCount) audio.channelCount = 1;
+    if (supported.echoCancellation) audio.echoCancellation = true;
+    if (supported.noiseSuppression) audio.noiseSuppression = true;
+    if (supported.autoGainControl) audio.autoGainControl = true;
+    const media = navigator.mediaDevices.getUserMedia({ audio });
     if (signal) void media.then((lateStream) => {
       if (signal.aborted) lateStream.getTracks().forEach((track) => track.stop());
     }, () => undefined);
@@ -111,25 +117,37 @@ export class MicrophoneCapture {
     let sink: GainNode | null = null;
     let url: string | null = null;
     try {
+      const track = stream.getAudioTracks()[0];
+      if (!track || track.readyState === "ended") throw new Error("No live microphone audio track available");
+      this.options.onSettings(track.getSettings());
       context = new AudioContext();
-      const packetizer = new PcmFramePacketizer(context.sampleRate, this.onFrame);
+      const packetizer = new PcmFramePacketizer(context.sampleRate, this.options.onFrame);
       url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "text/javascript" }));
       await abortable(context.audioWorklet.addModule(url), signal);
       source = context.createMediaStreamSource(stream);
       worklet = new AudioWorkletNode(context, "voxagent-capture", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
       sink = context.createGain();
       sink.gain.value = 0;
-      worklet.port.onmessage = (event: MessageEvent<Float32Array>) => packetizer.push(event.data);
+      worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
+        const samples = event.data;
+        const rms = samples.length === 0
+          ? 0
+          : Math.sqrt(samples.reduce((total, sample) => total + sample * sample, 0) / samples.length);
+        this.options.onLevel(Math.max(0, Math.min(1, rms)));
+        if (this.forwardPcm) packetizer.push(samples);
+      };
       source.connect(worklet);
       worklet.connect(sink);
       sink.connect(context.destination);
       await abortable(context.resume(), signal);
       this.stream = stream;
+      this.track = track;
       this.context = context;
       this.source = source;
       this.worklet = worklet;
       this.sink = sink;
       this.workletUrl = url;
+      return track;
     } catch (error) {
       stream.getTracks().forEach((track) => track.stop());
       source?.disconnect();
@@ -141,6 +159,10 @@ export class MicrophoneCapture {
     }
   }
 
+  setForwardPcm(enabled: boolean): void {
+    this.forwardPcm = enabled;
+  }
+
   async stop(): Promise<void> {
     this.stream?.getTracks().forEach((track) => track.stop());
     this.source?.disconnect();
@@ -149,10 +171,19 @@ export class MicrophoneCapture {
     if (this.context) await this.context.close();
     if (this.workletUrl) URL.revokeObjectURL(this.workletUrl);
     this.stream = null;
+    this.track = null;
     this.context = null;
     this.source = null;
     this.worklet = null;
     this.sink = null;
     this.workletUrl = null;
   }
+}
+
+export interface MicrophoneCaptureOptions {
+  deviceId: string | null;
+  forwardPcm: boolean;
+  onFrame(frame: ArrayBuffer): void;
+  onLevel(level: number): void;
+  onSettings(settings: MediaTrackSettings): void;
 }
