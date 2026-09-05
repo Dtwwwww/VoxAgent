@@ -1,0 +1,180 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { BrowserSpeechProvider } from "./webSpeech";
+
+type FakeRecognitionResult = {
+  0: { transcript: string };
+  isFinal: boolean;
+  length: 1;
+};
+
+type RecognitionHandler = ((event: { resultIndex: number; results: { 0: FakeRecognitionResult; length: 1 } }) => void) | null;
+
+class FakeRecognition {
+  lang = "";
+  continuous = false;
+  interimResults = false;
+  maxAlternatives = 0;
+  onresult: RecognitionHandler = null;
+  onspeechstart: (() => void) | null = null;
+  onspeechend: (() => void) | null = null;
+  onend: (() => void) | null = null;
+  onerror: ((event: { error: string; message?: string }) => void) | null = null;
+  readonly start = vi.fn<(track?: MediaStreamTrack) => void>();
+  readonly stop = vi.fn();
+
+  emitInterim(text: string): void {
+    this.onresult?.({ resultIndex: 0, results: { 0: { 0: { transcript: text }, isFinal: false, length: 1 }, length: 1 } });
+  }
+
+  emitFinal(text: string): void {
+    this.onresult?.({ resultIndex: 0, results: { 0: { 0: { transcript: text }, isFinal: true, length: 1 }, length: 1 } });
+  }
+}
+
+function callbacks() {
+  return {
+    onInterim: vi.fn(),
+    onFinal: vi.fn(),
+    onSpeechStart: vi.fn(),
+    onSpeechEnd: vi.fn(),
+    onRecognitionEnd: vi.fn(),
+    onError: vi.fn(),
+  };
+}
+
+class FakeUtterance {
+  lang = "";
+  rate = 1;
+  voice: SpeechSynthesisVoice | null = null;
+  onend: (() => void) | null = null;
+  onerror: ((event: SpeechSynthesisErrorEvent) => void) | null = null;
+
+  constructor(public readonly text: string) {}
+}
+
+function fakeWindow(recognition: FakeRecognition, voices: SpeechSynthesisVoice[] = []) {
+  const utterances: FakeUtterance[] = [];
+  const synthesis = {
+    getVoices: () => voices,
+    speak: vi.fn(),
+    cancel: vi.fn(),
+  };
+  const scope = {
+    SpeechRecognition: class { constructor() { return recognition; } },
+    speechSynthesis: synthesis,
+    SpeechSynthesisUtterance: class {
+      constructor(text: string) {
+        const utterance = new FakeUtterance(text);
+        utterances.push(utterance);
+        return utterance;
+      }
+    },
+  } as unknown as Window;
+  return { scope, synthesis, utterances };
+}
+
+describe("BrowserSpeechProvider", () => {
+  it("starts recognition with the selected track and forwards interim and final text", async () => {
+    const recognition = new FakeRecognition();
+    const { scope } = fakeWindow(recognition);
+    const provider = new BrowserSpeechProvider(scope);
+    const selectedTrack = {} as MediaStreamTrack;
+    const handlers = callbacks();
+
+    expect(BrowserSpeechProvider.isSupported(scope)).toBe(true);
+    await provider.start(selectedTrack, handlers, false);
+    expect(recognition.start).toHaveBeenCalledWith(selectedTrack);
+
+    recognition.emitInterim("今天天气");
+    expect(handlers.onInterim).toHaveBeenCalledWith("今天天气");
+    recognition.emitFinal("今天天气怎么样");
+    expect(handlers.onFinal).toHaveBeenCalledWith("今天天气怎么样");
+  });
+
+  it("does not use an unknown default microphone after a selected-track TypeError", async () => {
+    const recognition = new FakeRecognition();
+    recognition.start.mockImplementation(() => { throw new TypeError("track unsupported"); });
+    const provider = new BrowserSpeechProvider(fakeWindow(recognition).scope);
+    const handlers = callbacks();
+
+    await provider.start({} as MediaStreamTrack, handlers, false);
+
+    expect(recognition.start).toHaveBeenCalledTimes(1);
+    expect(handlers.onError).toHaveBeenCalledWith({ code: "track_not_supported", recoverable: true });
+  });
+
+  it("uses exactly one parameterless fallback only when the selected input matches the browser default", async () => {
+    const recognition = new FakeRecognition();
+    recognition.start.mockImplementationOnce(() => { throw new TypeError("track unsupported"); });
+    const provider = new BrowserSpeechProvider(fakeWindow(recognition).scope);
+
+    await provider.start({} as MediaStreamTrack, callbacks(), true);
+
+    expect(recognition.start).toHaveBeenNthCalledWith(1, expect.anything());
+    expect(recognition.start).toHaveBeenNthCalledWith(2);
+    expect(recognition.start).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports selected-track support failure for every unsuccessful recognition start", async () => {
+    const nonTypeErrorRecognition = new FakeRecognition();
+    nonTypeErrorRecognition.start.mockImplementation(() => { throw new Error("start failed"); });
+    const nonTypeErrorCallbacks = callbacks();
+
+    await new BrowserSpeechProvider(fakeWindow(nonTypeErrorRecognition).scope).start({} as MediaStreamTrack, nonTypeErrorCallbacks, false);
+    expect(nonTypeErrorCallbacks.onError).toHaveBeenCalledWith({ code: "track_not_supported", recoverable: true });
+
+    const fallbackRecognition = new FakeRecognition();
+    fallbackRecognition.start.mockImplementationOnce(() => { throw new TypeError("track unsupported"); });
+    fallbackRecognition.start.mockImplementationOnce(() => { throw new Error("fallback failed"); });
+    const fallbackCallbacks = callbacks();
+
+    await new BrowserSpeechProvider(fakeWindow(fallbackRecognition).scope).start({} as MediaStreamTrack, fallbackCallbacks, true);
+    expect(fallbackCallbacks.onError).toHaveBeenCalledWith({ code: "track_not_supported", recoverable: true });
+  });
+
+  it("exposes only Chinese voices", async () => {
+    const recognition = new FakeRecognition();
+    const voices = [
+      { voiceURI: "zh-cn", name: "Microsoft Xiaoxiao", lang: "zh-CN", localService: true },
+      { voiceURI: "zh-tw", name: "Traditional", lang: "zh-TW", localService: false },
+      { voiceURI: "en", name: "English", lang: "en-US", localService: true },
+    ] as SpeechSynthesisVoice[];
+    const { scope, synthesis, utterances } = fakeWindow(recognition, voices);
+    const provider = new BrowserSpeechProvider(scope);
+
+    expect(provider.voices().map((voice) => voice.lang)).toEqual(["zh-CN", "zh-TW"]);
+
+    const spoken = provider.speak("你好", "zh-tw", 1.2);
+    expect(synthesis.speak).toHaveBeenCalledWith(utterances[0]);
+    expect(utterances[0]).toMatchObject({ text: "你好", lang: "zh-CN", rate: 1.2, voice: voices[1] });
+    utterances[0].onend?.();
+    await expect(spoken).resolves.toBeUndefined();
+  });
+
+  it("keeps speech-end and natural recognition-end callbacks distinct", async () => {
+    const recognition = new FakeRecognition();
+    const provider = new BrowserSpeechProvider(fakeWindow(recognition).scope);
+    const handlers = callbacks();
+
+    await provider.start({} as MediaStreamTrack, handlers, false);
+    expect(recognition).toMatchObject({ lang: "zh-CN", continuous: true, interimResults: true, maxAlternatives: 1 });
+    recognition.onspeechend?.();
+    recognition.onend?.();
+
+    expect(handlers.onSpeechEnd).toHaveBeenCalledTimes(1);
+    expect(handlers.onRecognitionEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a cancelled utterance and ignores its later completion callback", async () => {
+    const recognition = new FakeRecognition();
+    const { scope, utterances } = fakeWindow(recognition);
+    const provider = new BrowserSpeechProvider(scope);
+    const speaking = provider.speak("会被取消", null, 1);
+
+    provider.cancelSpeech();
+    utterances[0].onend?.();
+
+    await expect(speaking).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
