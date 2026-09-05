@@ -550,6 +550,7 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
             self.closed = True
 
     fake_http = FakeHttp()
+    tts_calls: list[dict[str, object]] = []
     monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(cli, "resolve_data_root", lambda _: tmp_path)
     monkeypatch.setattr(cli, "load_production_catalog", lambda: object())
@@ -607,6 +608,18 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
         )(),
     )
     monkeypatch.setattr(cli.httpx, "AsyncClient", lambda **_: fake_http)
+    monkeypatch.setattr(
+        cli.SherpaOfflineTts,
+        "from_model_dir",
+        lambda _path, _voice_id, *, engine, catalog: (
+            tts_calls.append({"engine": engine, "catalog": catalog}) or object()
+        ),
+    )
+    monkeypatch.setattr(cli.SenseVoiceAsr, "from_model_dir", lambda _: object())
+    monkeypatch.setattr(cli, "SenseVoiceCandidatePauseAsr", lambda asr: asr)
+    monkeypatch.setattr(cli.VadDetector, "from_model_path", lambda _: object())
+    monkeypatch.setattr(cli, "EndpointDetector", lambda _: object())
+    monkeypatch.setattr(cli, "ConversationOrchestrator", lambda **_: object())
 
     application = type("Application", (), {"state": type("State", (), {})()})()
 
@@ -627,6 +640,8 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
     assert captured["data_service"] is data_service
     assert captured["token"] == SESSION_TOKEN
     assert len({id(gate) for gate in gates[:4]}) == 1
+    captured["factory"]()
+    assert [call["engine"] for call in tts_calls] == ["kokoro"]
     asyncio.run(captured["on_shutdown"]())
     assert database.closed is True
     assert fake_http.closed is True

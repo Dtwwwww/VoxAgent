@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-09-05",
+  "target_machine": {
+    "machine_snapshot_id": "target-machine-final-20260830T085424Z",
+    "cpu_name": "Intel(R) Core(TM) i5-9300H CPU @ 2.40GHz",
+    "ram_total_gb": 15.88,
+    "gpu_name": "NVIDIA GeForce GTX 1660 Ti",
+    "gpu_memory_mb": 6144
+  },
+  "measured_sentence": "你好，我是声灵，很高兴陪你一起聊天。",
+  "roundtrip_results": [
+    {
+      "engine": "melo",
+      "native_voice_id": 0,
+      "synthesis_seconds": 1.684,
+      "audio_duration_seconds": 1.249,
+      "audio_rms": 0.0114,
+      "roundtrip_transcript": "The is.",
+      "intelligibility": "failed: Mandarin content was not recovered"
+    },
+    {
+      "engine": "kokoro",
+      "native_voice_id": 3,
+      "synthesis_seconds": 10.909,
+      "audio_duration_seconds": 3.806,
+      "audio_rms": 0.075,
+      "roundtrip_transcript": "你好，我是生灵，很高兴陪你一起聊天。",
+      "intelligibility": "passed: complete Mandarin recovered; 声灵/生灵 is a homophone difference"
+    }
+  ]
+}

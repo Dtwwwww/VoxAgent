@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 import pytest
 
@@ -67,23 +66,13 @@ def test_catalog_rejects_unknown_voice_key(tmp_path):
         catalog.get("browser-native-id-3")
 
 
-def test_production_catalog_matches_the_approved_voice_artifact():
+def test_production_catalog_exposes_only_intelligible_local_fallback():
     catalog = load_production_catalog()
-    profile = catalog.get("default_voice")
-    original = catalog.get("original_voice")
-    style_path = Path(__file__).resolve().parents[3] / "benchmarks" / "tts-voice-style.json"
-    style = json.loads(style_path.read_text(encoding="utf-8"))
+    profiles = catalog.public_profiles()
 
-    assert style["selected_sample_id"] == "voice-005"
-    assert style["tied_engine_sample_ids"] == ["engine-002", "engine-003", "engine-004"]
-    assert style["selected_engine"] == profile.engine == "melo"
-    assert style["resolved_native_voice_id"] == profile.native_voice_id == 0
-    assert original.engine == "kokoro" and original.native_voice_id == 3
-    assert style["public_voice"] == {
-        "voice_key": "default_voice",
-        "display_name": "声灵快速音色",
-        "description": "响应更快，适合日常对话",
-        "gender": "neutral",
-        "is_default": True,
-        "previewable": True,
-    }
+    assert [item.voice_key for item in profiles] == ["default_voice"]
+    assert profiles[0].is_default is True
+    assert not hasattr(profiles[0], "engine")
+    assert not hasattr(profiles[0], "native_voice_id")
+    internal = catalog.get("default_voice")
+    assert (internal.engine, internal.native_voice_id) == ("kokoro", 3)

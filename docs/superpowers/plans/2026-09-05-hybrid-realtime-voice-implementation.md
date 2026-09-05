@@ -95,10 +95,12 @@ Add assertions to `backend/tests/speech/test_voice_catalog.py`:
 def test_production_catalog_exposes_only_intelligible_local_fallback():
     catalog = load_production_catalog()
     profiles = catalog.public_profiles()
-    assert [(item.voice_key, item.engine, item.native_voice_id) for item in profiles] == [
-        ("default_voice", "kokoro", 3)
-    ]
+    assert [item.voice_key for item in profiles] == ["default_voice"]
     assert profiles[0].is_default is True
+    assert not hasattr(profiles[0], "engine")
+    assert not hasattr(profiles[0], "native_voice_id")
+    internal = catalog.get("default_voice")
+    assert (internal.engine, internal.native_voice_id) == ("kokoro", 3)
 ```
 
 Add a focused factory assertion to the existing `backend/tests/test_cli.py` that patches `SherpaOfflineTts.from_model_dir`, calls `_create_production_app`, and verifies no call has `engine="melo"`.

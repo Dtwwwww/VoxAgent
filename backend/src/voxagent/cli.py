@@ -209,12 +209,6 @@ def _create_production_app(session_token: str):
                     engine="kokoro",
                     catalog=catalog,
                 ),
-                "melo": SherpaOfflineTts.from_model_dir(
-                    _speech_model_directory(root, "melo-zh-en"),
-                    0,
-                    engine="melo",
-                    catalog=catalog,
-                ),
             },
         )
         return ConversationOrchestrator(
