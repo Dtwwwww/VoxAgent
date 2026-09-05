@@ -4,13 +4,14 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from time import monotonic
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import numpy as np
 
 from voxagent.conversation.context import ContextAssembler, MemoryProposalService
 from voxagent.conversation.events import (
     AsrFinal,
+    AsrPartial,
     AssistantDelta,
     AssistantDone,
     ContextSources,
@@ -181,13 +182,14 @@ class ConversationOrchestrator:
             if continuation:
                 if partial_task is not None:
                     partial_outcome = await self._finish_partial(token, partial_task)
-                    if partial_outcome is not True:
-                        if isinstance(partial_outcome, ErrorMessage):
-                            async for output in self._terminate_voice_turn(
-                                token, partial_outcome
-                            ):
-                                yield output
+                    if isinstance(partial_outcome, ErrorMessage):
+                        async for output in self._terminate_voice_turn(
+                            token, partial_outcome
+                        ):
+                            yield output
                         return
+                    if isinstance(partial_outcome, AsrPartial):
+                        yield partial_outcome
                 if too_long:
                     async for output in self._limit_utterance(token):
                         yield output
@@ -232,13 +234,14 @@ class ConversationOrchestrator:
             return
         if partial_task is not None:
             partial_outcome = await self._finish_partial(token, partial_task)
-            if partial_outcome is not True:
-                if isinstance(partial_outcome, ErrorMessage):
-                    async for output in self._terminate_voice_turn(
-                        token, partial_outcome
-                    ):
-                        yield output
+            if isinstance(partial_outcome, ErrorMessage):
+                async for output in self._terminate_voice_turn(
+                    token, partial_outcome
+                ):
+                    yield output
                 return
+            if isinstance(partial_outcome, AsrPartial):
+                yield partial_outcome
         if too_long:
             async for output in self._limit_utterance(token):
                 yield output
@@ -262,11 +265,12 @@ class ConversationOrchestrator:
             partial_task = self._partial_task if self._partial_token is token else None
         if partial_task is not None:
             partial_outcome = await self._finish_partial(token, partial_task)
-            if partial_outcome is not True:
-                if isinstance(partial_outcome, ErrorMessage):
-                    async for output in self._terminate_voice_turn(token, partial_outcome):
-                        yield output
+            if isinstance(partial_outcome, ErrorMessage):
+                async for output in self._terminate_voice_turn(token, partial_outcome):
+                    yield output
                 return
+            if isinstance(partial_outcome, AsrPartial):
+                yield partial_outcome
         async for output in self._commit_voice_token(token):
             yield output
 
@@ -346,6 +350,25 @@ class ConversationOrchestrator:
         self._finish_active(token)
 
     async def submit_text(self, text: str, speak_response: bool) -> AsyncIterator[Output]:
+        async for item in self._submit_text_turn(
+            text, origin="text", speak_response=speak_response, echo_asr=False
+        ):
+            yield item
+
+    async def submit_voice_transcript(self, text: str) -> AsyncIterator[Output]:
+        async for item in self._submit_text_turn(
+            text, origin="voice", speak_response=False, echo_asr=True
+        ):
+            yield item
+
+    async def _submit_text_turn(
+        self,
+        text: str,
+        *,
+        origin: Literal["text", "voice"],
+        speak_response: bool,
+        echo_asr: bool,
+    ) -> AsyncIterator[Output]:
         normalized = text.strip()
         async with self._action_lock:
             if self._is_closed():
@@ -364,10 +387,10 @@ class ConversationOrchestrator:
                 if self.conversation_store is not None:
                     self._source_message_ids[token.turn_id] = (
                         await self.conversation_store.add_user(
-                            token.turn_id, normalized, "text"
+                            token.turn_id, normalized, origin
                         )
                     )
-                self.history.add_user(token.turn_id, normalized, "text")
+                self.history.add_user(token.turn_id, normalized, origin)
                 await self._start_reply(
                     token, speak_response=speak_response, pending_history=True
                 )
@@ -376,6 +399,15 @@ class ConversationOrchestrator:
             return
         if cancelled is not None:
             yield cancelled
+        if echo_asr:
+            if not self._owns_live_turn(token):
+                return
+            yield AsrFinal(
+                type="asr.final",
+                session_id=token.session_id,
+                turn_id=token.turn_id,
+                text=normalized,
+            )
         async for output in self._drain(("turn", token.turn_id), token.cancelled):
             yield output
         self._finish_active(token)
@@ -952,7 +984,7 @@ class ConversationOrchestrator:
 
     async def _finish_partial(
         self, token: TurnToken, task: asyncio.Task[tuple[bool, object]]
-    ) -> bool | ErrorMessage:
+    ) -> AsrPartial | Literal[False] | ErrorMessage:
         try:
             succeeded, partial = await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -970,8 +1002,16 @@ class ConversationOrchestrator:
                     "partial_asr_failed",
                     "实时语音识别失败，请重试或改用文字输入",
                 )
-            self._partial_text = str(getattr(partial, "text", ""))
-            return True
+            text = str(getattr(partial, "text", "")).strip()
+            if not text or text == self._partial_text:
+                return False
+            self._partial_text = text
+            return AsrPartial(
+                type="asr.partial",
+                session_id=token.session_id,
+                turn_id=token.turn_id,
+                text=text,
+            )
 
     async def _limit_utterance(self, token: TurnToken) -> AsyncIterator[Output]:
         error = self._error(

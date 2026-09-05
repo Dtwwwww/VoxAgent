@@ -3,6 +3,7 @@ export type VoiceSpeed = 0.8 | 1.0 | 1.2;
 export type ClientEvent =
   | { type: "session.start" }
   | { type: "text.submit"; text: string; speak_response?: boolean }
+  | { type: "voice.transcript.submit"; text: string }
   | { type: "assistant.speak"; turn_id: number; request_id?: number }
   | { type: "voice.select"; voice_key: string; speed: VoiceSpeed }
   | { type: "voice.preview"; voice_key: string; speed: VoiceSpeed }
@@ -56,6 +57,7 @@ export type ServerEvent =
   | ({ type: "vad.started" } & TurnFields)
   | ({ type: "vad.stopped" } & TurnFields)
   | ({ type: "asr.final"; text: string } & TurnFields)
+  | ({ type: "asr.partial"; text: string } & TurnFields)
   | ({ type: "assistant.delta"; delta: string } & TurnFields)
   | ({ type: "assistant.done" } & TurnFields)
   | ({ type: "context.sources"; memories: ContextMemorySource[]; knowledge: ContextKnowledgeSource[] } & TurnFields)
@@ -126,10 +128,17 @@ function uuid(value: unknown): string {
   return candidate;
 }
 
+function transcriptText(value: unknown): string {
+  const text = string(value, "text").trim();
+  const length = [...text].length;
+  if (length < 1 || length > 4000) throw new TypeError("text length is invalid");
+  return text;
+}
+
 function turnObject(value: unknown, extra: readonly string[] = [], optional: readonly string[] = []): JsonObject {
   const object = objectWithExactKeys(value, ["type", "session_id", "turn_id", ...extra], optional);
   uuid(object.session_id);
-  integer(object.turn_id, "turn_id");
+  positiveInteger(object.turn_id, "turn_id");
   return object;
 }
 
@@ -145,13 +154,15 @@ export function parseClientEvent(value: unknown): ClientEvent {
       return { type };
     case "text.submit": { // The server defaults speak_response to false when omitted.
       const object = objectWithExactKeys(value, ["type", "text"], ["speak_response"]);
-      const text = string(object.text, "text").trim();
-      const length = [...text].length;
-      if (length < 1 || length > 4000) throw new TypeError("text length is invalid");
+      const text = transcriptText(object.text);
       if (object.speak_response !== undefined) bool(object.speak_response, "speak_response");
       return object.speak_response === undefined
         ? { type, text }
         : { type, text, speak_response: object.speak_response as boolean };
+    }
+    case "voice.transcript.submit": {
+      const object = objectWithExactKeys(value, ["type", "text"]);
+      return { type, text: transcriptText(object.text) };
     }
     case "assistant.speak": {
       const object = objectWithExactKeys(value, ["type", "turn_id"], ["request_id"]);
@@ -239,6 +250,12 @@ export function parseServerEvent(value: unknown): ServerEvent {
     case "asr.final": {
       const object = turnObject(value, ["text"]);
       return { type, session_id: object.session_id as string, turn_id: object.turn_id as number, text: string(object.text, "text") };
+    }
+    case "asr.partial": {
+      const object = turnObject(value, ["text"]);
+      const text = string(object.text, "text");
+      if (!text.trim()) throw new TypeError("partial transcript must be non-empty");
+      return { type, session_id: object.session_id as string, turn_id: object.turn_id as number, text };
     }
     case "assistant.delta": {
       const object = turnObject(value, ["delta"]);

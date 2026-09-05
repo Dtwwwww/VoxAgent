@@ -97,6 +97,16 @@ class FakePartialAsr:
         return SimpleNamespace(text="我觉得那个", updated=True)
 
 
+class SequencedPartialAsr(FakePartialAsr):
+    def __init__(self, texts: list[str]) -> None:
+        super().__init__()
+        self.texts = iter(texts)
+
+    def accept(self, samples: np.ndarray) -> SimpleNamespace:
+        assert samples.shape == (320,)
+        return SimpleNamespace(text=next(self.texts), updated=True)
+
+
 class BlockingPartialAsr(FakePartialAsr):
     def __init__(self) -> None:
         super().__init__()
@@ -351,6 +361,73 @@ async def test_text_and_voice_share_ordered_history_and_voice_uses_selected_tts(
         {"role": "user", "content": "第二问"},
     ]
     assert tts.calls[-1].voice_key == "clear_female"
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_browser_voice_transcript_uses_voice_reply_path_without_tts():
+    store = FakeConversationStore()
+    orchestrator, _, tts = make_orchestrator(
+        replies=[["测试回答"]],
+        context_assembler=None,
+        memory_proposer=None,
+        conversation_store=store,
+    )
+
+    outputs = [
+        item
+        async for item in orchestrator.submit_voice_transcript("浏览器识别结果")
+    ]
+
+    assert [item.type for item in outputs] == [
+        "asr.final",
+        "assistant.delta",
+        "assistant.done",
+    ]
+    assert outputs[0].text == "浏览器识别结果"
+    assert orchestrator.history.messages_for_model()[-2:] == (
+        ChatMessage("user", "浏览器识别结果"),
+        ChatMessage("assistant", "测试回答"),
+    )
+    assert store.calls[0] == ("user", 1, "浏览器识别结果", "voice")
+    assert tts.calls == []
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_browser_voice_transcript_echoes_before_context_reply_and_memory():
+    assembler = ContextAssembler(
+        DEFAULT_PERSONA,
+        lambda _query, _limit: (
+            MemoryContext(2, "喜欢茶", 0.9, 8, "我喜欢喝茶", 3),
+        ),
+        lambda _query, _limit: (),
+    )
+    proposer = FakeMemoryProposer(
+        (MemoryCandidate(MemoryKind.PREFERENCE, "喜欢乌龙茶", 0.8, None),)
+    )
+    store = FakeConversationStore(source_message_id=42)
+    orchestrator, _, tts = make_orchestrator(
+        replies=[["测试回答"]],
+        context_assembler=assembler,
+        memory_proposer=proposer,
+        conversation_store=store,
+    )
+
+    outputs = [
+        item async for item in orchestrator.submit_voice_transcript("浏览器识别结果")
+    ]
+
+    assert [item.type for item in outputs] == [
+        "asr.final",
+        "context.sources",
+        "assistant.delta",
+        "assistant.done",
+        "memory.proposed",
+    ]
+    assert store.calls[0] == ("user", 1, "浏览器识别结果", "voice")
+    assert proposer.calls == [("qwen-local", "浏览器识别结果", "测试回答", 42)]
+    assert tts.calls == []
     await orchestrator.stop()
 
 
@@ -841,10 +918,51 @@ async def test_partial_asr_text_and_clock_drive_endpoint_policy():
     orchestrator.endpoint = endpoint
     orchestrator.partial_asr = partial
 
-    await collect_audio_events(orchestrator, [FRAME, FRAME, FRAME])
+    outputs = await collect_audio_events(orchestrator, [FRAME, FRAME, FRAME])
 
     assert partial.reset_calls == 2
     assert endpoint.calls[-1] == (VadDecision.STOPPED, 1234, "我觉得那个")
+    assert [item.text for item in outputs if getattr(item, "type", None) == "asr.partial"] == [
+        "我觉得那个"
+    ]
+    assert [item.text for item in outputs if getattr(item, "type", None) == "asr.final"] == [
+        "完整问题"
+    ]
+    assert orchestrator.history.messages_for_model()[-2:] == (
+        ChatMessage("user", "完整问题"),
+        ChatMessage("assistant", "回答"),
+    )
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_partial_asr_emits_trimmed_text_once_and_never_enters_history():
+    partial = SequencedPartialAsr(["  我觉得那个  ", "我觉得那个", "   "])
+    orchestrator, _, _ = make_orchestrator(
+        vad=FakeVad(
+            [
+                VadDecision.STARTED,
+                VadDecision.SPEECH,
+                VadDecision.SPEECH,
+                VadDecision.SPEECH,
+            ]
+        )
+    )
+    orchestrator.partial_asr = partial
+
+    started = [item async for item in orchestrator.accept_audio(FRAME)]
+    updated = [item async for item in orchestrator.accept_audio(FRAME)]
+    unchanged = [item async for item in orchestrator.accept_audio(FRAME)]
+    empty = [item async for item in orchestrator.accept_audio(FRAME)]
+
+    assert [item.type for item in started] == ["vad.started"]
+    assert [item.type for item in updated] == ["asr.partial"]
+    assert updated[0].text == "我觉得那个"
+    assert unchanged == []
+    assert empty == []
+    assert orchestrator.history.messages_for_model() == (
+        ChatMessage("system", SYSTEM_INSTRUCTION),
+    )
     await orchestrator.stop()
 
 

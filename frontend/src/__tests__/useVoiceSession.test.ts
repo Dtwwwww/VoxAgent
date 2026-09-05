@@ -230,6 +230,7 @@ describe("the frozen WebSocket protocol", () => {
     expect(() => parseServerEventJson(`{"type":"vad.started","session_id":"${SESSION_ID}","turn_id":1e0}`)).toThrow();
     expect(() => parseClientEventJson('{"type":"assistant.speak","turn_id":7.0e0}')).toThrow();
     expect(() => parseClientEventJson('{"type":"assistant.speak","turn_id":7,"request_id":1.0}')).toThrow();
+    expect(() => parseServerEventJson(`{"type":"asr.partial","session_id":"${SESSION_ID}","turn_id":1.0,"text":"你好"}`)).toThrow();
     expect(() => parseServerEventJson(`{"type":"tts.done","session_id":"${SESSION_ID}","turn_id":1,"request_id":1e0}`)).toThrow();
     expect(() => parseServerEventJson(`{"type":"tts.chunk","session_id":"${SESSION_ID}","turn_id":1,"sequence":0.0e0,"sample_rate":24000,"mime_type":"audio/wav","byte_length":46}`)).toThrow();
   });

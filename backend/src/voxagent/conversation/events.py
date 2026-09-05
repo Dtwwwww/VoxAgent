@@ -39,6 +39,19 @@ class TextSubmit(ClientMessage):
         return normalized
 
 
+class VoiceTranscriptSubmit(ClientMessage):
+    type: Literal["voice.transcript.submit"]
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not 1 <= len(normalized) <= 4000:
+            raise ValueError("text must contain between 1 and 4000 Unicode code points")
+        return normalized
+
+
 class AssistantSpeak(ClientMessage):
     type: Literal["assistant.speak"]
     turn_id: StrictInt
@@ -72,6 +85,7 @@ class SessionStop(ClientMessage):
 type ClientEvent = Annotated[
     SessionStart
     | TextSubmit
+    | VoiceTranscriptSubmit
     | AssistantSpeak
     | VoiceSelect
     | VoicePreview
@@ -145,7 +159,7 @@ class VoicePreviewChunk(ServerMessage):
 
 class TurnServerMessage(ServerMessage):
     session_id: UUID
-    turn_id: StrictInt
+    turn_id: StrictInt = Field(gt=0)
 
 
 class VadStarted(TurnServerMessage):
@@ -159,6 +173,18 @@ class VadStopped(TurnServerMessage):
 class AsrFinal(TurnServerMessage):
     type: Literal["asr.final"]
     text: str
+
+
+class AsrPartial(TurnServerMessage):
+    type: Literal["asr.partial"]
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def require_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("partial transcript must be non-empty")
+        return value
 
 
 class AssistantDelta(TurnServerMessage):
@@ -248,6 +274,7 @@ type ServerEvent = Annotated[
     | VadStarted
     | VadStopped
     | AsrFinal
+    | AsrPartial
     | AssistantDelta
     | AssistantDone
     | ContextSources

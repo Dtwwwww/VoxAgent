@@ -57,6 +57,12 @@ class FakeOrchestrator:
             type="error", code="submitted_text", message="test", recoverable=True
         )
 
+    async def submit_voice_transcript(self, text: str):
+        self.calls.append(("submit_voice_transcript", text))
+        yield ErrorMessage(
+            type="error", code="submitted_voice", message="test", recoverable=True
+        )
+
     async def speak_message(self, turn_id: int, request_id: int = 0):
         self.calls.append(("speak_message", turn_id, request_id))
         yield ErrorMessage(
@@ -306,6 +312,44 @@ def test_recoverable_validation_error_does_not_close_socket(payload: dict[str, o
     assert ready["type"] == "session.ready"
 
 
+def test_browser_voice_transcript_does_not_block_follow_up_cancel():
+    class SlowVoiceTranscriptOrchestrator(FakeOrchestrator):
+        def __init__(self) -> None:
+            super().__init__()
+            self.voice_started = Event()
+            self.release_voice = Event()
+
+        async def submit_voice_transcript(self, text: str):
+            self.calls.append(("submit_voice_transcript", text))
+            self.voice_started.set()
+            await asyncio.to_thread(self.release_voice.wait, 2)
+            yield ErrorMessage(
+                type="error", code="voice_done", message="test", recoverable=True
+            )
+
+    class SlowFactory(Factory):
+        def __call__(self) -> FakeOrchestrator:
+            instance = SlowVoiceTranscriptOrchestrator()
+            self.instances.append(instance)
+            return instance
+
+    factory = SlowFactory()
+    client, _ = _client(factory)
+
+    with client.websocket_connect(f"/v1/voice?token={SESSION_TOKEN}") as socket:
+        socket.send_json(
+            {"type": "voice.transcript.submit", "text": "浏览器识别结果"}
+        )
+        assert factory.instances[0].voice_started.wait(timeout=1)
+        socket.send_json({"type": "turn.cancel"})
+
+        try:
+            response = socket.receive_json()
+        finally:
+            factory.instances[0].release_voice.set()
+        assert response["type"] == "turn.cancelled"
+
+
 def test_unknown_voice_key_is_recoverable_and_socket_remains_usable():
     client, _ = _client()
     url = f"/v1/voice?token={SESSION_TOKEN}"
@@ -348,6 +392,7 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
     payloads = (
         {"type": "session.start"},
         {"type": "text.submit", "text": "  你好  ", "speak_response": True},
+        {"type": "voice.transcript.submit", "text": "  浏览器语音  "},
         {"type": "assistant.speak", "turn_id": 3, "request_id": 9},
         {"type": "voice.select", "voice_key": "clear_female", "speed": 1.2},
         {"type": "voice.preview", "voice_key": "clear_female", "speed": 0.8},
@@ -369,6 +414,7 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
     assert should_stop is True
     assert orchestrator.calls == [
         ("submit_text", "你好", True),
+        ("submit_voice_transcript", "浏览器语音"),
         ("speak_message", 3, 9),
         ("select_voice", "clear_female", 1.2),
         ("preview_voice", "clear_female", 0.8),

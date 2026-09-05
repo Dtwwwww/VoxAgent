@@ -20,7 +20,12 @@ def test_protocol_fixtures_match_contract():
     server_messages = [parse_server_message(payload) for payload in fixtures["valid_server"]]
 
     assert client_messages[1].text == "hello"
-    assert len(server_messages) == 15
+    assert client_messages[2].type == "voice.transcript.submit"
+    assert client_messages[2].text == "你好，声灵"
+    assert len(server_messages) == 16
+    assert next(
+        message.text for message in server_messages if message.type == "asr.partial"
+    ) == "你好"
     assert {
         message.turn_id for message in server_messages if message.type == "tts.started"
     } == {1}
