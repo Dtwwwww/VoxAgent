@@ -624,6 +624,54 @@ describe("useVoiceSession", () => {
     expect(stopAll).toHaveBeenCalledOnce();
   });
 
+  it("does not request media when microphone stop wins while enumeration is pending", async () => {
+    const enumeration = deferred<MediaDeviceInfo[]>();
+    Object.assign(navigator.mediaDevices, { enumerateDevices: vi.fn(() => enumeration.promise) });
+    const { hook } = openSession();
+    let pending!: Promise<void>;
+    act(() => { pending = hook.result.current.startMicrophone(); });
+
+    await act(async () => hook.result.current.stopMicrophone());
+    enumeration.resolve([]);
+    await act(async () => pending);
+
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+    expect(hook.result.current.isMicrophoneActive).toBe(false);
+  });
+
+  it("disconnects before pending microphone enumeration resolves without requesting media", async () => {
+    const enumeration = deferred<MediaDeviceInfo[]>();
+    Object.assign(navigator.mediaDevices, { enumerateDevices: vi.fn(() => enumeration.promise) });
+    const { hook } = openSession();
+    act(() => { void hook.result.current.startMicrophone(); });
+    let disconnected = false;
+    const disconnecting = hook.result.current.disconnect().then(() => { disconnected = true; });
+
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    try {
+      expect(disconnected).toBe(true);
+    } finally {
+      enumeration.resolve([]);
+      await act(async () => disconnecting);
+    }
+
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it("does not revive microphone capture after unmount while enumeration is pending", async () => {
+    const enumeration = deferred<MediaDeviceInfo[]>();
+    Object.assign(navigator.mediaDevices, { enumerateDevices: vi.fn(() => enumeration.promise) });
+    const hook = renderHook(() => useVoiceSession({ url: "ws://localhost/v1/voice" }));
+    let pending!: Promise<void>;
+    act(() => { pending = hook.result.current.startMicrophone(); });
+
+    hook.unmount();
+    enumeration.resolve([]);
+    await pending;
+
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  });
+
   it("makes microphone start single-flight and prevents a capture appearing after disconnect", async () => {
     let resolveMedia!: (stream: MediaStream) => void;
     const stop = vi.fn();

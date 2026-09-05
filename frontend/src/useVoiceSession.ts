@@ -546,10 +546,19 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       try {
         let deviceId: string | null = null;
         try {
-          deviceId = choosePreferredMicrophone(await listMicrophones(), null)?.deviceId ?? null;
+          const devices = await Promise.race([
+            listMicrophones(),
+            new Promise<null>((resolve) => {
+              if (abort.signal.aborted) resolve(null);
+              else abort.signal.addEventListener("abort", () => resolve(null), { once: true });
+            }),
+          ]);
+          if (abort.signal.aborted || lifecycle !== captureLifecycleRef.current) return;
+          deviceId = devices ? choosePreferredMicrophone(devices, null)?.deviceId ?? null : null;
         } catch {
           // Continue with browser-default microphone selection when enumeration is unavailable.
         }
+        if (abort.signal.aborted || lifecycle !== captureLifecycleRef.current) return;
         capture = new MicrophoneCapture({
           deviceId,
           forwardPcm: true,
