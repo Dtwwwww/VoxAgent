@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MicrophoneCapture } from "./audio/capture";
+import { choosePreferredMicrophone, listMicrophones } from "./audio/devices";
 import { AudioPlayback } from "./audio/playback";
 import { type ServerEvent, type VoiceInfo, type VoiceSpeed, parseServerEventJson } from "./protocol";
 import { loadVoiceSettings, reconcileVoiceSettings, saveVoiceSettings } from "./voiceSettings";
@@ -539,19 +540,26 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     const lifecycle = captureLifecycleRef.current;
     const abort = new AbortController();
     captureAbortRef.current = abort;
-    const capture = new MicrophoneCapture({
-      deviceId: null,
-      forwardPcm: true,
-      onFrame(frame) {
-        const socket = socketRef.current;
-        if (socket?.readyState === WebSocket.OPEN) socket.send(frame);
-      },
-      onLevel() {},
-      onSettings() {},
-    });
+    let capture: MicrophoneCapture | null = null;
     let operation!: Promise<void>;
     operation = (async () => {
       try {
+        let deviceId: string | null = null;
+        try {
+          deviceId = choosePreferredMicrophone(await listMicrophones(), null)?.deviceId ?? null;
+        } catch {
+          // Continue with browser-default microphone selection when enumeration is unavailable.
+        }
+        capture = new MicrophoneCapture({
+          deviceId,
+          forwardPcm: true,
+          onFrame(frame) {
+            const socket = socketRef.current;
+            if (socket?.readyState === WebSocket.OPEN) socket.send(frame);
+          },
+          onLevel() {},
+          onSettings() {},
+        });
         await capture.start(abort.signal);
         if (lifecycle !== captureLifecycleRef.current) {
           await capture.stop();
@@ -562,7 +570,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setError(null);
         setVoiceStatus("listening");
       } catch {
-        await capture.stop();
+        await capture?.stop();
         if (lifecycle === captureLifecycleRef.current) {
           setError({ code: "microphone_permission", message: "无法使用麦克风，请允许权限后重试；文字输入仍可使用", recoverable: true });
           setMicrophoneActive(false);

@@ -202,6 +202,7 @@ beforeEach(() => {
     configurable: true,
     value: {
       getUserMedia: vi.fn(),
+      enumerateDevices: vi.fn().mockResolvedValue([]),
       getSupportedConstraints: () => ({
         deviceId: true,
         channelCount: true,
@@ -563,6 +564,41 @@ describe("useVoiceSession", () => {
     expect(socket.jsonMessages()).toContainEqual({ type: "text.submit", text: "仍可打字", speak_response: false });
   });
 
+  it("selects the preferred physical microphone before requesting media", async () => {
+    const stop = vi.fn();
+    Object.assign(navigator.mediaDevices, {
+      enumerateDevices: vi.fn().mockResolvedValue([
+        { deviceId: "virtual", groupId: "virtual-group", label: "ToDesk Virtual Audio", kind: "audioinput", toJSON: () => ({}) },
+        { deviceId: "realtek", groupId: "realtek-group", label: "麦克风阵列 (Realtek(R) Audio", kind: "audioinput", toJSON: () => ({}) },
+      ]),
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream(stop));
+    const { hook } = openSession();
+
+    await act(async () => hook.result.current.startMicrophone());
+
+    expect(navigator.mediaDevices.enumerateDevices).toHaveBeenCalledOnce();
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith(expect.objectContaining({
+      audio: expect.objectContaining({ deviceId: { exact: "realtek" } }),
+    }));
+  });
+
+  it("falls back to browser default constraints when microphone enumeration fails", async () => {
+    const stop = vi.fn();
+    Object.assign(navigator.mediaDevices, {
+      enumerateDevices: vi.fn().mockRejectedValue(new Error("enumeration unavailable")),
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream(stop));
+    const { hook } = openSession();
+
+    await act(async () => hook.result.current.startMicrophone());
+
+    expect(navigator.mediaDevices.enumerateDevices).toHaveBeenCalledOnce();
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith(expect.objectContaining({
+      audio: expect.not.objectContaining({ deviceId: expect.anything() }),
+    }));
+  });
+
   it("commits audio and closes microphone tracks without closing the socket", async () => {
     const stop = vi.fn();
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValueOnce(microphoneStream(stop));
@@ -600,7 +636,7 @@ describe("useVoiceSession", () => {
       first = hook.result.current.startMicrophone();
       second = hook.result.current.startMicrophone();
     });
-    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce();
+    await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce());
     await act(async () => hook.result.current.disconnect());
     resolveMedia(microphoneStream(stop));
     await act(async () => Promise.all([first, second]));
@@ -616,6 +652,7 @@ describe("useVoiceSession", () => {
     const hook = renderHook(() => useVoiceSession({ url: "ws://localhost/v1/voice" }));
     let pending!: Promise<void>;
     act(() => { pending = hook.result.current.startMicrophone(); });
+    await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce());
     hook.unmount();
     resolveMedia(microphoneStream(stop));
     await pending;
@@ -664,6 +701,7 @@ describe("useVoiceSession", () => {
     emit(nextSocket, readyEvent());
     let newStart!: Promise<void>;
     act(() => { newStart = hook.result.current.startMicrophone(); });
+    await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2));
     const requestedFreshMedia = vi.mocked(navigator.mediaDevices.getUserMedia).mock.calls.length === 2;
     oldWorklet.resolve();
     await act(async () => Promise.all([oldStart, newStart]));
