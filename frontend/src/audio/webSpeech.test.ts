@@ -8,7 +8,8 @@ type FakeRecognitionResult = {
   length: 1;
 };
 
-type RecognitionHandler = ((event: { resultIndex: number; results: { 0: FakeRecognitionResult; length: 1 } }) => void) | null;
+type FakeRecognitionResults = { length: number; [index: number]: FakeRecognitionResult };
+type RecognitionHandler = ((event: { resultIndex: number; results: FakeRecognitionResults }) => void) | null;
 
 class FakeRecognition {
   lang = "";
@@ -24,11 +25,18 @@ class FakeRecognition {
   readonly stop = vi.fn();
 
   emitInterim(text: string): void {
-    this.onresult?.({ resultIndex: 0, results: { 0: { 0: { transcript: text }, isFinal: false, length: 1 }, length: 1 } });
+    this.emitResult(0, false, text);
   }
 
   emitFinal(text: string): void {
-    this.onresult?.({ resultIndex: 0, results: { 0: { 0: { transcript: text }, isFinal: true, length: 1 }, length: 1 } });
+    this.emitResult(0, true, text);
+  }
+
+  emitResult(index: number, isFinal: boolean, text: string): void {
+    this.onresult?.({
+      resultIndex: index,
+      results: { [index]: { 0: { transcript: text }, isFinal, length: 1 }, length: index + 1 },
+    });
   }
 }
 
@@ -90,6 +98,54 @@ describe("BrowserSpeechProvider", () => {
     expect(handlers.onInterim).toHaveBeenCalledWith("今天天气");
     recognition.emitFinal("今天天气怎么样");
     expect(handlers.onFinal).toHaveBeenCalledWith("今天天气怎么样");
+  });
+
+  it("trims recognition transcripts before forwarding them", async () => {
+    const recognition = new FakeRecognition();
+    const handlers = callbacks();
+    await new BrowserSpeechProvider(fakeWindow(recognition).scope).start({} as MediaStreamTrack, handlers, false);
+
+    recognition.emitInterim("  今天天气  ");
+    recognition.emitFinal("\n今天天气怎么样\t");
+
+    expect(handlers.onInterim).toHaveBeenCalledWith("今天天气");
+    expect(handlers.onFinal).toHaveBeenCalledWith("今天天气怎么样");
+  });
+
+  it("does not forward whitespace-only recognition transcripts", async () => {
+    const recognition = new FakeRecognition();
+    const handlers = callbacks();
+    await new BrowserSpeechProvider(fakeWindow(recognition).scope).start({} as MediaStreamTrack, handlers, false);
+
+    recognition.emitInterim(" \n\t ");
+    recognition.emitFinal("  \n ");
+
+    expect(handlers.onInterim).not.toHaveBeenCalled();
+    expect(handlers.onFinal).not.toHaveBeenCalled();
+  });
+
+  it("forwards each final recognition result index only once", async () => {
+    const recognition = new FakeRecognition();
+    const handlers = callbacks();
+    await new BrowserSpeechProvider(fakeWindow(recognition).scope).start({} as MediaStreamTrack, handlers, false);
+
+    recognition.emitResult(3, true, "重复结果");
+    recognition.emitResult(3, true, "重复结果");
+
+    expect(handlers.onFinal).toHaveBeenCalledTimes(1);
+    expect(handlers.onFinal).toHaveBeenCalledWith("重复结果");
+  });
+
+  it("allows matching final text from distinct recognition result indexes", async () => {
+    const recognition = new FakeRecognition();
+    const handlers = callbacks();
+    await new BrowserSpeechProvider(fakeWindow(recognition).scope).start({} as MediaStreamTrack, handlers, false);
+
+    recognition.emitResult(0, true, "可以重复");
+    recognition.emitResult(1, true, "可以重复");
+
+    expect(handlers.onFinal).toHaveBeenNthCalledWith(1, "可以重复");
+    expect(handlers.onFinal).toHaveBeenNthCalledWith(2, "可以重复");
   });
 
   it("does not use an unknown default microphone after a selected-track TypeError", async () => {

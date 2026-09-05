@@ -33,6 +33,7 @@ function recognitionConstructor(scope: Window): SpeechRecognitionConstructor | u
 export class BrowserSpeechProvider {
   private recognition: SpeechRecognition | null = null;
   private recognitionVersion = 0;
+  private readonly processedFinalIndexes = new Set<number>();
   private speechVersion = 0;
   private readonly activeUtterances = new Map<SpeechSynthesisUtterance, (reason: DOMException) => void>();
 
@@ -53,6 +54,7 @@ export class BrowserSpeechProvider {
     }
 
     this.stopRecognition();
+    this.processedFinalIndexes.clear();
     const Recognition = recognitionConstructor(this.scope);
     if (!Recognition) {
       callbacks.onError({ code: "unsupported", recoverable: false });
@@ -72,8 +74,13 @@ export class BrowserSpeechProvider {
       const interimText: string[] = [];
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index];
-        const transcript = result[0]?.transcript ?? "";
-        if (result.isFinal) finalText.push(transcript);
+        const transcript = (result[0]?.transcript ?? "").trim();
+        if (transcript.length === 0) continue;
+        if (result.isFinal) {
+          if (this.processedFinalIndexes.has(index)) continue;
+          this.processedFinalIndexes.add(index);
+          finalText.push(transcript);
+        }
         else interimText.push(transcript);
       }
       if (interimText.length > 0) callbacks.onInterim(interimText.join(""));
