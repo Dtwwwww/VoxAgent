@@ -128,7 +128,7 @@ describe("RealtimeVoiceControls", () => {
 
   it("shows a non-blocking Realtek diagnostic after three silent seconds", () => {
     vi.useFakeTimers();
-    render(<RealtimeVoiceControls controller={controller({
+    const session = controller({
       realtime: {
         active: true,
         state: "listening",
@@ -138,11 +138,15 @@ describe("RealtimeVoiceControls", () => {
         fallbackReason: null,
         notice: null,
       },
-    })} />);
+    });
+    render(<RealtimeVoiceControls controller={session} />);
 
     expect(screen.queryByText("3 秒未检测到声音，请切换到 Realtek 麦克风")).toBeNull();
     act(() => vi.advanceTimersByTime(3_000));
     expect(screen.getByText("3 秒未检测到声音，请切换到 Realtek 麦克风")).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "麦克风" })).toBeEnabled();
+    fireEvent.change(screen.getByRole("combobox", { name: "麦克风" }), { target: { value: "todesk" } });
+    expect(session.selectMicrophone).toHaveBeenCalledWith("todesk");
     expect(screen.getByRole("button", { name: "结束通话" })).toBeEnabled();
   });
 

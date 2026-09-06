@@ -65,9 +65,8 @@ export function RealtimeVoiceControls({ controller }: { controller: VoiceSession
         <select
           aria-label="麦克风"
           value={controller.selectedMicrophoneId ?? ""}
-          disabled={active}
           onChange={(event) => {
-            if (event.target.value) controller.selectMicrophone(event.target.value);
+            if (event.target.value) void controller.selectMicrophone(event.target.value);
           }}
         >
           {controller.selectedMicrophoneId === null && <option value="">浏览器默认麦克风</option>}

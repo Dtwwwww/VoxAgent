@@ -20,12 +20,19 @@ function StatusVisual({ icon }: { icon: "thinking" | "spinner" | "wave" }) {
 }
 
 export function VoiceStatus({ connectionStatus, voiceStatus, realtime }: VoiceStatusProps) {
-  if (realtime.state !== "off" || realtime.notice !== null) {
-    const presentation = realtimeVoiceStatusPresentation(realtime.state, realtime.notice);
+  if (realtime.state !== "off" || realtime.notice !== null || realtime.fallbackReason !== null) {
+    const fallbackPresentation = realtime.fallbackReason === null
+      ? null
+      : realtimeVoiceStatusPresentation("fallback", null);
+    const presentation = realtimeVoiceStatusPresentation(realtime.state, realtime.notice)
+      ?? fallbackPresentation;
     if (!presentation) return null;
     return <div className="voice-status" role="status" aria-live="polite" data-state={realtime.state}>
       <StatusVisual icon={presentation.icon} />
       <span>{presentation.label}</span>
+      {fallbackPresentation && realtime.state !== "fallback" && <span className="voice-status__fallback">
+        {fallbackPresentation.label}
+      </span>}
     </div>;
   }
   if (connectionStatus === "connected" && voiceStatus === "idle") return null;

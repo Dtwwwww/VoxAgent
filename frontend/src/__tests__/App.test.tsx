@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
@@ -215,6 +216,30 @@ describe("App", () => {
     expect(status.nextElementSibling).toBe(composer);
   });
 
+  it("keeps the local fallback announcement after the engine immediately resumes listening", () => {
+    const fallback = controller({
+      realtime: {
+        active: true,
+        state: "fallback",
+        provider: "local",
+        interimText: "",
+        inputLevel: 0.2,
+        fallbackReason: "network",
+        notice: null,
+      },
+    });
+    const view = render(<App controller={fallback} />);
+    expect(screen.getByRole("status")).toHaveTextContent("已切换到本地语音");
+
+    view.rerender(<App controller={{
+      ...fallback,
+      realtime: { ...fallback.realtime, state: "listening" },
+    }} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("正在监听");
+    expect(screen.getByRole("status")).toHaveTextContent("已切换到本地语音");
+  });
+
   it("keeps composition input intact and disables an empty send action", () => {
     const session = controller();
     render(<App controller={session} />);
@@ -299,6 +324,30 @@ describe("App", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "试听 微软晓晓" }));
     expect(session.selectBrowserVoice).toHaveBeenCalledWith("browser-xiaoxiao");
     expect(speak).toHaveBeenCalledWith("你好，我是声灵，很高兴认识你。", "browser-xiaoxiao", 1);
+  });
+
+  it("does not cancel a browser preview when voice selection rerenders the app", () => {
+    vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockReturnValue(new Promise(() => undefined));
+    const cancelSpeech = vi.spyOn(BrowserSpeechProvider.prototype, "cancelSpeech").mockImplementation(() => undefined);
+
+    function StatefulApp() {
+      const [voiceKey, setVoiceKey] = useState<string | null>(null);
+      const session = controller({
+        browserVoices: [
+          { key: "browser-xiaoxiao", name: "微软晓晓", lang: "zh-CN", localService: false },
+        ],
+        selectedBrowserVoiceKey: voiceKey,
+        selectBrowserVoice: (nextVoiceKey) => setVoiceKey(nextVoiceKey),
+      });
+      return <App controller={session} />;
+    }
+
+    render(<StatefulApp />);
+    fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
+    fireEvent.click(screen.getByRole("button", { name: "试听 微软晓晓" }));
+
+    expect(cancelSpeech).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "停止试听 微软晓晓" })).toBeVisible();
   });
 
   it("offers only valid recovery actions for connection and microphone errors", () => {

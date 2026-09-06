@@ -190,6 +190,14 @@ export class BrowserSpeechProvider {
       }));
   }
 
+  subscribeVoices(listener: (voices: BrowserVoice[]) => void): () => void {
+    const synthesis = this.scope?.speechSynthesis;
+    if (!synthesis) return () => undefined;
+    const handleVoicesChanged = () => listener(this.voices());
+    synthesis.addEventListener("voiceschanged", handleVoicesChanged);
+    return () => synthesis.removeEventListener("voiceschanged", handleVoicesChanged);
+  }
+
   speak(text: string, voiceKey: string | null, rate: number): Promise<void> {
     if (!this.scope?.speechSynthesis || !this.scope.SpeechSynthesisUtterance) {
       return Promise.reject(new Error("Speech synthesis is not supported"));

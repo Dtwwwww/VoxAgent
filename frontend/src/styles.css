@@ -499,6 +499,12 @@ button:active:not(:disabled) {
   background: #f4f3ff;
 }
 
+.voice-status__fallback {
+  padding-left: 9px;
+  border-left: 1px solid currentColor;
+  opacity: 0.82;
+}
+
 .voice-status[data-state="listening"] {
   color: #a63e42;
   background: #fff0f0;

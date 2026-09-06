@@ -128,10 +128,11 @@ export class RealtimeVoiceEngine {
   constructor(private readonly dependencies: RealtimeVoiceDependencies) {}
 
   async start(options: StartRealtimeOptions): Promise<void> {
-    if (this.snapshot.active) await this.stop();
-    else if (this.stopPromise) await this.stopPromise;
-
+    const stopping = this.snapshot.active ? this.stop() : this.stopPromise;
     const generation = ++this.generation;
+    if (stopping) await stopping;
+    if (generation !== this.generation) return;
+
     this.options = { ...options };
     this.track = null;
     this.captureAbort = new AbortController();
@@ -175,9 +176,9 @@ export class RealtimeVoiceEngine {
   }
 
   async stop(): Promise<void> {
+    ++this.generation;
     if (!this.snapshot.active) return this.stopPromise ?? Promise.resolve();
 
-    ++this.generation;
     this.captureAbort?.abort();
     this.captureAbort = null;
     this.clearTimers();

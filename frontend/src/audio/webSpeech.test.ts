@@ -63,10 +63,18 @@ class FakeUtterance {
 
 function fakeWindow(recognition: FakeRecognition, voices: SpeechSynthesisVoice[] = []) {
   const utterances: FakeUtterance[] = [];
+  let currentVoices = voices;
+  const voiceChangeListeners = new Set<EventListenerOrEventListenerObject>();
   const synthesis = {
-    getVoices: () => voices,
+    getVoices: () => currentVoices,
     speak: vi.fn(),
     cancel: vi.fn(),
+    addEventListener: vi.fn((type: string, listener: EventListenerOrEventListenerObject) => {
+      if (type === "voiceschanged") voiceChangeListeners.add(listener);
+    }),
+    removeEventListener: vi.fn((type: string, listener: EventListenerOrEventListenerObject) => {
+      if (type === "voiceschanged") voiceChangeListeners.delete(listener);
+    }),
   };
   const scope = {
     SpeechRecognition: class { constructor() { return recognition; } },
@@ -79,7 +87,21 @@ function fakeWindow(recognition: FakeRecognition, voices: SpeechSynthesisVoice[]
       }
     },
   } as unknown as Window;
-  return { scope, synthesis, utterances };
+  return {
+    scope,
+    synthesis,
+    utterances,
+    setVoices(nextVoices: SpeechSynthesisVoice[]) {
+      currentVoices = nextVoices;
+    },
+    emitVoicesChanged() {
+      const event = new Event("voiceschanged");
+      for (const listener of voiceChangeListeners) {
+        if (typeof listener === "function") listener(event);
+        else listener.handleEvent(event);
+      }
+    },
+  };
 }
 
 describe("BrowserSpeechProvider", () => {
@@ -257,6 +279,31 @@ describe("BrowserSpeechProvider", () => {
     expect(utterances[0]).toMatchObject({ text: "你好", lang: "zh-CN", rate: 1.2, voice: voices[1] });
     utterances[0].onend?.();
     await expect(spoken).resolves.toBeUndefined();
+  });
+
+  it("subscribes to delayed browser voices and removes the listener", () => {
+    const recognition = new FakeRecognition();
+    const browser = fakeWindow(recognition);
+    const provider = new BrowserSpeechProvider(browser.scope);
+    const onVoicesChanged = vi.fn();
+    const unsubscribe = provider.subscribeVoices(onVoicesChanged);
+    const chineseVoice = {
+      voiceURI: "zh-xiaoxiao",
+      name: "Microsoft Xiaoxiao",
+      lang: "zh-CN",
+      localService: false,
+    } as SpeechSynthesisVoice;
+
+    browser.setVoices([chineseVoice]);
+    browser.emitVoicesChanged();
+    expect(onVoicesChanged).toHaveBeenCalledWith([
+      { key: "zh-xiaoxiao", name: "Microsoft Xiaoxiao", lang: "zh-CN", localService: false },
+    ]);
+
+    unsubscribe();
+    browser.emitVoicesChanged();
+    expect(onVoicesChanged).toHaveBeenCalledTimes(1);
+    expect(browser.synthesis.removeEventListener).toHaveBeenCalledWith("voiceschanged", expect.any(Function));
   });
 
   it("keeps speech-end and natural recognition-end callbacks distinct", async () => {

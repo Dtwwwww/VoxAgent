@@ -88,7 +88,7 @@ export interface VoiceSessionController {
   startRealtimeCall(): Promise<void>;
   stopRealtimeCall(): Promise<void>;
   setSpeechMode(mode: SpeechMode): void;
-  selectMicrophone(deviceId: string): void;
+  selectMicrophone(deviceId: string): Promise<void>;
   selectBrowserVoice(voiceKey: string): void;
   acceptOnlineSpeechNotice(): void;
 }
@@ -135,6 +135,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const settingsRef = useRef<VoiceSettings>(initialSettings);
   const realtimeSnapshotRef = useRef<RealtimeSnapshot>({ ...OFF_REALTIME_SNAPSHOT });
   const realtimeStartGenerationRef = useRef(0);
+  const realtimeCallRequestedRef = useRef(false);
   const selectedMicrophoneIdRef = useRef<string | null>(initialSettings.microphoneDeviceId);
   const speechModeRef = useRef<SpeechMode>(initialSettings.speechMode);
   const selectedBrowserVoiceKeyRef = useRef<string | null>(initialSettings.browserVoiceKey);
@@ -253,6 +254,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         else if (snapshot.state !== "connecting") setMicrophoneActive(true);
       },
       onTerminalError(browserError: BrowserSpeechFailure) {
+        realtimeCallRequestedRef.current = false;
         setError({
           code: browserError.code,
           message: browserError.message || "实时语音启动失败，请检查麦克风权限后重试",
@@ -291,6 +293,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, []);
 
   const stopLocalResources = useCallback(async () => {
+    realtimeCallRequestedRef.current = false;
     realtimeStartGenerationRef.current += 1;
     captureLifecycleRef.current += 1;
     manualSpeechGenerationRef.current += 1;
@@ -392,6 +395,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if ("turn_id" in event) maximumTurnIdRef.current = Math.max(maximumTurnIdRef.current, event.turn_id);
     switch (event.type) {
       case "session.ready":
+        realtimeCallRequestedRef.current = false;
         realtimeStartGenerationRef.current += 1;
         if (realtimeSnapshotRef.current.active) void realtimeEngineRef.current?.stop();
         sessionIdRef.current = event.session_id;
@@ -765,6 +769,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [send]);
 
   const startRealtimeCall = useCallback(async () => {
+    realtimeCallRequestedRef.current = true;
     const generation = ++realtimeStartGenerationRef.current;
     pendingBrowserTranscriptRequestRef.current = null;
     activeBrowserTranscriptRef.current = null;
@@ -819,6 +824,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [persistSettings]);
 
   const stopRealtimeCall = useCallback(async () => {
+    realtimeCallRequestedRef.current = false;
     realtimeStartGenerationRef.current += 1;
     pendingBrowserTranscriptRequestRef.current = null;
     activeBrowserTranscriptRef.current = null;
@@ -833,13 +839,14 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     persistSettings({ speechMode: mode });
   }, [persistSettings]);
 
-  const selectMicrophone = useCallback((deviceId: string) => {
+  const selectMicrophone = useCallback(async (deviceId: string) => {
     const selected = microphones.find((device) => device.deviceId === deviceId);
-    if (!selected) return;
+    if (!selected || selected.deviceId === selectedMicrophoneIdRef.current) return;
     selectedMicrophoneIdRef.current = selected.deviceId;
     setSelectedMicrophoneId(selected.deviceId);
     persistSettings({ microphoneDeviceId: selected.deviceId, microphoneLabel: selected.label });
-  }, [microphones, persistSettings]);
+    if (realtimeCallRequestedRef.current) await startRealtimeCall();
+  }, [microphones, persistSettings, startRealtimeCall]);
 
   const selectBrowserVoice = useCallback((voiceKey: string) => {
     if (!browserVoices.some((voice) => voice.key === voiceKey)) return;
@@ -1051,6 +1058,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, []);
 
   const clearLocalData = useCallback(() => {
+    realtimeCallRequestedRef.current = false;
     realtimeStartGenerationRef.current += 1;
     void realtimeEngineRef.current?.stop();
     cancelActive();
@@ -1070,6 +1078,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     await stopLocalResources();
     setConnectionStatus("disconnected");
   }, [stopLocalResources]);
+
+  useEffect(() => browserSpeechRef.current?.subscribeVoices(setBrowserVoices), []);
 
   useEffect(() => () => {
     const socket = socketRef.current;

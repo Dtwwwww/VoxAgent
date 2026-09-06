@@ -22,8 +22,10 @@ interface VoicePickerProps {
 export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
   const browserSpeechRef = useRef<BrowserSpeechProvider | null>(null);
   const [previewingBrowserVoiceKey, setPreviewingBrowserVoiceKey] = useState<string | null>(null);
+  onCloseRef.current = onClose;
   if (!browserSpeechRef.current) browserSpeechRef.current = new BrowserSpeechProvider();
 
   useEffect(() => () => browserSpeechRef.current?.close(), []);
@@ -33,7 +35,7 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     closeRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onCloseRef.current();
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => {
@@ -41,7 +43,7 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
       browserSpeechRef.current?.cancelSpeech();
       previousFocusRef.current?.focus();
     };
-  }, [onClose, open]);
+  }, [open]);
 
   if (!open) return null;
 

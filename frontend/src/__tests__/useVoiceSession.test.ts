@@ -509,6 +509,45 @@ describe("queued native-rate playback", () => {
 });
 
 describe("useVoiceSession", () => {
+  it("updates delayed browser voices without starting a call and cleans up its listener", () => {
+    const originalSpeechSynthesis = Object.getOwnPropertyDescriptor(window, "speechSynthesis");
+    let voices: SpeechSynthesisVoice[] = [];
+    let voiceChangeListener: EventListener | null = null;
+    const speechSynthesis = {
+      getVoices: vi.fn(() => voices),
+      speak: vi.fn(),
+      cancel: vi.fn(),
+      addEventListener: vi.fn((type: string, listener: EventListener) => {
+        if (type === "voiceschanged") voiceChangeListener = listener;
+      }),
+      removeEventListener: vi.fn(),
+    };
+    Object.defineProperty(window, "speechSynthesis", { configurable: true, value: speechSynthesis });
+
+    const hook = renderHook(() => useVoiceSession({ url: "ws://127.0.0.1:8765/v1/voice?token=test" }));
+    expect(hook.result.current.browserVoices).toEqual([]);
+    expect(voiceChangeListener).not.toBeNull();
+
+    voices = [{
+      voiceURI: "zh-xiaoxiao",
+      name: "Microsoft Xiaoxiao",
+      lang: "zh-CN",
+      localService: false,
+    } as SpeechSynthesisVoice];
+    act(() => voiceChangeListener?.(new Event("voiceschanged")));
+
+    expect(hook.result.current.browserVoices).toEqual([
+      { key: "zh-xiaoxiao", name: "Microsoft Xiaoxiao", lang: "zh-CN", localService: false },
+    ]);
+    expect(navigator.mediaDevices.enumerateDevices).not.toHaveBeenCalled();
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+
+    hook.unmount();
+    expect(speechSynthesis.removeEventListener).toHaveBeenCalledWith("voiceschanged", voiceChangeListener);
+    if (originalSpeechSynthesis) Object.defineProperty(window, "speechSynthesis", originalSpeechSynthesis);
+    else Reflect.deleteProperty(window, "speechSynthesis");
+  });
+
   it("starts a browser realtime call and submits correlated final transcripts", async () => {
     let callbacks!: BrowserSpeechCallbacks;
     const browserStart = vi.spyOn(BrowserSpeechProvider.prototype, "start").mockImplementation(async (_track, nextCallbacks) => {
@@ -533,6 +572,98 @@ describe("useVoiceSession", () => {
 
     act(() => hook.result.current.submitText("文字问题"));
     expect(socket.jsonMessages().at(-1)).toEqual({ type: "text.submit", text: "文字问题", speak_response: false });
+  });
+
+  it("restarts an active realtime call on a newly selected physical microphone", async () => {
+    const browserStart = vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
+    const firstTrackStop = vi.fn();
+    const secondTrackStop = vi.fn();
+    Object.assign(navigator.mediaDevices, {
+      enumerateDevices: vi.fn().mockResolvedValue([
+        { deviceId: "realtek", groupId: "realtek-group", label: "Microphone Array (Realtek)", kind: "audioinput", toJSON: () => ({}) },
+        { deviceId: "usb", groupId: "usb-group", label: "USB Microphone", kind: "audioinput", toJSON: () => ({}) },
+      ]),
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia)
+      .mockResolvedValueOnce(microphoneStream(firstTrackStop))
+      .mockResolvedValueOnce(microphoneStream(secondTrackStop));
+    const { hook } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+
+    await act(async () => hook.result.current.selectMicrophone("usb"));
+
+    expect(firstTrackStop).toHaveBeenCalledOnce();
+    expect(browserStart).toHaveBeenCalledTimes(2);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenLastCalledWith({
+      audio: expect.objectContaining({ deviceId: { exact: "usb" } }),
+    });
+    expect(hook.result.current.selectedMicrophoneId).toBe("usb");
+    expect(hook.result.current.realtime).toMatchObject({ active: true, state: "listening" });
+    expect(secondTrackStop).not.toHaveBeenCalled();
+  });
+
+  it("lets the latest rapid microphone selection win while the prior capture is closing", async () => {
+    const browserStart = vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
+    const closeGate = deferred();
+    Object.assign(navigator.mediaDevices, {
+      enumerateDevices: vi.fn().mockResolvedValue([
+        { deviceId: "realtek", groupId: "realtek-group", label: "Microphone Array (Realtek)", kind: "audioinput", toJSON: () => ({}) },
+        { deviceId: "usb", groupId: "usb-group", label: "USB Microphone", kind: "audioinput", toJSON: () => ({}) },
+      ]),
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia)
+      .mockResolvedValueOnce(microphoneStream())
+      .mockResolvedValue(microphoneStream());
+    const { hook } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    MockAudioContext.closeGates = [closeGate.promise];
+
+    let selectUsb!: Promise<void>;
+    act(() => { selectUsb = hook.result.current.selectMicrophone("usb"); });
+    await waitFor(() => expect(hook.result.current.realtime.active).toBe(false));
+    let selectRealtek!: Promise<void>;
+    act(() => { selectRealtek = hook.result.current.selectMicrophone("realtek"); });
+    await act(async () => {
+      closeGate.resolve();
+      await Promise.all([selectUsb, selectRealtek]);
+    });
+
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenLastCalledWith({
+      audio: expect.objectContaining({ deviceId: { exact: "realtek" } }),
+    });
+    expect(browserStart).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.selectedMicrophoneId).toBe("realtek");
+    expect(hook.result.current.realtime).toMatchObject({ active: true, state: "listening" });
+  });
+
+  it("does not reopen a microphone when the call is stopped during device restart", async () => {
+    const browserStart = vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
+    const closeGate = deferred();
+    Object.assign(navigator.mediaDevices, {
+      enumerateDevices: vi.fn().mockResolvedValue([
+        { deviceId: "realtek", groupId: "realtek-group", label: "Microphone Array (Realtek)", kind: "audioinput", toJSON: () => ({}) },
+        { deviceId: "usb", groupId: "usb-group", label: "USB Microphone", kind: "audioinput", toJSON: () => ({}) },
+      ]),
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    MockAudioContext.closeGates = [closeGate.promise];
+
+    let selecting!: Promise<void>;
+    act(() => { selecting = hook.result.current.selectMicrophone("usb"); });
+    await waitFor(() => expect(hook.result.current.realtime.active).toBe(false));
+    let stopping!: Promise<void>;
+    act(() => { stopping = hook.result.current.stopRealtimeCall(); });
+    await act(async () => {
+      closeGate.resolve();
+      await Promise.all([selecting, stopping]);
+    });
+
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
+    expect(browserStart).toHaveBeenCalledOnce();
+    expect(hook.result.current.realtime).toMatchObject({ active: false, state: "off" });
   });
 
   it("routes each server event through the engine once and keeps partial ASR transient", async () => {
