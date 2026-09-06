@@ -22,7 +22,7 @@ const LEGACY_VOICE_KEY = "voxagent.voice";
 const defaults: VoiceSettings = {
   voiceKey: null,
   speed: 1.0,
-  speechMode: "online-preferred",
+  speechMode: "local-only",
   microphoneDeviceId: null,
   microphoneLabel: null,
   browserVoiceKey: null,
@@ -44,7 +44,7 @@ function parseSettings(raw: string | null): VoiceSettings {
   return {
     voiceKey: optionalString(value.voiceKey),
     speed: speed(value.speed),
-    speechMode: value.speechMode === "local-only" ? "local-only" : "online-preferred",
+    speechMode: "local-only",
     microphoneDeviceId: optionalString(value.microphoneDeviceId),
     microphoneLabel: optionalString(value.microphoneLabel),
     browserVoiceKey: optionalString(value.browserVoiceKey),
@@ -66,7 +66,11 @@ function migrateV1Settings(raw: string): VoiceSettings {
 export function loadVoiceSettings(storage: StorageLike): VoiceSettings {
   const current = storage.getItem(VOICE_SETTINGS_KEY);
   try {
-    if (current !== null) return parseSettings(current);
+    if (current !== null) {
+      const settings = parseSettings(current);
+      saveVoiceSettings(storage, settings);
+      return settings;
+    }
   } catch {
     return { ...defaults };
   }

@@ -5,7 +5,7 @@ import { VOICE_SETTINGS_KEY, loadVoiceSettings, reconcileVoiceSettings, saveVoic
 const defaults = {
   voiceKey: null,
   speed: 1.0 as const,
-  speechMode: "online-preferred" as const,
+  speechMode: "local-only" as const,
   microphoneDeviceId: null,
   microphoneLabel: null,
   browserVoiceKey: null,
@@ -14,6 +14,34 @@ const defaults = {
 const voices = [{ voice_key: "default_voice", display_name: "声灵默认音色", description: "自然清晰，适合日常对话", gender: "neutral", is_default: true, previewable: true }];
 
 describe("voice settings", () => {
+  it("migrates saved online-preferred speech mode to local-only", () => {
+    const storage = new Map<string, string>();
+    const api = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    };
+    storage.set(VOICE_SETTINGS_KEY, JSON.stringify({
+      ...defaults,
+      speechMode: "online-preferred",
+      voiceKey: "default_voice",
+      microphoneDeviceId: "usb-mic",
+    }));
+
+    expect(loadVoiceSettings(api)).toEqual({
+      ...defaults,
+      speechMode: "local-only",
+      voiceKey: "default_voice",
+      microphoneDeviceId: "usb-mic",
+    });
+    expect(JSON.parse(storage.get(VOICE_SETTINGS_KEY)!)).toEqual({
+      ...defaults,
+      speechMode: "local-only",
+      voiceKey: "default_voice",
+      microphoneDeviceId: "usb-mic",
+    });
+  });
+
   it("recovers safely from malformed, private, or invalid saved data", () => {
     const storage = new Map<string, string>();
     const api = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) };
