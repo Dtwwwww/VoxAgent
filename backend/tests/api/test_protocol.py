@@ -45,6 +45,37 @@ def test_protocol_fixtures_match_contract():
             parse_server_message(payload)
 
 
+def test_browser_transcript_request_ids_are_strict_and_echo_on_turn_events():
+    submission = parse_client_message(
+        {"type": "voice.transcript.submit", "text": "你好", "request_id": 9}
+    )
+    final = parse_server_message(
+        {
+            "type": "asr.final",
+            "session_id": "00000000-0000-4000-8000-000000000001",
+            "turn_id": 3,
+            "text": "你好",
+            "request_id": 9,
+        }
+    )
+    cancelled = parse_server_message(
+        {
+            "type": "turn.cancelled",
+            "session_id": "00000000-0000-4000-8000-000000000001",
+            "turn_id": 3,
+            "request_id": 9,
+        }
+    )
+
+    assert submission.request_id == final.request_id == cancelled.request_id == 9
+    with pytest.raises(ValidationError):
+        parse_client_message({"type": "voice.transcript.submit", "text": "你好"})
+    with pytest.raises(ValidationError):
+        parse_client_message(
+            {"type": "voice.transcript.submit", "text": "你好", "request_id": 1.0}
+        )
+
+
 def test_session_ready_publishes_fixed_microphone_contract_and_validates_frames():
     fixtures = json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))
     messages = [parse_server_message(payload) for payload in fixtures["valid_server"]]

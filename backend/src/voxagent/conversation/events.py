@@ -42,6 +42,7 @@ class TextSubmit(ClientMessage):
 class VoiceTranscriptSubmit(ClientMessage):
     type: Literal["voice.transcript.submit"]
     text: str
+    request_id: StrictInt = Field(gt=0)
 
     @field_validator("text")
     @classmethod
@@ -173,6 +174,9 @@ class VadStopped(TurnServerMessage):
 class AsrFinal(TurnServerMessage):
     type: Literal["asr.final"]
     text: str
+    request_id: StrictInt | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
 
 
 class AsrPartial(TurnServerMessage):
@@ -257,6 +261,9 @@ class TtsError(TurnServerMessage):
 
 class TurnCancelled(TurnServerMessage):
     type: Literal["turn.cancelled"]
+    request_id: StrictInt | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
 
 
 class ErrorMessage(ServerMessage):

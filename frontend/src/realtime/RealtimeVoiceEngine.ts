@@ -110,7 +110,7 @@ export class RealtimeVoiceEngine {
   private emptyRecognitionRuns = 0;
   private fallbackUsed = false;
   private browserFinalOpen = true;
-  private awaitingBrowserEcho = false;
+  private awaitingBrowserRequestId: number | null = null;
   private activeTurn: TurnIdentity | null = null;
   private activeTurnHasFinal = false;
   private responseDone = false;
@@ -121,6 +121,7 @@ export class RealtimeVoiceEngine {
   private fallbackSpeechRequested = false;
   private localSpeechRequest: LocalSpeechRequest | null = null;
   private requestCounter = 0;
+  private transcriptRequestCounter = 0;
   private readonly cancelledTurnKeys = new Set<string>();
   private readonly highestTurnBySession = new Map<string, number>();
 
@@ -264,8 +265,9 @@ export class RealtimeVoiceEngine {
         this.emptyRecognitionRuns = 0;
         if (!this.browserFinalOpen) return;
         this.browserFinalOpen = false;
-        this.awaitingBrowserEcho = true;
-        this.dependencies.sendJson({ type: "voice.transcript.submit", text });
+        const requestId = ++this.transcriptRequestCounter;
+        this.awaitingBrowserRequestId = requestId;
+        this.dependencies.sendJson({ type: "voice.transcript.submit", text, request_id: requestId });
         this.publish({ interimText: "", state: "thinking" });
       },
       onSpeechStart: () => {
@@ -373,9 +375,9 @@ export class RealtimeVoiceEngine {
     const turn = eventTurn(event);
     if (this.cancelledTurnKeys.has(this.turnKey(turn))) return;
     if (this.snapshot.provider === "browser") {
-      if (!this.awaitingBrowserEcho) return;
+      if (this.awaitingBrowserRequestId === null || event.request_id !== this.awaitingBrowserRequestId) return;
       if (!this.isFreshTurn(turn)) return;
-      this.awaitingBrowserEcho = false;
+      this.awaitingBrowserRequestId = null;
       this.claimTurn(turn);
       this.activeTurn = turn;
     } else if (!sameTurn(this.activeTurn, turn)) {
@@ -536,7 +538,9 @@ export class RealtimeVoiceEngine {
     const matchesOwnedTurn = sameTurn(this.activeTurn, turn)
       || sameTurn(this.fallbackSpeechTurn, turn)
       || sameTurn(this.localSpeechRequest?.turn ?? null, turn);
-    if (!this.awaitingBrowserEcho && !matchesOwnedTurn) return;
+    const matchesAwaitingBrowser = this.awaitingBrowserRequestId !== null
+      && event.request_id === this.awaitingBrowserRequestId;
+    if (!matchesAwaitingBrowser && !matchesOwnedTurn) return;
     ++this.speechEpoch;
     this.dependencies.browserSpeech.cancelSpeech();
     this.dependencies.cancelLocalPlayback();
@@ -583,7 +587,7 @@ export class RealtimeVoiceEngine {
   }
 
   private hasPendingTurn(): boolean {
-    return this.awaitingBrowserEcho
+    return this.awaitingBrowserRequestId !== null
       || this.activeTurn !== null
       || this.fallbackSpeechTurn !== null
       || this.localSpeechRequest !== null;
@@ -623,7 +627,7 @@ export class RealtimeVoiceEngine {
   }
 
   private clearTurnOwnership(): void {
-    this.awaitingBrowserEcho = false;
+    this.awaitingBrowserRequestId = null;
     this.clearActiveTurn();
     this.fallbackSpeechTurn = null;
     this.fallbackSpeechDone = false;

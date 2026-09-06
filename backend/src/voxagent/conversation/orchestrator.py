@@ -101,6 +101,7 @@ class ConversationOrchestrator:
         )
         self.conversation_store = conversation_store
         self._source_message_ids: dict[int, int] = {}
+        self._voice_transcript_request_ids: dict[int, int] = {}
         self._clock_ms = clock_ms or (lambda: int(monotonic() * 1000))
         default = next(profile for profile in voice_catalog.public_profiles() if profile.is_default)
         self._voice_key = default.voice_key
@@ -355,9 +356,15 @@ class ConversationOrchestrator:
         ):
             yield item
 
-    async def submit_voice_transcript(self, text: str) -> AsyncIterator[Output]:
+    async def submit_voice_transcript(
+        self, text: str, request_id: int
+    ) -> AsyncIterator[Output]:
         async for item in self._submit_text_turn(
-            text, origin="voice", speak_response=False, echo_asr=True
+            text,
+            origin="voice",
+            speak_response=False,
+            echo_asr=True,
+            transcript_request_id=request_id,
         ):
             yield item
 
@@ -368,6 +375,7 @@ class ConversationOrchestrator:
         origin: Literal["text", "voice"],
         speak_response: bool,
         echo_asr: bool,
+        transcript_request_id: int | None = None,
     ) -> AsyncIterator[Output]:
         normalized = text.strip()
         async with self._action_lock:
@@ -384,6 +392,10 @@ class ConversationOrchestrator:
                 cancelled = await self._cancel_conversation()
                 await self._cancel_preview()
                 token = self.state.begin_text_turn()
+                if transcript_request_id is not None:
+                    self._voice_transcript_request_ids[token.turn_id] = (
+                        transcript_request_id
+                    )
                 if self.conversation_store is not None:
                     self._source_message_ids[token.turn_id] = (
                         await self.conversation_store.add_user(
@@ -407,6 +419,7 @@ class ConversationOrchestrator:
                 session_id=token.session_id,
                 turn_id=token.turn_id,
                 text=normalized,
+                request_id=transcript_request_id,
             )
         async for output in self._drain(("turn", token.turn_id), token.cancelled):
             yield output
@@ -1087,10 +1100,12 @@ class ConversationOrchestrator:
         self._active_task = None
         self._active_token = None
         self._active_has_pending_history = False
+        request_id = self._voice_transcript_request_ids.pop(token.turn_id, None)
         return TurnCancelled(
             type="turn.cancelled",
             session_id=token.session_id,
             turn_id=token.turn_id,
+            request_id=request_id,
         )
 
     async def _discard_pending_turn(self, turn_id: int) -> None:
@@ -1217,6 +1232,7 @@ class ConversationOrchestrator:
             self._output_changed.notify_all()
 
     def _finish_active(self, token: TurnToken) -> None:
+        self._voice_transcript_request_ids.pop(token.turn_id, None)
         if self._active_token is token:
             self._active_task = None
             self._active_token = None

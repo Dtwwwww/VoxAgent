@@ -49,7 +49,9 @@ class Orchestrator(Protocol):
 
     def submit_text(self, text: str, speak_response: bool) -> AsyncIterator[_Output]: ...
 
-    def submit_voice_transcript(self, text: str) -> AsyncIterator[_Output]: ...
+    def submit_voice_transcript(
+        self, text: str, request_id: int
+    ) -> AsyncIterator[_Output]: ...
 
     def speak_message(
         self, turn_id: int, request_id: int = 0
@@ -336,7 +338,9 @@ async def _dispatch_event(
             orchestrator.submit_text(event.text, event.speak_response), writer
         )
     elif event_type == "voice.transcript.submit":
-        await _forward_outputs(orchestrator.submit_voice_transcript(event.text), writer)
+        await _forward_outputs(
+            orchestrator.submit_voice_transcript(event.text, event.request_id), writer
+        )
     elif event_type == "assistant.speak":
         await _forward_outputs(
             orchestrator.speak_message(event.turn_id, event.request_id), writer

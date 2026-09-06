@@ -376,7 +376,7 @@ async def test_browser_voice_transcript_uses_voice_reply_path_without_tts():
 
     outputs = [
         item
-        async for item in orchestrator.submit_voice_transcript("浏览器识别结果")
+        async for item in orchestrator.submit_voice_transcript("浏览器识别结果", 11)
     ]
 
     assert [item.type for item in outputs] == [
@@ -385,12 +385,31 @@ async def test_browser_voice_transcript_uses_voice_reply_path_without_tts():
         "assistant.done",
     ]
     assert outputs[0].text == "浏览器识别结果"
+    assert outputs[0].request_id == 11
     assert orchestrator.history.messages_for_model()[-2:] == (
         ChatMessage("user", "浏览器识别结果"),
         ChatMessage("assistant", "测试回答"),
     )
     assert store.calls[0] == ("user", 1, "浏览器识别结果", "voice")
     assert tts.calls == []
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_browser_transcript_cancellation_and_echo_keep_their_request_ids():
+    orchestrator, _, _ = make_orchestrator(replies=[["旧回答"], ["新回答"]])
+    old = orchestrator.submit_voice_transcript("相同问题", 41)
+    old_echo = await anext(old)
+
+    replacement = orchestrator.submit_voice_transcript("相同问题", 42)
+    cancelled = await anext(replacement)
+    new_echo = await anext(replacement)
+
+    assert old_echo.type == "asr.final" and old_echo.request_id == 41
+    assert cancelled.type == "turn.cancelled" and cancelled.request_id == 41
+    assert new_echo.type == "asr.final" and new_echo.request_id == 42
+    assert [item async for item in old] == []
+    _ = [item async for item in replacement]
     await orchestrator.stop()
 
 
@@ -415,7 +434,7 @@ async def test_browser_voice_transcript_echoes_before_context_reply_and_memory()
     )
 
     outputs = [
-        item async for item in orchestrator.submit_voice_transcript("浏览器识别结果")
+        item async for item in orchestrator.submit_voice_transcript("浏览器识别结果", 12)
     ]
 
     assert [item.type for item in outputs] == [

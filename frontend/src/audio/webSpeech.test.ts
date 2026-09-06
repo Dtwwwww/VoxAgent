@@ -189,6 +189,57 @@ describe("BrowserSpeechProvider", () => {
     expect(fallbackCallbacks.onError).toHaveBeenCalledWith({ code: "track_not_supported", recoverable: true });
   });
 
+  it.each([
+    ["NotAllowedError", "not-allowed"],
+    ["SecurityError", "not-allowed"],
+    ["NotFoundError", "device-not-found"],
+    ["DevicesNotFoundError", "device-not-found"],
+  ] as const)("maps synchronous %s startup failures to terminal %s", async (name, code) => {
+    const recognition = new FakeRecognition();
+    recognition.start.mockImplementation(() => {
+      throw new DOMException("startup failed", name);
+    });
+    const handlers = callbacks();
+
+    await new BrowserSpeechProvider(fakeWindow(recognition).scope).start(
+      {} as MediaStreamTrack,
+      handlers,
+      false,
+    );
+
+    expect(handlers.onError).toHaveBeenCalledWith({
+      code,
+      recoverable: false,
+      message: "startup failed",
+    });
+  });
+
+  it.each([
+    ["NotAllowedError", "not-allowed"],
+    ["NotFoundError", "device-not-found"],
+  ] as const)("maps parameterless retry %s failures to terminal %s", async (name, code) => {
+    const recognition = new FakeRecognition();
+    recognition.start.mockImplementationOnce(() => {
+      throw new TypeError("selected track unsupported");
+    });
+    recognition.start.mockImplementationOnce(() => {
+      throw new DOMException("fallback failed", name);
+    });
+    const handlers = callbacks();
+
+    await new BrowserSpeechProvider(fakeWindow(recognition).scope).start(
+      {} as MediaStreamTrack,
+      handlers,
+      true,
+    );
+
+    expect(handlers.onError).toHaveBeenCalledWith({
+      code,
+      recoverable: false,
+      message: "fallback failed",
+    });
+  });
+
   it("exposes only Chinese voices", async () => {
     const recognition = new FakeRecognition();
     const voices = [

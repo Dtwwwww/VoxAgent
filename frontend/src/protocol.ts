@@ -3,7 +3,7 @@ export type VoiceSpeed = 0.8 | 1.0 | 1.2;
 export type ClientEvent =
   | { type: "session.start" }
   | { type: "text.submit"; text: string; speak_response?: boolean }
-  | { type: "voice.transcript.submit"; text: string }
+  | { type: "voice.transcript.submit"; text: string; request_id: number }
   | { type: "assistant.speak"; turn_id: number; request_id?: number }
   | { type: "voice.select"; voice_key: string; speed: VoiceSpeed }
   | { type: "voice.preview"; voice_key: string; speed: VoiceSpeed }
@@ -56,7 +56,7 @@ export type ServerEvent =
   | ({ type: "tts.done"; request_id: number } & TurnFields)
   | ({ type: "vad.started" } & TurnFields)
   | ({ type: "vad.stopped" } & TurnFields)
-  | ({ type: "asr.final"; text: string } & TurnFields)
+  | ({ type: "asr.final"; text: string; request_id?: number } & TurnFields)
   | ({ type: "asr.partial"; text: string } & TurnFields)
   | ({ type: "assistant.delta"; delta: string } & TurnFields)
   | ({ type: "assistant.done" } & TurnFields)
@@ -72,7 +72,7 @@ export type ServerEvent =
     } & TurnFields)
   | ({ type: "tts.chunk"; request_id: number; sequence: number; sample_rate: number; mime_type: "audio/wav"; byte_length: number } & TurnFields)
   | ({ type: "tts.error"; request_id: number; code: "tts_failed" | "tts_empty"; message: string; recoverable: boolean } & TurnFields)
-  | ({ type: "turn.cancelled" } & TurnFields)
+  | ({ type: "turn.cancelled"; request_id?: number } & TurnFields)
   | { type: "error"; code: string; message: string; recoverable: boolean };
 
 type JsonObject = Record<string, unknown>;
@@ -161,8 +161,12 @@ export function parseClientEvent(value: unknown): ClientEvent {
         : { type, text, speak_response: object.speak_response as boolean };
     }
     case "voice.transcript.submit": {
-      const object = objectWithExactKeys(value, ["type", "text"]);
-      return { type, text: transcriptText(object.text) };
+      const object = objectWithExactKeys(value, ["type", "text", "request_id"]);
+      return {
+        type,
+        text: transcriptText(object.text),
+        request_id: positiveInteger(object.request_id, "request_id"),
+      };
     }
     case "assistant.speak": {
       const object = objectWithExactKeys(value, ["type", "turn_id"], ["request_id"]);
@@ -232,10 +236,20 @@ export function parseServerEvent(value: unknown): ServerEvent {
     }
     case "vad.started":
     case "vad.stopped":
-    case "assistant.done":
-    case "turn.cancelled": {
+    case "assistant.done": {
       const object = turnObject(value);
       return { type, session_id: object.session_id as string, turn_id: object.turn_id as number };
+    }
+    case "turn.cancelled": {
+      const object = turnObject(value, [], ["request_id"]);
+      return object.request_id === undefined
+        ? { type, session_id: object.session_id as string, turn_id: object.turn_id as number }
+        : {
+            type,
+            session_id: object.session_id as string,
+            turn_id: object.turn_id as number,
+            request_id: positiveInteger(object.request_id, "request_id"),
+          };
     }
     case "tts.started":
     case "tts.done": {
@@ -248,8 +262,16 @@ export function parseServerEvent(value: unknown): ServerEvent {
       };
     }
     case "asr.final": {
-      const object = turnObject(value, ["text"]);
-      return { type, session_id: object.session_id as string, turn_id: object.turn_id as number, text: string(object.text, "text") };
+      const object = turnObject(value, ["text"], ["request_id"]);
+      return object.request_id === undefined
+        ? { type, session_id: object.session_id as string, turn_id: object.turn_id as number, text: string(object.text, "text") }
+        : {
+            type,
+            session_id: object.session_id as string,
+            turn_id: object.turn_id as number,
+            text: string(object.text, "text"),
+            request_id: positiveInteger(object.request_id, "request_id"),
+          };
     }
     case "asr.partial": {
       const object = turnObject(value, ["text"]);

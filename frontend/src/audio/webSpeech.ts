@@ -22,6 +22,7 @@ export interface BrowserSpeechFailure {
     | "language-not-supported"
     | "service-not-allowed"
     | "not-allowed"
+    | "device-not-found"
     | "recognition_error";
   recoverable: boolean;
   message?: string;
@@ -38,6 +39,21 @@ function stableRecognitionErrorCode(code: string): BrowserSpeechFailure["code"] 
   return STABLE_RECOGNITION_ERROR_CODES.has(code as BrowserSpeechFailure["code"])
     ? code as BrowserSpeechFailure["code"]
     : "recognition_error";
+}
+
+function recognitionStartFailure(error: unknown): BrowserSpeechFailure {
+  const record = typeof error === "object" && error !== null
+    ? error as { name?: unknown; message?: unknown }
+    : null;
+  const name = typeof record?.name === "string" ? record.name : "";
+  const message = typeof record?.message === "string" ? record.message : String(error);
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return { code: "not-allowed", recoverable: false, message };
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return { code: "device-not-found", recoverable: false, message };
+  }
+  return { code: "track_not_supported", recoverable: true };
 }
 
 const CHINESE_VOICE_NAME = /Chinese|中文|Xiaoxiao|Yunxi|Huihui|Yaoyao/i;
@@ -130,7 +146,7 @@ export class BrowserSpeechProvider {
       recognition.start(track);
     } catch (error) {
       if (!(error instanceof TypeError)) {
-        callbacks.onError({ code: "track_not_supported", recoverable: true });
+        callbacks.onError(recognitionStartFailure(error));
         return;
       }
       if (!allowDefaultInputFallback) {
@@ -139,8 +155,8 @@ export class BrowserSpeechProvider {
       }
       try {
         recognition.start();
-      } catch {
-        callbacks.onError({ code: "track_not_supported", recoverable: true });
+      } catch (fallbackError) {
+        callbacks.onError(recognitionStartFailure(fallbackError));
       }
     }
   }

@@ -57,8 +57,8 @@ class FakeOrchestrator:
             type="error", code="submitted_text", message="test", recoverable=True
         )
 
-    async def submit_voice_transcript(self, text: str):
-        self.calls.append(("submit_voice_transcript", text))
+    async def submit_voice_transcript(self, text: str, request_id: int):
+        self.calls.append(("submit_voice_transcript", text, request_id))
         yield ErrorMessage(
             type="error", code="submitted_voice", message="test", recoverable=True
         )
@@ -319,8 +319,8 @@ def test_browser_voice_transcript_does_not_block_follow_up_cancel():
             self.voice_started = Event()
             self.release_voice = Event()
 
-        async def submit_voice_transcript(self, text: str):
-            self.calls.append(("submit_voice_transcript", text))
+        async def submit_voice_transcript(self, text: str, request_id: int):
+            self.calls.append(("submit_voice_transcript", text, request_id))
             self.voice_started.set()
             await asyncio.to_thread(self.release_voice.wait, 2)
             yield ErrorMessage(
@@ -338,7 +338,7 @@ def test_browser_voice_transcript_does_not_block_follow_up_cancel():
 
     with client.websocket_connect(f"/v1/voice?token={SESSION_TOKEN}") as socket:
         socket.send_json(
-            {"type": "voice.transcript.submit", "text": "浏览器识别结果"}
+            {"type": "voice.transcript.submit", "text": "浏览器识别结果", "request_id": 5}
         )
         assert factory.instances[0].voice_started.wait(timeout=1)
         socket.send_json({"type": "turn.cancel"})
@@ -392,7 +392,7 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
     payloads = (
         {"type": "session.start"},
         {"type": "text.submit", "text": "  你好  ", "speak_response": True},
-        {"type": "voice.transcript.submit", "text": "  浏览器语音  "},
+        {"type": "voice.transcript.submit", "text": "  浏览器语音  ", "request_id": 7},
         {"type": "assistant.speak", "turn_id": 3, "request_id": 9},
         {"type": "voice.select", "voice_key": "clear_female", "speed": 1.2},
         {"type": "voice.preview", "voice_key": "clear_female", "speed": 0.8},
@@ -414,7 +414,7 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
     assert should_stop is True
     assert orchestrator.calls == [
         ("submit_text", "你好", True),
-        ("submit_voice_transcript", "浏览器语音"),
+        ("submit_voice_transcript", "浏览器语音", 7),
         ("speak_message", 3, 9),
         ("select_voice", "clear_female", 1.2),
         ("preview_voice", "clear_female", 0.8),

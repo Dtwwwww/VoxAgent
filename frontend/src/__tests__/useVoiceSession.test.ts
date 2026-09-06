@@ -235,6 +235,29 @@ describe("the frozen WebSocket protocol", () => {
     expect(() => parseServerEventJson(`{"type":"tts.chunk","session_id":"${SESSION_ID}","turn_id":1,"sequence":0.0e0,"sample_rate":24000,"mime_type":"audio/wav","byte_length":46}`)).toThrow();
   });
 
+  it("strictly correlates browser transcript submissions with server turn events", () => {
+    expect(parseClientEventJson('{"type":"voice.transcript.submit","text":"你好","request_id":9}')).toEqual({
+      type: "voice.transcript.submit",
+      text: "你好",
+      request_id: 9,
+    });
+    expect(parseServerEventJson(`{"type":"asr.final","session_id":"${SESSION_ID}","turn_id":3,"text":"你好","request_id":9}`)).toEqual({
+      type: "asr.final",
+      session_id: SESSION_ID,
+      turn_id: 3,
+      text: "你好",
+      request_id: 9,
+    });
+    expect(parseServerEventJson(`{"type":"turn.cancelled","session_id":"${SESSION_ID}","turn_id":3,"request_id":9}`)).toEqual({
+      type: "turn.cancelled",
+      session_id: SESSION_ID,
+      turn_id: 3,
+      request_id: 9,
+    });
+    expect(() => parseClientEventJson('{"type":"voice.transcript.submit","text":"你好"}')).toThrow();
+    expect(() => parseClientEventJson('{"type":"voice.transcript.submit","text":"你好","request_id":1.0}')).toThrow();
+  });
+
   it("parses strict memory proposals with source turn attribution", () => {
     expect(parseServerEvent({
       type: "memory.proposed",
