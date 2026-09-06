@@ -906,7 +906,26 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       && realtimeSnapshotRef.current.active
       && !onlineSpeechNoticeAcceptedRef.current
     ) return;
-    if (mode === "local-only") cancelVoicePreview(true);
+    if (mode === "local-only") {
+      cancelVoicePreview(true);
+      if (!realtimeSnapshotRef.current.active) {
+        const browserOwner = activeBrowserReplayOwnerRef.current;
+        if (browserOwner !== null) {
+          manualSpeechGenerationRef.current += 1;
+          activeBrowserReplayOwnerRef.current = null;
+          const turnId = activeReplayTurnRef.current;
+          if (turnId !== null) {
+            allowedReplayTurnsRef.current.delete(turnId);
+            sentReplayTurnsRef.current.delete(turnId);
+          }
+          activeReplayTurnRef.current = null;
+          activeReplayRequestRef.current = 0;
+          setSpeakingTurnId(null);
+          setVoiceStatus("idle");
+          browserSpeechRef.current?.cancelSpeech(browserOwner);
+        }
+      }
+    }
     speechModeRef.current = mode;
     setSpeechModeState(mode);
     persistSettings({ speechMode: mode });

@@ -1334,6 +1334,30 @@ describe("useVoiceSession", () => {
     expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
   });
 
+  it("switching to local-only cancels the exact manual browser owner while realtime is inactive", async () => {
+    const browserVoice = { key: "zh-xiaoxiao", name: "Xiaoxiao", lang: "zh-CN", localService: false };
+    vi.spyOn(BrowserSpeechProvider.prototype, "voices").mockReturnValue([browserVoice]);
+    const owned = mockOwnedBrowserReplay();
+    const { hook, socket } = openSession();
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: "手动重放。" });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+    act(() => hook.result.current.selectBrowserVoice(browserVoice.key));
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(owned.speak).toHaveBeenCalledOnce());
+    const manualOwner = owned.speak.mock.calls[0]?.[3];
+    owned.cancelSpeech.mockClear();
+
+    act(() => hook.result.current.setSpeechMode("local-only"));
+    await act(async () => Promise.resolve());
+
+    expect(manualOwner).toBeDefined();
+    expect(owned.cancelSpeech).toHaveBeenCalledWith(manualOwner);
+    expect(owned.wasCancelled()).toBe(true);
+    expect(hook.result.current.speakingTurnId).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+    expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
+  });
+
   it("stops realtime voice on socket close and session reset", async () => {
     vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
