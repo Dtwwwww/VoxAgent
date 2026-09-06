@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 VoiceGender = Literal["female", "male", "neutral"]
-VoiceEngine = Literal["kokoro", "melo"]
+VoiceEngine = Literal["kokoro", "melo", "breezyvoice"]
 _VOICE_FIELDS = frozenset(
     {
         "voice_key",
@@ -85,7 +85,7 @@ class VoiceCatalog:
         native_voice_id = record["native_voice_id"]
         if gender not in {"female", "male", "neutral"}:
             raise VoiceCatalogError("unknown gender")
-        if engine not in {"kokoro", "melo"}:
+        if engine not in {"kokoro", "melo", "breezyvoice"}:
             raise VoiceCatalogError("unknown engine")
         if (
             isinstance(native_voice_id, bool)

@@ -70,9 +70,11 @@ def test_production_catalog_exposes_only_intelligible_local_fallback():
     catalog = load_production_catalog()
     profiles = catalog.public_profiles()
 
-    assert [item.voice_key for item in profiles] == ["default_voice"]
+    assert [item.voice_key for item in profiles] == ["default_voice", "breezy_tw_female"]
     assert profiles[0].is_default is True
     assert not hasattr(profiles[0], "engine")
     assert not hasattr(profiles[0], "native_voice_id")
     internal = catalog.get("default_voice")
     assert (internal.engine, internal.native_voice_id) == ("kokoro", 3)
+    breezy = catalog.get("breezy_tw_female")
+    assert (breezy.engine, breezy.native_voice_id) == ("breezyvoice", 0)

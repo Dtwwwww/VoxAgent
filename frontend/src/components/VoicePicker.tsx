@@ -43,11 +43,10 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
 
   if (!open) return null;
 
-  const localFallback = controller.voices.find((voice) => voice.is_default) ?? controller.voices[0] ?? null;
-  const selectedVoiceKey = localFallback?.voice_key === controller.selectedVoice?.voiceKey
-    ? controller.selectedVoice.voiceKey
-    : localFallback?.voice_key ?? null;
-  const selectedVoice = localFallback?.voice_key === selectedVoiceKey ? localFallback : null;
+  const visibleLocalVoices = controller.voices.filter((voice) => !/^(?:melo|kokoro)-/u.test(voice.voice_key));
+  const localFallback = visibleLocalVoices.find((voice) => voice.is_default) ?? visibleLocalVoices[0] ?? null;
+  const selectedVoice = visibleLocalVoices.find((voice) => voice.voice_key === controller.selectedVoice?.voiceKey) ?? localFallback;
+  const selectedVoiceKey = selectedVoice?.voice_key ?? null;
   const selectedBrowserVoice = controller.browserVoices.find((voice) => voice.key === controller.selectedBrowserVoiceKey);
   const speed = controller.selectedVoice?.speed ?? 1;
   const previewBusy = controller.previewingVoiceKey !== null;
@@ -105,20 +104,21 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
             </button>
           </article>;
         })}
-        {localFallback && (() => {
-          const voice = localFallback;
+        {visibleLocalVoices.map((voice) => {
           const selected = voice.voice_key === selectedVoiceKey;
           const previewing = voice.voice_key === controller.previewingVoiceKey;
-          return <article className="voice-card" key={voice.voice_key} data-selected={selected} data-provider="local">
+          const isHighQuality = voice.voice_key === "breezy_tw_female";
+          return <article className="voice-card" key={voice.voice_key} aria-label={voice.display_name} data-selected={selected} data-provider={isHighQuality ? "local-high-quality" : "local"}>
             <button
               className="voice-card__select"
               type="button"
               aria-pressed={selected}
+              aria-label={`选择${voice.display_name}`}
               onClick={() => controller.selectVoice(voice.voice_key, speed)}
             >
               <span className="voice-card__title">{voice.display_name}{selected && <span className="voice-card__check">已选择</span>}</span>
               <span className="voice-card__description">{voice.description}</span>
-              <span className="voice-card__provider">本地·生成较慢</span>
+              <span className="voice-card__provider">{isHighQuality ? "本地·高质量朗读（非实时）" : "本地·实时可用"}</span>
             </button>
             <button
               className="preview-button"
@@ -134,7 +134,7 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
               {previewing ? "停止试听" : "试听"}
             </button>
           </article>;
-        })()}
+        })}
       </div>
 
       <fieldset className="speed-picker">

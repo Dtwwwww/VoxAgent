@@ -315,13 +315,39 @@ describe("App", () => {
     expect(cards[0]).toHaveTextContent("在线/系统");
     expect(cards[1]).toHaveTextContent("系统慧慧");
     expect(cards[2]).toHaveTextContent("声灵默认音色");
-    expect(cards[2]).toHaveTextContent("本地·生成较慢");
+    expect(cards[2]).toHaveTextContent("本地·实时可用");
     expect(dialog).not.toHaveTextContent("Melo");
     expect(dialog).not.toHaveTextContent("melo-native-0");
 
     fireEvent.click(within(dialog).getByRole("button", { name: "试听 微软晓晓" }));
     expect(session.selectBrowserVoice).toHaveBeenCalledWith("browser-xiaoxiao");
     expect(session.previewVoice).toHaveBeenCalledWith("browser-xiaoxiao", 1, "browser");
+  });
+
+  it("shows the Taiwanese BreezyVoice as a selectable high-quality local voice", () => {
+    const session = controller({
+      voices: [
+        ...controller().voices,
+        {
+          voice_key: "breezy_tw_female",
+          display_name: "台湾腔女声",
+          description: "台湾普通话女声；高质量朗读（需配置 BreezyVoice），生成较慢",
+          gender: "female",
+          is_default: false,
+          previewable: false,
+        },
+      ],
+    });
+    render(<App controller={session} />);
+    fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
+
+    const dialog = screen.getByRole("dialog", { name: "选择音色" });
+    const card = within(dialog).getByRole("article", { name: /台湾腔女声/ });
+    expect(card).toHaveTextContent("高质量朗读");
+    expect(card).toHaveTextContent("本地·高质量朗读（非实时）");
+    expect(within(card).getByRole("button", { name: "试听 台湾腔女声" })).toBeDisabled();
+    fireEvent.click(within(card).getByRole("button", { name: /选择台湾腔女声/ }));
+    expect(session.selectVoice).toHaveBeenCalledWith("breezy_tw_female", 1);
   });
 
   it("asks the controller to stop only its active preview when the picker closes", () => {

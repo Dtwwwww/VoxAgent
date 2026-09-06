@@ -1,5 +1,7 @@
 # VoxAgent（声灵）
 
+本地音色选择器已加入台湾普通话女声 BreezyVoice。配置和当前限制见 [BreezyVoice 本地配置说明](docs/breezyvoice-local-setup.md)。
+
 Local-first Windows voice companion for a GTX 1660 Ti / 16GB target machine.
 
 ## Repository layout

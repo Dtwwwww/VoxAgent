@@ -133,7 +133,13 @@ class _CatalogTts:
 
     def synthesize(self, text: str, voice_key: str, speed: float):
         profile = self._catalog.get(voice_key)
-        return self._engines[profile.engine].synthesize(text, voice_key, speed)
+        engine = self._engines.get(profile.engine)
+        if engine is None:
+            raise RuntimeError(
+                "台湾腔女声已加入音色选择，但本机尚未配置 BreezyVoice 合成服务；"
+                "请先完成本地模型配置"
+            )
+        return engine.synthesize(text, voice_key, speed)
 
 
 def _create_production_app(session_token: str):
