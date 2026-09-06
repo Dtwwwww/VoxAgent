@@ -18,6 +18,13 @@ const fixtures = JSON.parse(fixtureSource.replace(
   invalid_client: unknown[];
   valid_server: unknown[];
   invalid_server: unknown[];
+  astral_text_boundaries: Array<{
+    event_type: "voice.transcript.submit";
+    scalar: string;
+    valid_count: number;
+    invalid_count: number;
+    request_id: number;
+  }>;
 };
 
 function deferred<T = void>() {
@@ -258,6 +265,24 @@ describe("the frozen WebSocket protocol", () => {
     });
     expect(() => parseClientEventJson('{"type":"voice.transcript.submit","text":"你好"}')).toThrow();
     expect(() => parseClientEventJson('{"type":"voice.transcript.submit","text":"你好","request_id":1.0}')).toThrow();
+  });
+
+  it("honors the shared astral 4,000/4,001-code-point boundary fixture", () => {
+    const boundary = fixtures.astral_text_boundaries[0];
+    expect([...boundary.scalar]).toHaveLength(1);
+    const valid = {
+      type: boundary.event_type,
+      text: boundary.scalar.repeat(boundary.valid_count),
+      request_id: boundary.request_id,
+    };
+
+    const parsed = parseClientEvent(valid);
+    if (parsed.type !== "voice.transcript.submit") throw new TypeError("unexpected event type");
+    expect([...parsed.text]).toHaveLength(4_000);
+    expect(() => parseClientEvent({
+      ...valid,
+      text: boundary.scalar.repeat(boundary.invalid_count),
+    })).toThrow();
   });
 
   it("parses strict memory proposals with source turn attribution", () => {
@@ -686,6 +711,32 @@ describe("useVoiceSession", () => {
     ]);
   });
 
+  it("turns local partial then final ASR into exactly one permanent user message", async () => {
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.setSpeechMode("local-only"));
+    await act(async () => hook.result.current.startRealtimeCall());
+
+    emit(socket, { type: "vad.started", session_id: SESSION_ID, turn_id: 4 });
+    emit(socket, { type: "asr.partial", session_id: SESSION_ID, turn_id: 4, text: "本地" });
+    emit(socket, { type: "asr.partial", session_id: SESSION_ID, turn_id: 4, text: "本地最终" });
+    expect(hook.result.current.messages).toEqual([]);
+    expect(hook.result.current.realtime.interimText).toBe("本地最终");
+
+    emit(socket, { type: "asr.final", session_id: SESSION_ID, turn_id: 4, text: "本地最终转写" });
+
+    expect(hook.result.current.messages).toEqual([
+      expect.objectContaining({
+        turnId: 4,
+        role: "user",
+        origin: "voice",
+        text: "本地最终转写",
+        status: "complete",
+      }),
+    ]);
+    expect(hook.result.current.realtime.interimText).toBe("");
+  });
+
   it("persists notice acceptance without changing it when local-only starts", async () => {
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
     const { hook } = openSession();
@@ -806,6 +857,62 @@ describe("useVoiceSession", () => {
     expect(MockAudioContext.instances.flatMap((context) => context.sources).filter((source) => source.start.mock.calls.length > 0)).toHaveLength(1);
   });
 
+  it("keeps completed text visible and returns to listening when Kokoro fallback fails", async () => {
+    let callbacks!: BrowserSpeechCallbacks;
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockImplementation(async (_track, nextCallbacks) => {
+      callbacks = nextCallbacks;
+    });
+    vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockRejectedValue(
+      new Error("No Chinese browser voice available"),
+    );
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    act(() => callbacks.onFinal("请回答"));
+    const transcriptRequestId = socket.jsonMessages().at(-1)!.request_id as number;
+    emit(socket, {
+      type: "asr.final",
+      session_id: SESSION_ID,
+      turn_id: 8,
+      request_id: transcriptRequestId,
+      text: "请回答",
+    });
+    emit(socket, {
+      type: "assistant.delta",
+      session_id: SESSION_ID,
+      turn_id: 8,
+      delta: "即使朗读失败，这段文字也必须保留。",
+    });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 8 });
+    await waitFor(() => expect(socket.jsonMessages().at(-1)).toMatchObject({
+      type: "assistant.speak",
+      turn_id: 8,
+    }));
+    const speechRequestId = socket.jsonMessages().at(-1)!.request_id as number;
+
+    emit(socket, {
+      type: "tts.error",
+      session_id: SESSION_ID,
+      turn_id: 8,
+      request_id: speechRequestId,
+      code: "tts_failed",
+      message: "朗读失败，文字回答仍然可用",
+      recoverable: true,
+    });
+
+    expect(hook.result.current.messages).toContainEqual(expect.objectContaining({
+      turnId: 8,
+      role: "assistant",
+      text: "即使朗读失败，这段文字也必须保留。",
+      status: "complete",
+    }));
+    expect(hook.result.current.realtime).toMatchObject({
+      active: true,
+      provider: "local",
+      state: "listening",
+    });
+  });
+
   it("uses one request sequence for engine fallback and manual replay", async () => {
     let callbacks!: BrowserSpeechCallbacks;
     vi.spyOn(BrowserSpeechProvider.prototype, "start").mockImplementation(async (_track, nextCallbacks) => {
@@ -918,6 +1025,38 @@ describe("useVoiceSession", () => {
     await act(async () => Promise.resolve());
 
     expect(socket.jsonMessages().at(-1)).toEqual({ type: "text.submit", text: "只返回文字", speak_response: false });
+    expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
+  });
+
+  it("keeps a typed reply silent while an online realtime call remains active", async () => {
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
+    const browserSpeak = vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockResolvedValue();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+
+    act(() => hook.result.current.submitText("只回答文字"));
+    emit(socket, {
+      type: "assistant.delta",
+      session_id: SESSION_ID,
+      turn_id: 9,
+      delta: "这是文字输入的回答。",
+    });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 9 });
+
+    expect(hook.result.current.realtime).toMatchObject({ active: true, provider: "browser" });
+    expect(socket.jsonMessages()).toContainEqual({
+      type: "text.submit",
+      text: "只回答文字",
+      speak_response: false,
+    });
+    expect(hook.result.current.messages).toContainEqual(expect.objectContaining({
+      turnId: 9,
+      role: "assistant",
+      text: "这是文字输入的回答。",
+      status: "complete",
+    }));
+    expect(browserSpeak).not.toHaveBeenCalled();
     expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
   });
 
@@ -1731,6 +1870,49 @@ describe("useVoiceSession", () => {
     emit(oldSocket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 1, delta: "stale" });
 
     expect(hook.result.current.messages.filter((message) => message.role === "assistant").map((message) => message.text)).toEqual(["old", "new"]);
+  });
+
+  it("ignores old engine callbacks after a WebSocket reconnect", async () => {
+    const recognitionRuns: BrowserSpeechCallbacks[] = [];
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockImplementation(async (_track, callbacks) => {
+      recognitionRuns.push(callbacks);
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket: oldSocket } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    const oldCallbacks = recognitionRuns[0];
+
+    await act(async () => hook.result.current.disconnect());
+    act(() => hook.result.current.connect());
+    const newSocket = MockWebSocket.instances.at(-1)!;
+    act(() => newSocket.open());
+    emit(newSocket, readyEvent());
+    await act(async () => hook.result.current.startRealtimeCall());
+    const currentMessages = newSocket.jsonMessages().length;
+
+    act(() => {
+      oldCallbacks.onInterim("旧会话临时字幕");
+      oldCallbacks.onFinal("旧会话最终转写");
+      oldCallbacks.onError({ code: "network", recoverable: true });
+      oldCallbacks.onRecognitionEnd();
+      oldSocket.receive(JSON.stringify({
+        type: "asr.final",
+        session_id: SESSION_ID,
+        turn_id: 1,
+        request_id: 1,
+        text: "旧会话最终转写",
+      }));
+    });
+
+    expect(newSocket.jsonMessages()).toHaveLength(currentMessages);
+    expect(hook.result.current.messages).toEqual([]);
+    expect(hook.result.current.realtime).toMatchObject({
+      active: true,
+      provider: "browser",
+      state: "listening",
+      interimText: "",
+      fallbackReason: null,
+    });
   });
 
   it("tears down microphone and playback on an unexpected socket close", async () => {

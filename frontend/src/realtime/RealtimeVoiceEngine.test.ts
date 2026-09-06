@@ -49,6 +49,16 @@ const ONLINE_OPTIONS: StartRealtimeOptions = {
   allowDefaultInputFallback: false,
 };
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 class FakeCapture {
   readonly track = { readyState: "live" } as MediaStreamTrack;
   readonly start = vi.fn(async (_signal?: AbortSignal) => this.track);
@@ -163,6 +173,34 @@ describe("RealtimeVoiceEngine", () => {
     expect(states.at(-1)?.notice).toBeNull();
   });
 
+  it("keeps user-speaking state when an interrupted browser utterance ends late", async () => {
+    const { browserSpeech, engine, states } = makeHarness();
+    const utteranceEnded = deferred<void>();
+    browserSpeech.speak.mockImplementationOnce((text: string) => {
+      browserSpeech.spoken.push(text);
+      return utteranceEnded.promise;
+    });
+    await engine.start(ONLINE_OPTIONS);
+    const recognizer = browserSpeech.runs[0];
+    recognizer.onFinal("请开始回答");
+    engine.handleServerEvent(browserAsrFinal(SESSION_ID, 4, "请开始回答", 1));
+    engine.handleServerEvent({
+      type: "assistant.delta",
+      session_id: SESSION_ID,
+      turn_id: 4,
+      delta: "正在朗读。",
+    });
+    await vi.waitFor(() => expect(states.at(-1)?.state).toBe("speaking"));
+
+    recognizer.onSpeechStart();
+    expect(states.at(-1)?.state).toBe("user_speaking");
+    utteranceEnded.resolve();
+    await utteranceEnded.promise;
+    await Promise.resolve();
+
+    expect(states.at(-1)?.state).toBe("user_speaking");
+  });
+
   it("falls back once for a stable browser network error code", async () => {
     const { browserSpeech, cancelLocalPlayback, capture, engine, states } = makeHarness();
     await engine.start(ONLINE_OPTIONS);
@@ -180,6 +218,26 @@ describe("RealtimeVoiceEngine", () => {
     expect(capture.setForwardPcm.mock.calls.filter(([enabled]) => enabled)).toHaveLength(1);
     expect(browserSpeech.stopRecognition).toHaveBeenCalledOnce();
     expect(cancelLocalPlayback).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a late browser final after network fallback starts local PCM", async () => {
+    const { browserSpeech, capture, engine, sentJson, states } = makeHarness();
+    await engine.start(ONLINE_OPTIONS);
+    const staleRecognizer = browserSpeech.runs[0];
+
+    staleRecognizer.onError({ code: "network", recoverable: true });
+    expect(capture.setForwardPcm).toHaveBeenLastCalledWith(true);
+    engine.handleServerEvent({ type: "vad.started", session_id: SESSION_ID, turn_id: 5 });
+    engine.handleServerEvent({
+      type: "asr.final",
+      session_id: SESSION_ID,
+      turn_id: 5,
+      text: "本地最终转写",
+    });
+    staleRecognizer.onFinal("迟到的浏览器最终转写");
+
+    expect(sentJson.filter((event) => event.type === "voice.transcript.submit")).toEqual([]);
+    expect(states.at(-1)).toMatchObject({ provider: "local", state: "thinking" });
   });
 
   it("treats microphone permission denial and browser not-allowed as terminal", async () => {

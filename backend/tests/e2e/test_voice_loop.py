@@ -84,6 +84,24 @@ class RecordingTts:
         return AudioChunk(b"RIFF-e2e", 24000, 0.25)
 
 
+class RecordingConversationStore:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    async def add_user(self, turn_id: int, text: str, source: str) -> int:
+        self.calls.append(("user", turn_id, text, source))
+        return len(self.calls)
+
+    async def complete_assistant(self, turn_id: int, text: str) -> None:
+        self.calls.append(("assistant", turn_id, text))
+
+    async def cancel_turn(self, turn_id: int) -> None:
+        self.calls.append(("cancel", turn_id))
+
+    async def reset(self) -> None:
+        self.calls.append(("reset",))
+
+
 class BlockingFirstTts(RecordingTts):
     def __init__(self) -> None:
         super().__init__()
@@ -116,10 +134,18 @@ def catalog() -> VoiceCatalog:
 
 
 class OrchestratorFactory:
-    def __init__(self, *, llm: ScriptedLlm, tts: RecordingTts, asr: ScriptedAsr) -> None:
+    def __init__(
+        self,
+        *,
+        llm: ScriptedLlm,
+        tts: RecordingTts,
+        asr: ScriptedAsr,
+        conversation_store: RecordingConversationStore | None = None,
+    ) -> None:
         self.llm = llm
         self.tts = tts
         self.asr = asr
+        self.conversation_store = conversation_store
         self.instances: list[ConversationOrchestrator] = []
 
     def __call__(self) -> ConversationOrchestrator:
@@ -131,6 +157,7 @@ class OrchestratorFactory:
             llm=self.llm,
             tts=self.tts,
             voice_catalog=catalog(),
+            conversation_store=self.conversation_store,
         )
         self.instances.append(instance)
         return instance
@@ -220,6 +247,68 @@ def test_real_socket_keeps_text_and_voice_in_one_history_and_hides_native_voice_
         TtsCall("语音回答。", "default_voice", 1.2),
     ]
     assert asr.calls[0][1] == 16000
+
+
+def test_browser_transcript_then_local_microphone_share_ordered_voice_history():
+    llm = ScriptedLlm(("浏览器回答。",), ("本地回答。",))
+    tts = RecordingTts()
+    asr = ScriptedAsr("本地麦克风转写")
+    store = RecordingConversationStore()
+    factory = OrchestratorFactory(
+        llm=llm,
+        tts=tts,
+        asr=asr,
+        conversation_store=store,
+    )
+
+    with TestClient(create_app(factory, SESSION_TOKEN)) as client:
+        with client.websocket_connect(f"/v1/voice?token={SESSION_TOKEN}") as socket:
+            start_session(socket)
+            socket.send_json(
+                {
+                    "type": "voice.transcript.submit",
+                    "text": "浏览器最终转写",
+                    "request_id": 41,
+                }
+            )
+            browser_events, browser_audio = receive_turn(socket)
+
+            assert [event["type"] for event in browser_events] == [
+                "asr.final",
+                "assistant.delta",
+                "assistant.done",
+            ]
+            assert browser_audio == []
+            assert browser_events[0]["text"] == "浏览器最终转写"
+            assert browser_events[0]["request_id"] == 41
+
+            socket.send_bytes(FRAME)
+            assert socket.receive_json()["type"] == "vad.started"
+            socket.send_json({"type": "audio.commit"})
+            local_events, local_audio = receive_turn(socket)
+
+    assert [event["type"] for event in local_events] == [
+        "vad.stopped",
+        "asr.final",
+        "assistant.delta",
+        "tts.started",
+        "tts.chunk",
+        "tts.done",
+        "assistant.done",
+    ]
+    assert local_events[1]["text"] == "本地麦克风转写"
+    assert len(local_audio) == 1
+    assert llm.calls[1].messages[-3:] == (
+        ("user", "浏览器最终转写"),
+        ("assistant", "浏览器回答。"),
+        ("user", "本地麦克风转写"),
+    )
+    assert store.calls == [
+        ("user", 1, "浏览器最终转写", "voice"),
+        ("assistant", 1, "浏览器回答。"),
+        ("user", 2, "本地麦克风转写", "voice"),
+        ("assistant", 2, "本地回答。"),
+    ]
 
 
 def test_text_barge_in_cancels_a_turn_blocked_in_tts_without_stale_audio():

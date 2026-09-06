@@ -140,7 +140,7 @@ off → connecting → listening → user_speaking → transcribing
 1. 用户点击“开始实时通话”。
 2. 选择并打开 Realtek 麦克风，音量条开始更新。
 3. 浏览器识别器持续产生临时字幕。
-4. 浏览器产生最终识别结果后，前端向后端提交文本，并标记来源为语音。
+4. 浏览器产生最终识别结果后，前端向后端提交文本，并标记来源为语音。每次提交携带单调递增的正整数 `request_id`；后端只在该浏览器轮次的 `asr.final` 或 `turn.cancelled` 中原样回显，前端据此拒绝旧通话或旧轮次的迟到事件。
 5. 后端通过本地 Ollama 流式生成回答。
 6. 前端分句器发现完整短句后立即调用浏览器 TTS。
 7. 用户再次开口时，前端立即取消浏览器 TTS、清空未播句子并通知后端取消旧轮次。
@@ -155,6 +155,16 @@ off → connecting → listening → user_speaking → transcribing
 5. 用户开口时保留现有 barge-in 取消语义。
 
 模式切换不能创建新的对话历史，也不能清空 RAG、记忆或人格上下文。
+
+### 6.3 浏览器转写关联协议
+
+浏览器最终转写使用以下严格消息；`request_id` 必须是正整数：
+
+```json
+{"type":"voice.transcript.submit","text":"你好，声灵","request_id":1}
+```
+
+成功接收后，后端先返回带相同 `request_id` 的 `asr.final`，再返回该 `turn_id` 的回答事件；若该轮次在绑定或生成期间被取消，则 `turn.cancelled` 回显相同 ID。只有浏览器来源的这两类回显携带 `request_id`，本地麦克风产生的 `asr.final` 和 `turn.cancelled` 仍按 `session_id`/`turn_id` 关联且不序列化该字段。这样即使 WebSocket 重连、浏览器识别回调迟到或新旧文本相同，旧事件也不能占用新轮次。
 
 ## 7. 用户界面
 

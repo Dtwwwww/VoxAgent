@@ -404,9 +404,10 @@ git commit -m "feat: add browser realtime speech adapters"
 - Modify: `frontend/src/__tests__/useVoiceSession.test.ts`
 
 **Interfaces:**
-- Produces client event: `{ type: "voice.transcript.submit", text: string }`.
+- Produces client event: `{ type: "voice.transcript.submit", text: string, request_id: positive int }`.
 - Produces server event: `{ type: "asr.partial", session_id: UUID, turn_id: int, text: string }`.
-- Produces: `ConversationOrchestrator.submit_voice_transcript(text: str) -> AsyncIterator[Output]`.
+- Produces: `ConversationOrchestrator.submit_voice_transcript(text: str, request_id: int) -> AsyncIterator[Output]`.
+- Browser-origin `asr.final` and `turn.cancelled` echo the same positive `request_id`; local microphone events omit it.
 - Consumes: existing `AsrFinal`, `_start_reply`, cancellation, persistence, context assembly, and memory proposal paths.
 
 - [ ] **Step 1: Add invalid/valid fixtures and failing parser tests**
@@ -414,10 +415,10 @@ git commit -m "feat: add browser realtime speech adapters"
 Add to `valid_client`:
 
 ```json
-{"type":"voice.transcript.submit","text":"你好，声灵"}
+{"type":"voice.transcript.submit","text":"你好，声灵","request_id":1}
 ```
 
-Add invalid empty/oversized/unexpected-field cases. Add to `valid_server`:
+Add invalid empty/oversized/unexpected-field and missing/non-positive/non-integer `request_id` cases. Add to `valid_server`:
 
 ```json
 {"type":"asr.partial","session_id":"00000000-0000-4000-8000-000000000001","turn_id":1,"text":"你好"}
@@ -430,9 +431,10 @@ Add invalid empty text and non-strict `turn_id` fixtures. Both Python and TypeSc
 Require browser transcript submission to emit the same voice identity without local TTS:
 
 ```python
-outputs = [item async for item in orchestrator.submit_voice_transcript("浏览器识别结果")]
+outputs = [item async for item in orchestrator.submit_voice_transcript("浏览器识别结果", 12)]
 assert [item.type for item in outputs] == ["asr.final", "assistant.delta", "assistant.done"]
 assert outputs[0].text == "浏览器识别结果"
+assert outputs[0].request_id == 12
 assert orchestrator.history.messages_for_model()[-2:] == (
     ChatMessage("user", "浏览器识别结果"),
     ChatMessage("assistant", "测试回答"),
@@ -460,6 +462,7 @@ Backend models:
 class VoiceTranscriptSubmit(ClientMessage):
     type: Literal["voice.transcript.submit"]
     text: str
+    request_id: StrictInt = Field(gt=0)
 
     @field_validator("text")
     @classmethod
@@ -481,7 +484,7 @@ class AsrPartial(TurnServerMessage):
         return value
 ```
 
-Add both to the discriminated unions. Mirror exact-key parsing in `frontend/src/protocol.ts`; `voice.transcript.submit` must use the same Unicode 1–4000 rule as `text.submit`.
+Add both to the discriminated unions. Mirror exact-key parsing in `frontend/src/protocol.ts`; `voice.transcript.submit` must use the same Unicode 1–4000 rule as `text.submit` and require a strict positive integer `request_id`. `AsrFinal` and `TurnCancelled` accept an optional strict positive `request_id` only for browser-origin correlation.
 
 - [ ] **Step 5: Implement browser transcript submission through the normal reply pipeline**
 
@@ -494,16 +497,20 @@ async def submit_text(self, text: str, speak_response: bool) -> AsyncIterator[Ou
     ):
         yield item
 
-async def submit_voice_transcript(self, text: str) -> AsyncIterator[Output]:
+async def submit_voice_transcript(self, text: str, request_id: int) -> AsyncIterator[Output]:
     async for item in self._submit_text_turn(
-        text, origin="voice", speak_response=False, echo_asr=True
+        text,
+        origin="voice",
+        speak_response=False,
+        echo_asr=True,
+        transcript_request_id=request_id,
     ):
         yield item
 ```
 
-When `echo_asr` is true, emit `AsrFinal` before assistant deltas. Keep the same cancellation, persistence, context, memory proposal, and history semantics.
+When `echo_asr` is true, emit `AsrFinal` before assistant deltas and echo `transcript_request_id`; propagate the same ID to `TurnCancelled` if that browser turn is cancelled. Keep the same cancellation, persistence, context, memory proposal, and history semantics. Local microphone `AsrFinal` and `TurnCancelled` serialization continues to omit `request_id`.
 
-In `_dispatch_event`, route `VoiceTranscriptSubmit` to `submit_voice_transcript(event.text)`.
+In `_dispatch_event`, route `VoiceTranscriptSubmit` to `submit_voice_transcript(event.text, event.request_id)`.
 
 - [ ] **Step 6: Emit local partial events without duplicate text**
 
@@ -554,8 +561,8 @@ expect(states).toContainEqual({ state: "listening", provider: "browser" });
 recognizer.onInterim("你好");
 expect(interims.at(-1)).toBe("你好");
 recognizer.onFinal("你好声灵");
-expect(sentJson.at(-1)).toEqual({ type: "voice.transcript.submit", text: "你好声灵" });
-engine.handleServerEvent({ type: "asr.final", session_id: SESSION_ID, turn_id: 4, text: "你好声灵" });
+expect(sentJson.at(-1)).toEqual({ type: "voice.transcript.submit", text: "你好声灵", request_id: 1 });
+engine.handleServerEvent({ type: "asr.final", session_id: SESSION_ID, turn_id: 4, text: "你好声灵", request_id: 1 });
 engine.handleServerEvent({
   type: "assistant.delta",
   session_id: SESSION_ID,
@@ -648,8 +655,8 @@ The engine must use a monotonically increasing generation number. Every async co
 - `onSpeechStart` during `speaking/responding/thinking` cancels browser/local playback, sends `turn.cancel`, clears sentence queue, and enters `user_speaking`.
 - That interruption also sets `notice="interrupted"`; clear it with a generation-guarded 1,200 ms timer so the bottom bar can briefly show “你已打断声灵” without delaying the new turn.
 - Local `vad.started` uses the same interruption path.
-- Browser `onFinal` sends exactly one non-empty trimmed transcript and enters `thinking`.
-- Server `asr.final` assigns the active voice turn ID; only deltas for that turn reach the sentence queue.
+- Browser `onFinal` sends exactly one non-empty trimmed transcript with a monotonically increasing positive `request_id` and enters `thinking`.
+- A browser-origin `asr.final` assigns the active voice turn ID only when its echoed `request_id` matches the pending submission. Stale browser `asr.final`/`turn.cancelled` echoes cannot claim a later call; local events remain correlated by session/turn. Only deltas for the owned turn reach the sentence queue.
 - A browser synthesis failure cancels the browser queue, switches the call once to local, and—after the matching `assistant.done`—sends one `assistant.speak` request with a monotonically increasing `request_id`. Its local audio events are then handled by the existing playback path.
 
 - [ ] **Step 6: Run state-machine tests and typecheck**
@@ -696,6 +703,7 @@ act(() => browserRecognition.emitFinal("帮我总结文档"));
 expect(socket.jsonMessages().at(-1)).toEqual({
   type: "voice.transcript.submit",
   text: "帮我总结文档",
+  request_id: 1,
 });
 
 act(() => hook.result.current.submitText("文字问题"));
@@ -919,7 +927,7 @@ Expected: PASS because the generation and request guards were implemented in Tas
 
 - [ ] **Step 3: Add backend browser-transcript WebSocket E2E**
 
-Send `voice.transcript.submit`, then assert:
+Send `voice.transcript.submit` with a positive `request_id`, then assert:
 
 ```python
 assert [event["type"] for event in events] == [
@@ -927,6 +935,7 @@ assert [event["type"] for event in events] == [
 ]
 assert audio == []
 assert events[0]["text"] == "浏览器最终转写"
+assert events[0]["request_id"] == request_id
 ```
 
 Then submit a local microphone turn in the same session and assert both turns appear in one ordered history with voice origins.

@@ -76,6 +76,26 @@ def test_browser_transcript_request_ids_are_strict_and_echo_on_turn_events():
         )
 
 
+def test_shared_astral_fixture_enforces_4000_code_point_boundary():
+    fixtures = json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))
+    boundary = fixtures["astral_text_boundaries"][0]
+    assert len(boundary["scalar"]) == 1
+
+    valid = {
+        "type": boundary["event_type"],
+        "text": boundary["scalar"] * boundary["valid_count"],
+        "request_id": boundary["request_id"],
+    }
+    invalid = {
+        **valid,
+        "text": boundary["scalar"] * boundary["invalid_count"],
+    }
+
+    assert len(parse_client_message(valid).text) == 4000
+    with pytest.raises(ValidationError):
+        parse_client_message(invalid)
+
+
 def test_session_ready_publishes_fixed_microphone_contract_and_validates_frames():
     fixtures = json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))
     messages = [parse_server_message(payload) for payload in fixtures["valid_server"]]
