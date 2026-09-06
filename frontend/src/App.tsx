@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Composer } from "./components/Composer";
 import { Conversation } from "./components/Conversation";
@@ -24,15 +24,31 @@ export function App({ controller, knowledgeClient, localApiClient }: AppProps) {
   const [voicePickerOpen, setVoicePickerOpen] = useState(false);
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [finalizedInterim, setFinalizedInterim] = useState<string | null>(null);
+  const previousMessageIdsRef = useRef(new Set(controller.messages.map((message) => message.id)));
 
   useEffect(() => {
     connect();
     return () => { void disconnect(); };
   }, [connect, disconnect]);
 
+  const interimText = controller.realtime.interimText.trim();
+  useEffect(() => {
+    const previousIds = previousMessageIdsRef.current;
+    const matchingFinalArrived = interimText.length > 0 && controller.messages.some((message) => (
+      !previousIds.has(message.id)
+      && message.role === "user"
+      && message.status === "complete"
+      && message.text.trim() === interimText
+    ));
+    if (matchingFinalArrived) setFinalizedInterim(interimText);
+    else if (interimText.length === 0) setFinalizedInterim(null);
+    previousMessageIdsRef.current = new Set(controller.messages.map((message) => message.id));
+  }, [controller.messages, interimText]);
+
   const handleSuggestion = (suggestion: string) => {
     if (suggestion === "开始语音对话") {
-      document.getElementById("microphone-button")?.focus();
+      document.getElementById("realtime-call-button")?.focus();
       return;
     }
     controller.submitText(suggestion);
@@ -60,7 +76,15 @@ export function App({ controller, knowledgeClient, localApiClient }: AppProps) {
         onDismiss={controller.dismissMemoryProposal}
       />)}
       {controller.error && <ErrorNotice error={controller.error} onConnect={controller.connect} onMicrophone={() => { void controller.startMicrophone(); }} />}
-      <VoiceStatus connectionStatus={controller.connectionStatus} voiceStatus={controller.voiceStatus} />
+      {interimText && finalizedInterim !== interimText && <article
+        className="message message--right message--interim"
+        data-side="right"
+        aria-label="用户（识别中）"
+      >
+        <div className="message__meta"><span className="message__speaker">用户（识别中）</span></div>
+        <div className="message__bubble"><p>{interimText}</p></div>
+      </article>}
+      <VoiceStatus connectionStatus={controller.connectionStatus} voiceStatus={controller.voiceStatus} realtime={controller.realtime} />
       <Composer controller={controller} />
     </div>
     <VoicePicker controller={controller} open={voicePickerOpen} onClose={() => setVoicePickerOpen(false)} />

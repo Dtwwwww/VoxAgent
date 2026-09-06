@@ -2,16 +2,13 @@ import { useRef, useState } from "react";
 
 import type { VoiceSessionController } from "../useVoiceSession";
 import { Icon } from "./Icon";
+import { RealtimeVoiceControls } from "./RealtimeVoiceControls";
 
 export function Composer({ controller }: { controller: VoiceSessionController }) {
   const [text, setText] = useState("");
   const [validation, setValidation] = useState("");
   const composing = useRef(false);
   const count = [...text].length;
-  const microphoneActive = controller.isMicrophoneActive || controller.voiceStatus === "listening";
-  const microphoneDisabled = controller.connectionStatus !== "connected"
-    || controller.voiceStatus === "transcribing"
-    || controller.voiceStatus === "thinking";
   const canSubmit = Boolean(text.trim()) && count <= 4000;
   const canCancel = controller.voiceStatus === "thinking" || controller.voiceStatus === "speaking";
 
@@ -49,25 +46,13 @@ export function Composer({ controller }: { controller: VoiceSessionController })
           submit();
         }
       }}
-      placeholder="输入消息，或点击麦克风说话"
+      placeholder="输入消息，或开始实时通话"
     />
+    <RealtimeVoiceControls controller={controller} />
     <div className="composer__footer">
-      <div className="composer__voice-controls">
-        <button
-          id="microphone-button"
-          className={`microphone-button${microphoneActive ? " microphone-button--active" : ""}`}
-          type="button"
-          aria-label={microphoneActive ? "结束录音" : "开始语音输入"}
-          aria-pressed={microphoneActive}
-          disabled={microphoneDisabled && !microphoneActive}
-          onClick={() => microphoneActive ? void controller.stopMicrophone() : void controller.startMicrophone()}
-        >
-          <Icon name={microphoneActive ? "stop" : "microphone"} />
-        </button>
-        <span id="composer-mode" className="composer__mode">
-          {microphoneActive ? "松开后将自动识别并朗读回复" : "文字消息仅回复文字"}
-        </span>
-      </div>
+      <span id="composer-mode" className="composer__mode">
+        {controller.realtime.active ? "实时通话中，文字仍可发送" : "文字消息仅回复文字"}
+      </span>
       <div className="composer__actions">
         {canCancel && <button className="stop-generation" type="button" onClick={controller.cancelActive}>
           <Icon name="stop" size={14} />

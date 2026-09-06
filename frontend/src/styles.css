@@ -44,7 +44,8 @@ body {
 
 button,
 textarea,
-input {
+input,
+select {
   color: inherit;
   font: inherit;
 }
@@ -62,6 +63,7 @@ button:disabled {
 button:focus-visible,
 textarea:focus-visible,
 input:focus-visible,
+select:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid rgb(108 99 232 / 32%);
   outline-offset: 2px;
@@ -356,6 +358,24 @@ button:active:not(:disabled) {
   box-shadow: none;
 }
 
+.message--interim {
+  max-width: 68%;
+  margin: 0 4px 9px auto;
+  opacity: 0.78;
+}
+
+.message--interim .message__meta {
+  min-height: 20px;
+  margin-bottom: 4px;
+}
+
+.message--interim .message__bubble {
+  background: rgb(239 238 255 / 68%);
+  border-color: rgb(108 99 232 / 20%);
+  border-style: dashed;
+  box-shadow: none;
+}
+
 .message__bubble p {
   max-width: 42em;
   margin: 0;
@@ -565,6 +585,263 @@ button:active:not(:disabled) {
 
 .composer textarea::placeholder {
   color: #a0a2af;
+}
+
+.realtime-controls {
+  display: grid;
+  gap: 9px;
+  padding: 3px 0 11px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.realtime-controls__primary,
+.realtime-controls__settings,
+.input-meter,
+.speech-mode,
+.online-speech-notice > div {
+  display: flex;
+  align-items: center;
+}
+
+.realtime-controls__primary {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.realtime-call {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
+  padding: 7px 13px;
+  color: #fff;
+  background: var(--color-primary);
+  border-radius: 12px;
+  box-shadow: 0 6px 14px rgb(108 99 232 / 20%);
+  font-size: 13px;
+  font-weight: 700;
+  transition: color 180ms ease, background 180ms ease, box-shadow 180ms ease, transform 150ms ease;
+}
+
+.realtime-call--active {
+  background: var(--color-danger);
+  box-shadow: 0 0 0 6px rgb(226 85 85 / 9%);
+}
+
+.realtime-provider,
+.voice-card__provider {
+  color: #5751aa;
+  background: var(--color-primary-soft);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.realtime-provider {
+  padding: 4px 9px;
+  white-space: nowrap;
+}
+
+.realtime-provider[data-provider="local"] {
+  color: #76521f;
+  background: #fff4df;
+}
+
+.realtime-controls__settings {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.5fr) minmax(176px, 1fr) minmax(150px, 0.8fr);
+  align-items: end;
+  gap: 8px;
+}
+
+.microphone-select,
+.input-meter {
+  min-width: 0;
+}
+
+.microphone-select {
+  display: grid;
+  gap: 4px;
+}
+
+.microphone-select > span,
+.input-meter > span,
+.speech-mode legend {
+  color: var(--color-text-soft);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.microphone-select select {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 30px 6px 9px;
+  overflow: hidden;
+  color: var(--color-text);
+  background: #f8f8fb;
+  border: 1px solid #dedfe9;
+  border-radius: 10px;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.speech-mode {
+  position: relative;
+  align-self: end;
+  gap: 4px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 3px;
+  margin: 0;
+  background: #f3f3f7;
+  border: 0;
+  border-radius: 10px;
+}
+
+.speech-mode legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.speech-mode label {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.speech-mode input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.speech-mode label > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 4px 8px;
+  color: var(--color-text-soft);
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.speech-mode input:checked + span {
+  color: #4f49a5;
+  background: #fff;
+  box-shadow: 0 2px 7px rgb(32 33 42 / 7%);
+}
+
+.speech-mode input:focus-visible + span {
+  outline: 3px solid rgb(108 99 232 / 32%);
+  outline-offset: 2px;
+}
+
+.speech-mode:disabled label {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.input-meter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 7px;
+}
+
+.input-meter > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.input-meter meter {
+  grid-column: 1;
+  width: 100%;
+  min-width: 84px;
+  height: 12px;
+}
+
+.input-meter meter::-webkit-meter-bar {
+  background: #eeeef4;
+  border: 1px solid #dedee9;
+  border-radius: 999px;
+}
+
+.input-meter meter::-webkit-meter-optimum-value,
+.input-meter meter::-webkit-meter-suboptimum-value,
+.input-meter meter::-webkit-meter-even-less-good-value {
+  background: linear-gradient(90deg, #6c63e8, #45a975);
+  border-radius: 999px;
+}
+
+.input-meter__value {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: end;
+  min-width: 30px;
+  color: var(--color-text-soft);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.online-speech-notice,
+.microphone-diagnostic {
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.online-speech-notice {
+  color: #654816;
+  background: #fff8e9;
+  border: 1px solid #f1dfb9;
+}
+
+.online-speech-notice p {
+  margin: 0;
+}
+
+.online-speech-notice > div {
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.online-speech-notice button {
+  min-height: 34px;
+  padding: 5px 10px;
+  color: #654816;
+  background: #fff;
+  border: 1px solid #e5ce9e;
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.online-speech-notice button:first-child {
+  color: #fff;
+  background: #80601e;
+  border-color: #80601e;
+}
+
+.microphone-diagnostic {
+  color: #8b4d28;
+  background: #fff2e9;
+  border-left: 4px solid #d4753c;
 }
 
 .composer__footer {
@@ -1402,6 +1679,16 @@ button:active:not(:disabled) {
   white-space: nowrap;
 }
 
+.voice-card__provider {
+  padding: 2px 7px;
+  margin-top: 6px;
+}
+
+.voice-card[data-provider="local"] .voice-card__provider {
+  color: #76521f;
+  background: #fff4df;
+}
+
 .preview-button {
   justify-content: center;
   gap: 5px;
@@ -1669,6 +1956,31 @@ button:active:not(:disabled) {
     min-height: 32px;
     max-height: 8.8em;
     padding-inline: 4px;
+  }
+
+  .realtime-controls__settings {
+    grid-template-columns: 1fr;
+  }
+
+  .realtime-call,
+  .microphone-select select,
+  .speech-mode,
+  .speech-mode label > span,
+  .online-speech-notice button {
+    min-height: 44px;
+  }
+
+  .realtime-controls__primary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .realtime-provider {
+    align-self: flex-start;
+  }
+
+  .message--interim {
+    max-width: 90%;
   }
 
   .composer__mode {

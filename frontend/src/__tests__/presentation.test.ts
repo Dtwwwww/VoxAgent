@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   connectionPresentation,
   errorPresentation,
+  realtimeVoiceStatusPresentation,
   voiceStatusPresentation,
 } from "../presentation";
 
@@ -18,6 +19,19 @@ describe("presentation", () => {
     expect(voiceStatusPresentation("idle")).toBeNull();
     expect(voiceStatusPresentation("listening")?.label).toBe("正在聆听，点击停止");
     expect(voiceStatusPresentation("thinking")?.label).toBe("声灵正在思考");
+  });
+
+  it("maps every realtime voice state and gives interruption priority", () => {
+    expect(realtimeVoiceStatusPresentation("off")).toBeNull();
+    expect(realtimeVoiceStatusPresentation("connecting")?.label).toBe("正在连接");
+    expect(realtimeVoiceStatusPresentation("listening")?.label).toBe("正在监听");
+    expect(realtimeVoiceStatusPresentation("user_speaking")?.label).toBe("检测到你在说话");
+    expect(realtimeVoiceStatusPresentation("transcribing")?.label).toBe("正在识别");
+    expect(realtimeVoiceStatusPresentation("thinking")?.label).toBe("声灵正在思考");
+    expect(realtimeVoiceStatusPresentation("responding")?.label).toBe("声灵正在回复");
+    expect(realtimeVoiceStatusPresentation("speaking")?.label).toBe("声灵正在朗读");
+    expect(realtimeVoiceStatusPresentation("fallback")?.label).toBe("已切换到本地语音");
+    expect(realtimeVoiceStatusPresentation("user_speaking", "interrupted")?.label).toBe("你已打断声灵");
   });
 
   it("classifies connection, microphone, and playback errors", () => {

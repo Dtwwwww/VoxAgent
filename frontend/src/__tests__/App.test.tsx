@@ -1,14 +1,18 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
+import { BrowserSpeechProvider } from "../audio/webSpeech";
 import type { KnowledgeClient } from "../knowledge/client";
 import type { LocalApiClient } from "../localApi";
 import type { VoiceSessionController } from "../useVoiceSession";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessionController {
   return {
@@ -170,6 +174,47 @@ describe("App", () => {
     expect(screen.queryByRole("checkbox", { name: "文字回复自动朗读" })).toBeNull();
   });
 
+  it("keeps text input visible during a realtime call", () => {
+    render(<App controller={controller({
+      realtime: { active: true, state: "listening", provider: "browser", interimText: "", inputLevel: 0.2, fallbackReason: null, notice: null },
+    })} />);
+
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "结束通话" })).toBeVisible();
+    expect(document.body).not.toHaveTextContent("松开后");
+  });
+
+  it("renders one right-side interim user bubble and removes it for a matching final message", () => {
+    const interim = controller({
+      messages: [],
+      realtime: { active: true, state: "transcribing", provider: "browser", interimText: "今天天气", inputLevel: 0.2, fallbackReason: null, notice: null },
+    });
+    const view = render(<App controller={interim} />);
+
+    const bubble = screen.getByLabelText("用户（识别中）");
+    expect(bubble).toHaveAttribute("data-side", "right");
+    expect(bubble).toHaveClass("message--interim");
+    expect(screen.getAllByText("今天天气")).toHaveLength(1);
+
+    view.rerender(<App controller={{
+      ...interim,
+      messages: [{ id: "final", role: "user", origin: "voice", text: "今天天气", status: "complete" }],
+    }} />);
+    expect(screen.queryByLabelText("用户（识别中）")).toBeNull();
+    expect(screen.getByLabelText("用户消息")).toBeVisible();
+  });
+
+  it("shows realtime status immediately above the composer", () => {
+    render(<App controller={controller({
+      realtime: { active: true, state: "user_speaking", provider: "browser", interimText: "", inputLevel: 0.2, fallbackReason: null, notice: "interrupted" },
+    })} />);
+
+    const status = screen.getByRole("status");
+    const composer = screen.getByLabelText("消息输入");
+    expect(status).toHaveTextContent("你已打断声灵");
+    expect(status.nextElementSibling).toBe(composer);
+  });
+
   it("keeps composition input intact and disables an empty send action", () => {
     const session = controller();
     render(<App controller={session} />);
@@ -200,7 +245,7 @@ describe("App", () => {
     render(<App controller={controller({ connectionStatus: "initializing" })} />);
     expect(screen.getByRole("status")).toHaveTextContent("正在初始化本地语音模型…");
     expect(screen.getAllByText("正在初始化本地语音模型…")).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "开始语音输入" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始实时通话" })).toBeDisabled();
     expect(screen.queryByText(/本地运行/)).toBeNull();
   });
 
@@ -224,6 +269,38 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "选择音色" })).toBeNull();
   });
 
+  it("lists browser voices first, previews them online, and exposes one local fallback", () => {
+    const speak = vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockResolvedValue(undefined);
+    const session = controller({
+      browserVoices: [
+        { key: "browser-xiaoxiao", name: "微软晓晓", lang: "zh-CN", localService: false },
+        { key: "browser-huihui", name: "系统慧慧", lang: "zh-TW", localService: true },
+      ],
+      selectedBrowserVoiceKey: "browser-xiaoxiao",
+      voices: [
+        ...controller().voices,
+        { voice_key: "melo-native-0", display_name: "Melo 内部音色 0", description: "不可公开", gender: "neutral", is_default: false, previewable: true },
+      ],
+    });
+    render(<App controller={session} />);
+    fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
+
+    const dialog = screen.getByRole("dialog", { name: "选择音色" });
+    const cards = within(dialog).getAllByRole("article");
+    expect(cards).toHaveLength(3);
+    expect(cards[0]).toHaveTextContent("微软晓晓");
+    expect(cards[0]).toHaveTextContent("在线/系统");
+    expect(cards[1]).toHaveTextContent("系统慧慧");
+    expect(cards[2]).toHaveTextContent("声灵默认音色");
+    expect(cards[2]).toHaveTextContent("本地·生成较慢");
+    expect(dialog).not.toHaveTextContent("Melo");
+    expect(dialog).not.toHaveTextContent("melo-native-0");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "试听 微软晓晓" }));
+    expect(session.selectBrowserVoice).toHaveBeenCalledWith("browser-xiaoxiao");
+    expect(speak).toHaveBeenCalledWith("你好，我是声灵，很高兴认识你。", "browser-xiaoxiao", 1);
+  });
+
   it("offers only valid recovery actions for connection and microphone errors", () => {
     const connection = controller({ error: { code: "connection", message: "raw", recoverable: true } });
     const view = render(<App controller={connection} />);
@@ -240,17 +317,16 @@ describe("App", () => {
   });
 
   it("keeps voice previews mutually exclusive", () => {
-    const voices = [
-      ...controller().voices,
-      { voice_key: "engine-002", display_name: "清亮音色", description: "清晰明快", gender: "female", is_default: false, previewable: true },
-    ];
-    const session = controller({ voices, previewingVoiceKey: "default_voice" });
+    const session = controller({
+      browserVoices: [{ key: "browser-online", name: "在线中文音色", lang: "zh-CN", localService: false }],
+      previewingVoiceKey: "default_voice",
+    });
     render(<App controller={session} />);
     fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
 
     fireEvent.click(screen.getByRole("button", { name: "停止试听 声灵默认音色" }));
     expect(session.stopVoicePreview).toHaveBeenCalledOnce();
-    expect(screen.getByRole("button", { name: "试听 清亮音色" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "试听 在线中文音色" })).toBeDisabled();
   });
 
   it("disables voice previews while a conversation reply is playing", () => {
@@ -261,11 +337,16 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "试听 声灵默认音色" })).toBeDisabled();
   });
 
-  it("exposes recording and message playback stop actions", () => {
-    const session = controller({ isMicrophoneActive: true, voiceStatus: "listening", speakingTurnId: 3 });
+  it("exposes realtime call and message playback stop actions", () => {
+    const session = controller({
+      isMicrophoneActive: true,
+      voiceStatus: "listening",
+      speakingTurnId: 3,
+      realtime: { active: true, state: "listening", provider: "browser", interimText: "", inputLevel: 0.2, fallbackReason: null, notice: null },
+    });
     render(<App controller={session} />);
-    fireEvent.click(screen.getByRole("button", { name: "结束录音" }));
-    expect(session.stopMicrophone).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "结束通话" }));
+    expect(session.stopRealtimeCall).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "停止朗读" }));
     expect(session.stopSpeaking).toHaveBeenCalledWith(3);
   });

@@ -1,4 +1,5 @@
 import type { ConnectionStatus, SessionError, VoiceStatus } from "./useVoiceSession";
+import type { RealtimeNotice, RealtimeVoiceState } from "./realtime/RealtimeVoiceEngine";
 
 export type Tone = "neutral" | "success" | "warning" | "danger";
 export type RecoveryAction = "none" | "connect" | "microphone";
@@ -25,6 +26,24 @@ export function voiceStatusPresentation(status: VoiceStatus) {
     speaking: { icon: "wave", label: "正在朗读" },
   } as const;
   return status === "idle" ? null : values[status];
+}
+
+export function realtimeVoiceStatusPresentation(
+  state: RealtimeVoiceState,
+  notice: RealtimeNotice = null,
+) {
+  if (notice === "interrupted") return { icon: "wave" as const, label: "你已打断声灵" };
+  const values = {
+    connecting: { icon: "spinner", label: "正在连接" },
+    listening: { icon: "wave", label: "正在监听" },
+    user_speaking: { icon: "wave", label: "检测到你在说话" },
+    transcribing: { icon: "spinner", label: "正在识别" },
+    thinking: { icon: "thinking", label: "声灵正在思考" },
+    responding: { icon: "thinking", label: "声灵正在回复" },
+    speaking: { icon: "wave", label: "声灵正在朗读" },
+    fallback: { icon: "spinner", label: "已切换到本地语音" },
+  } as const;
+  return state === "off" ? null : values[state];
 }
 
 export function errorPresentation(error: SessionError) {
