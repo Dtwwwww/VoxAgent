@@ -1,5 +1,18 @@
 # Hybrid Realtime Voice Implementation Plan
 
+## 2026-09-06 final-review hardening
+
+The completed implementation additionally freezes these lifecycle rules:
+
+- Microphone discovery treats an empty or wholly redacted inventory as unauthorized, opens and immediately stops a permission-only stream, then re-enumerates before acquiring the selected physical track. Late permission streams are stopped through an abort generation.
+- `assistant.done` flushes the final unterminated browser-speech segment. Browser speech uses the same presentation/emoji cleanup as local TTS while the displayed assistant stream and stored history remain unchanged.
+- Browser-to-local synthesis fallback sends only `{type:"assistant.speak", turn_id, request_id, start_offset}`. `start_offset` is a strict non-negative Unicode code-point offset into the server-stored assistant answer; the client cannot supply replay text, and the server normalizes only the stored suffix.
+- Browser synthesis waits briefly for `voiceschanged`, then requires the selected Chinese voice (or a Chinese default when no key was selected). Empty, non-Chinese, or missing requested inventories fail into the existing one-time Kokoro fallback.
+- The session controller exclusively owns previews. Browser preview owners are distinct from realtime/manual owners, local preview cancellation uses `voice.preview.cancel`, and changing to `local-only` cancels browser preview without cancelling conversation output.
+- An active call may change mode without reconnecting WebSocket or reacquiring the microphone. Provider changes invalidate recognition/speech generations, cancel the owned pending turn once, toggle PCM forwarding, and ignore stale callbacks; switching back online still requires prior privacy acknowledgement.
+
+Regression coverage lives in the device, Web Speech, sentence queue, realtime engine, controller, UI, protocol, socket, and orchestrator suites listed in the file map below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a free, browser-first realtime Mandarin voice mode with explicit Realtek microphone selection, live captions, sentence-level speech, interruption, and automatic local fallback.

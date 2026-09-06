@@ -148,8 +148,26 @@ describe("RealtimeVoiceEngine", () => {
     });
 
     await vi.waitFor(() => expect(browserSpeech.spoken).toEqual(["你好！", "今天想聊什么？"]));
-    expect(browserSpeech.speak).toHaveBeenNthCalledWith(1, "你好！", "zh-voice", 1);
-    expect(browserSpeech.speak).toHaveBeenNthCalledWith(2, "今天想聊什么？", "zh-voice", 1);
+    expect(browserSpeech.speak).toHaveBeenNthCalledWith(1, "你好！", "zh-voice", 1, expect.anything());
+    expect(browserSpeech.speak).toHaveBeenNthCalledWith(2, "今天想聊什么？", "zh-voice", 1, expect.anything());
+  });
+
+  it("flushes and speaks an unterminated assistant tail before returning to listening", async () => {
+    const { browserSpeech, engine, states } = makeHarness();
+    await engine.start(ONLINE_OPTIONS);
+    browserSpeech.runs[0].onFinal("请回答");
+    engine.handleServerEvent(browserAsrFinal(SESSION_ID, 40, "请回答", 1));
+    engine.handleServerEvent({
+      type: "assistant.delta",
+      session_id: SESSION_ID,
+      turn_id: 40,
+      delta: "这是没有句号的结尾",
+    });
+
+    engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 40 });
+
+    await vi.waitFor(() => expect(browserSpeech.spoken).toEqual(["这是没有句号的结尾"]));
+    await vi.waitFor(() => expect(states.at(-1)?.state).toBe("listening"));
   });
 
   it("interrupts only from speech-start and clears the notice after 1,200 ms", async () => {
@@ -504,7 +522,7 @@ describe("RealtimeVoiceEngine", () => {
       type: "assistant.delta",
       session_id: SESSION_ID,
       turn_id: 5,
-      delta: "第一句。第二句。第三句。",
+      delta: "Hi😀。第二句。第三句。",
     });
     await vi.waitFor(() => expect(browserSpeech.speak).toHaveBeenCalledTimes(2));
 
@@ -515,11 +533,12 @@ describe("RealtimeVoiceEngine", () => {
       type: "assistant.speak",
       turn_id: 5,
       request_id: 1,
+      start_offset: 4,
     }));
     engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 5 });
     expect(sentJson.filter((event) => event.type === "assistant.speak")).toHaveLength(1);
     expect(browserSpeech.spoken).toHaveLength(2);
-    expect(browserSpeech.spoken[0]).toBe("第一句。");
+    expect(browserSpeech.spoken[0]).toBe("Hi。");
     expect(browserSpeech.spoken[1]).toBe("第二句。");
     expect(queueCancel).toHaveBeenCalledOnce();
     expect(states.at(-1)).toMatchObject({ provider: "local", state: "speaking" });
@@ -565,5 +584,59 @@ describe("RealtimeVoiceEngine", () => {
     expect(queueCancel).toHaveBeenCalledOnce();
     expect(sentJson.filter((event) => event.type === "turn.cancel")).toHaveLength(1);
     expect(states.at(-1)).toMatchObject({ active: false, state: "off", provider: null });
+  });
+
+  it("switches an active browser call to local PCM on the same capture and rejects stale recognition", async () => {
+    const { browserSpeech, capture, engine, sentJson, states } = makeHarness();
+    await engine.start(ONLINE_OPTIONS);
+    const staleRecognizer = browserSpeech.runs[0];
+
+    await engine.switchMode({ ...ONLINE_OPTIONS, mode: "local-only" });
+    staleRecognizer.onFinal("不能提交的旧转写");
+
+    expect(capture.start).toHaveBeenCalledOnce();
+    expect(capture.stop).not.toHaveBeenCalled();
+    expect(capture.setForwardPcm).toHaveBeenLastCalledWith(true);
+    expect(browserSpeech.stopRecognition).toHaveBeenCalledOnce();
+    expect(sentJson.filter((event) => event.type === "voice.transcript.submit")).toEqual([]);
+    expect(states.at(-1)).toMatchObject({ active: true, provider: "local", state: "listening" });
+  });
+
+  it("cancels browser speech on a live local switch and ignores its late completion", async () => {
+    const speech = deferred();
+    const { browserSpeech, capture, engine, sentJson, states } = makeHarness();
+    browserSpeech.speak.mockReturnValueOnce(speech.promise);
+    await engine.start(ONLINE_OPTIONS);
+    browserSpeech.runs[0].onFinal("请回答");
+    engine.handleServerEvent(browserAsrFinal(SESSION_ID, 71, "请回答", 1));
+    engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 71, delta: "尚未说完。" });
+    await vi.waitFor(() => expect(browserSpeech.speak).toHaveBeenCalledOnce());
+
+    await engine.switchMode({ ...ONLINE_OPTIONS, mode: "local-only" });
+    speech.resolve();
+    await speech.promise;
+
+    expect(browserSpeech.cancelSpeech).toHaveBeenCalledWith(expect.anything());
+    expect(sentJson.filter((event) => event.type === "turn.cancel")).toHaveLength(1);
+    expect(capture.start).toHaveBeenCalledOnce();
+    expect(states.at(-1)).toMatchObject({ active: true, provider: "local", state: "listening" });
+  });
+
+  it("keeps only the latest provider during rapid live mode changes", async () => {
+    const browserStart = deferred();
+    const { browserSpeech, capture, engine, states } = makeHarness();
+    await engine.start({ ...ONLINE_OPTIONS, mode: "local-only" });
+    browserSpeech.start.mockReturnValueOnce(browserStart.promise);
+
+    const switchingOnline = engine.switchMode(ONLINE_OPTIONS);
+    await vi.waitFor(() => expect(browserSpeech.start).toHaveBeenCalledOnce());
+    await engine.switchMode({ ...ONLINE_OPTIONS, mode: "local-only" });
+    browserStart.resolve();
+    await switchingOnline;
+
+    expect(capture.start).toHaveBeenCalledOnce();
+    expect(capture.stop).not.toHaveBeenCalled();
+    expect(capture.setForwardPcm).toHaveBeenLastCalledWith(true);
+    expect(states.at(-1)).toMatchObject({ active: true, provider: "local", state: "listening" });
   });
 });

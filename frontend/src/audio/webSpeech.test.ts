@@ -275,9 +275,78 @@ describe("BrowserSpeechProvider", () => {
     expect(provider.voices().map((voice) => voice.lang)).toEqual(["zh-CN", "zh-TW"]);
 
     const spoken = provider.speak("你好", "zh-tw", 1.2);
+    await Promise.resolve();
     expect(synthesis.speak).toHaveBeenCalledWith(utterances[0]);
     expect(utterances[0]).toMatchObject({ text: "你好", lang: "zh-CN", rate: 1.2, voice: voices[1] });
     utterances[0].onend?.();
+    await expect(spoken).resolves.toBeUndefined();
+  });
+
+  it("rejects synthesis when the requested Chinese voice is missing", async () => {
+    const recognition = new FakeRecognition();
+    const chineseVoice = {
+      voiceURI: "zh-present",
+      name: "Microsoft Xiaoxiao",
+      lang: "zh-CN",
+      localService: true,
+    } as SpeechSynthesisVoice;
+    const { scope, synthesis } = fakeWindow(recognition, [chineseVoice]);
+    const provider = new BrowserSpeechProvider(scope);
+
+    await expect(provider.speak("你好", "zh-missing", 1)).rejects.toThrow(/voice/i);
+    expect(synthesis.speak).not.toHaveBeenCalled();
+  });
+
+  it("rejects synthesis when a loaded inventory has no Chinese voice", async () => {
+    const recognition = new FakeRecognition();
+    const englishVoice = {
+      voiceURI: "en-only",
+      name: "English",
+      lang: "en-US",
+      localService: true,
+    } as SpeechSynthesisVoice;
+    const { scope, synthesis } = fakeWindow(recognition, [englishVoice]);
+    const provider = new BrowserSpeechProvider(scope);
+
+    await expect(provider.speak("你好", null, 1)).rejects.toThrow(/Chinese/i);
+    expect(synthesis.speak).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty voice inventory after the delayed-load window", async () => {
+    vi.useFakeTimers();
+    const recognition = new FakeRecognition();
+    const { scope, synthesis } = fakeWindow(recognition);
+    const provider = new BrowserSpeechProvider(scope);
+
+    const spoken = provider.speak("你好", null, 1);
+    const rejection = expect(spoken).rejects.toThrow(/Chinese/i);
+    await vi.advanceTimersByTimeAsync(250);
+
+    await rejection;
+    expect(synthesis.speak).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("waits for a delayed voiceschanged inventory before selecting a Chinese voice", async () => {
+    const recognition = new FakeRecognition();
+    const browser = fakeWindow(recognition);
+    const provider = new BrowserSpeechProvider(browser.scope);
+    const delayedVoice = {
+      voiceURI: "zh-delayed",
+      name: "Microsoft Xiaoxiao",
+      lang: "zh-CN",
+      localService: false,
+    } as SpeechSynthesisVoice;
+
+    const spoken = provider.speak("你好", null, 1);
+    expect(browser.synthesis.speak).not.toHaveBeenCalled();
+    browser.setVoices([delayedVoice]);
+    browser.emitVoicesChanged();
+    await Promise.resolve();
+
+    expect(browser.synthesis.speak).toHaveBeenCalledWith(browser.utterances[0]);
+    expect(browser.utterances[0].voice).toBe(delayedVoice);
+    browser.utterances[0].onend?.();
     await expect(spoken).resolves.toBeUndefined();
   });
 
@@ -351,13 +420,68 @@ describe("BrowserSpeechProvider", () => {
 
   it("rejects a cancelled utterance and ignores its later completion callback", async () => {
     const recognition = new FakeRecognition();
-    const { scope, utterances } = fakeWindow(recognition);
+    const chineseVoice = {
+      voiceURI: "zh",
+      name: "Chinese",
+      lang: "zh-CN",
+      localService: true,
+    } as SpeechSynthesisVoice;
+    const { scope, utterances } = fakeWindow(recognition, [chineseVoice]);
     const provider = new BrowserSpeechProvider(scope);
     const speaking = provider.speak("会被取消", null, 1);
+    await Promise.resolve();
 
     provider.cancelSpeech();
     utterances[0].onend?.();
 
     await expect(speaking).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("does not let a stale owner cancel a newer utterance", async () => {
+    const recognition = new FakeRecognition();
+    const chineseVoice = {
+      voiceURI: "zh",
+      name: "Chinese",
+      lang: "zh-CN",
+      localService: true,
+    } as SpeechSynthesisVoice;
+    const { scope, synthesis, utterances } = fakeWindow(recognition, [chineseVoice]);
+    const provider = new BrowserSpeechProvider(scope);
+    const staleOwner = Symbol("stale-preview");
+    const currentOwner = Symbol("current-speech");
+    const stale = provider.speak("旧试听", null, 1, staleOwner);
+    await Promise.resolve();
+    provider.cancelSpeech(staleOwner);
+    await expect(stale).rejects.toMatchObject({ name: "AbortError" });
+
+    const current = provider.speak("当前朗读", null, 1, currentOwner);
+    await Promise.resolve();
+    provider.cancelSpeech(staleOwner);
+
+    expect(synthesis.cancel).toHaveBeenCalledTimes(1);
+    utterances[1].onend?.();
+    await expect(current).resolves.toBeUndefined();
+  });
+
+  it("does not poison the next utterance when an idle owner is cancelled", async () => {
+    const recognition = new FakeRecognition();
+    const chineseVoice = {
+      voiceURI: "zh",
+      name: "Chinese",
+      lang: "zh-CN",
+      localService: true,
+    } as SpeechSynthesisVoice;
+    const { scope, synthesis, utterances } = fakeWindow(recognition, [chineseVoice]);
+    const provider = new BrowserSpeechProvider(scope);
+    const owner = Symbol("reusable-engine-owner");
+
+    provider.cancelSpeech(owner);
+    const current = provider.speak("下一次朗读", null, 1, owner);
+    await Promise.resolve();
+
+    expect(synthesis.cancel).not.toHaveBeenCalled();
+    expect(synthesis.speak).toHaveBeenCalledOnce();
+    utterances[0].onend?.();
+    await expect(current).resolves.toBeUndefined();
   });
 });

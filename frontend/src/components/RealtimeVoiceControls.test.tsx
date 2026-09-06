@@ -126,6 +126,37 @@ describe("RealtimeVoiceControls", () => {
     expect(screen.queryByText(/在线处理麦克风语音/)).toBeNull();
   });
 
+  it("switches an accepted active call immediately", () => {
+    const session = controller({
+      speechMode: "local-only",
+      realtime: { active: true, state: "listening", provider: "local", interimText: "", inputLevel: 0.2, fallbackReason: null, notice: null },
+    });
+    render(<RealtimeVoiceControls controller={session} />);
+
+    fireEvent.click(screen.getByRole("radio", { name: "在线优先" }));
+
+    expect(session.setSpeechMode).toHaveBeenCalledWith("online-preferred");
+    expect(session.startRealtimeCall).not.toHaveBeenCalled();
+  });
+
+  it("requires online acknowledgement before switching an active local call", () => {
+    const session = controller({
+      speechMode: "local-only",
+      onlineSpeechNoticeAccepted: false,
+      realtime: { active: true, state: "listening", provider: "local", interimText: "", inputLevel: 0.2, fallbackReason: null, notice: null },
+    });
+    render(<RealtimeVoiceControls controller={session} />);
+
+    fireEvent.click(screen.getByRole("radio", { name: "在线优先" }));
+    expect(session.setSpeechMode).not.toHaveBeenCalled();
+    expect(screen.getByText(/浏览器或系统平台可能在线处理麦克风语音/)).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "同意并切换" }));
+    expect(session.acceptOnlineSpeechNotice).toHaveBeenCalledOnce();
+    expect(session.setSpeechMode).toHaveBeenCalledWith("online-preferred");
+    expect(session.startRealtimeCall).not.toHaveBeenCalled();
+  });
+
   it("shows a non-blocking Realtek diagnostic after three silent seconds", () => {
     vi.useFakeTimers();
     const session = controller({

@@ -57,6 +57,7 @@ class AssistantSpeak(ClientMessage):
     type: Literal["assistant.speak"]
     turn_id: StrictInt
     request_id: StrictInt = Field(default=0, ge=0)
+    start_offset: StrictInt = Field(default=0, ge=0)
 
 
 class VoiceSelect(ClientMessage):
@@ -69,6 +70,10 @@ class VoicePreview(ClientMessage):
     type: Literal["voice.preview"]
     voice_key: str
     speed: Literal[0.8, 1.0, 1.2]
+
+
+class VoicePreviewCancel(ClientMessage):
+    type: Literal["voice.preview.cancel"]
 
 
 class TurnCancel(ClientMessage):
@@ -90,6 +95,7 @@ type ClientEvent = Annotated[
     | AssistantSpeak
     | VoiceSelect
     | VoicePreview
+    | VoicePreviewCancel
     | TurnCancel
     | AudioCommit
     | SessionStop,

@@ -63,8 +63,10 @@ class FakeOrchestrator:
             type="error", code="submitted_voice", message="test", recoverable=True
         )
 
-    async def speak_message(self, turn_id: int, request_id: int = 0):
-        self.calls.append(("speak_message", turn_id, request_id))
+    async def speak_message(
+        self, turn_id: int, request_id: int = 0, start_offset: int = 0
+    ):
+        self.calls.append(("speak_message", turn_id, request_id, start_offset))
         yield ErrorMessage(
             type="error", code="spoke_message", message="test", recoverable=True
         )
@@ -83,6 +85,9 @@ class FakeOrchestrator:
         yield ErrorMessage(
             type="error", code="previewed_voice", message="test", recoverable=True
         )
+
+    async def cancel_preview(self) -> None:
+        self.calls.append(("cancel_preview",))
 
     async def cancel_active(self):
         self.calls.append(("cancel_active",))
@@ -393,9 +398,15 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
         {"type": "session.start"},
         {"type": "text.submit", "text": "  你好  ", "speak_response": True},
         {"type": "voice.transcript.submit", "text": "  浏览器语音  ", "request_id": 7},
-        {"type": "assistant.speak", "turn_id": 3, "request_id": 9},
+        {
+            "type": "assistant.speak",
+            "turn_id": 3,
+            "request_id": 9,
+            "start_offset": 4,
+        },
         {"type": "voice.select", "voice_key": "clear_female", "speed": 1.2},
         {"type": "voice.preview", "voice_key": "clear_female", "speed": 0.8},
+        {"type": "voice.preview.cancel"},
         {"type": "turn.cancel"},
         {"type": "audio.commit"},
     )
@@ -415,9 +426,10 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
     assert orchestrator.calls == [
         ("submit_text", "你好", True),
         ("submit_voice_transcript", "浏览器语音", 7),
-        ("speak_message", 3, 9),
+        ("speak_message", 3, 9, 4),
         ("select_voice", "clear_female", 1.2),
         ("preview_voice", "clear_female", 0.8),
+        ("cancel_preview",),
         ("cancel_active",),
         ("commit_audio",),
         ("accept_audio", frame),

@@ -5,7 +5,6 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
-import { BrowserSpeechProvider } from "../audio/webSpeech";
 import type { KnowledgeClient } from "../knowledge/client";
 import type { LocalApiClient } from "../localApi";
 import type { VoiceSessionController } from "../useVoiceSession";
@@ -294,8 +293,7 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "选择音色" })).toBeNull();
   });
 
-  it("lists browser voices first, previews them online, and exposes one local fallback", () => {
-    const speak = vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockResolvedValue(undefined);
+  it("lists browser voices first, routes their previews through the controller, and exposes one local fallback", () => {
     const session = controller({
       browserVoices: [
         { key: "browser-xiaoxiao", name: "微软晓晓", lang: "zh-CN", localService: false },
@@ -323,31 +321,22 @@ describe("App", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "试听 微软晓晓" }));
     expect(session.selectBrowserVoice).toHaveBeenCalledWith("browser-xiaoxiao");
-    expect(speak).toHaveBeenCalledWith("你好，我是声灵，很高兴认识你。", "browser-xiaoxiao", 1);
+    expect(session.previewVoice).toHaveBeenCalledWith("browser-xiaoxiao", 1, "browser");
   });
 
-  it("does not cancel a browser preview when voice selection rerenders the app", () => {
-    vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockReturnValue(new Promise(() => undefined));
-    const cancelSpeech = vi.spyOn(BrowserSpeechProvider.prototype, "cancelSpeech").mockImplementation(() => undefined);
-
-    function StatefulApp() {
-      const [voiceKey, setVoiceKey] = useState<string | null>(null);
-      const session = controller({
-        browserVoices: [
-          { key: "browser-xiaoxiao", name: "微软晓晓", lang: "zh-CN", localService: false },
-        ],
-        selectedBrowserVoiceKey: voiceKey,
-        selectBrowserVoice: (nextVoiceKey) => setVoiceKey(nextVoiceKey),
-      });
-      return <App controller={session} />;
-    }
-
-    render(<StatefulApp />);
+  it("asks the controller to stop only its active preview when the picker closes", () => {
+    const session = controller({
+      browserVoices: [
+        { key: "browser-xiaoxiao", name: "微软晓晓", lang: "zh-CN", localService: false },
+      ],
+      selectedBrowserVoiceKey: "browser-xiaoxiao",
+      previewingVoiceKey: "browser-xiaoxiao",
+    });
+    render(<App controller={session} />);
     fireEvent.click(screen.getByRole("button", { name: /音色：/ }));
-    fireEvent.click(screen.getByRole("button", { name: "试听 微软晓晓" }));
+    fireEvent.keyDown(document, { key: "Escape" });
 
-    expect(cancelSpeech).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "停止试听 微软晓晓" })).toBeVisible();
+    expect(session.stopVoicePreview).toHaveBeenCalledOnce();
   });
 
   it("offers only valid recovery actions for connection and microphone errors", () => {

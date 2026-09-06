@@ -519,6 +519,45 @@ async def test_speak_message_echoes_request_id_on_every_tts_event():
 
 
 @pytest.mark.asyncio
+async def test_speak_message_synthesizes_only_the_server_stored_remainder():
+    orchestrator, _, tts = make_orchestrator(replies=[["Hi😀。第二句。最后没有句号"]])
+    done = [event async for event in orchestrator.submit_text("问题", False)]
+    turn_id = next(item.turn_id for item in done if item.type == "assistant.done")
+
+    replay = [
+        item
+        async for item in orchestrator.speak_message(
+            turn_id,
+            request_id=42,
+            start_offset=len("Hi😀。"),
+        )
+    ]
+
+    assert [call.text for call in tts.calls] == ["第二句。", "最后没有句号"]
+    assert {item.request_id for item in replay if hasattr(item, "request_id")} == {42}
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_speak_message_rejects_an_offset_outside_the_stored_assistant_text():
+    orchestrator, _, tts = make_orchestrator(replies=[["短回答"]])
+    done = [event async for event in orchestrator.submit_text("问题", False)]
+    turn_id = next(item.turn_id for item in done if item.type == "assistant.done")
+
+    replay = [
+        item
+        async for item in orchestrator.speak_message(
+            turn_id, request_id=42, start_offset=999
+        )
+    ]
+
+    assert [item.type for item in replay] == ["error"]
+    assert replay[0].code == "invalid_speech_offset"
+    assert tts.calls == []
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
 async def test_speak_message_rejects_text_that_is_empty_after_tts_cleanup():
     orchestrator, _, _ = make_orchestrator(replies=[["```python\nprint('hidden')\n```"]])
     done = [event async for event in orchestrator.submit_text("问题", False)]
@@ -533,7 +572,7 @@ async def test_speak_message_rejects_text_that_is_empty_after_tts_cleanup():
 
 
 @pytest.mark.asyncio
-async def test_assistant_response_strips_emoji_from_stream_history_and_tts():
+async def test_assistant_response_preserves_emoji_in_stream_history_and_strips_from_tts():
     response_text = "你好😀，欢迎来到 VoxAgent！"
     orchestrator, _, tts = make_orchestrator(replies=[[response_text]])
 
@@ -544,8 +583,8 @@ async def test_assistant_response_strips_emoji_from_stream_history_and_tts():
 
     assert [
         item.delta for item in outputs if getattr(item, "type", None) == "assistant.delta"
-    ] == ["你好，欢迎来到 VoxAgent！"]
-    assert orchestrator.history.assistant_text(turn_id) == "你好，欢迎来到 VoxAgent！"
+    ] == [response_text]
+    assert orchestrator.history.assistant_text(turn_id) == response_text
     assert [call.text for call in tts.calls] == ["你好，欢迎来到 VoxAgent！"]
     await orchestrator.stop()
 
@@ -570,7 +609,7 @@ async def test_replay_tts_strips_emoji_from_completed_assistant_message():
 
 
 @pytest.mark.asyncio
-async def test_emoji_only_assistant_response_uses_plain_text_fallback():
+async def test_emoji_only_assistant_response_is_displayed_but_never_spoken():
     response_text = "👩🏽‍💻 🇨🇳 1️⃣"
     orchestrator, _, tts = make_orchestrator(replies=[[response_text]])
 
@@ -582,26 +621,15 @@ async def test_emoji_only_assistant_response_uses_plain_text_fallback():
 
     assert [
         item.delta for item in outputs if getattr(item, "type", None) == "assistant.delta"
-    ] == ["我暂时没有生成有效回答，请再试一次。"]
-    assert orchestrator.history.assistant_text(turn_id) == "我暂时没有生成有效回答，请再试一次。"
+    ] == [response_text]
+    assert orchestrator.history.assistant_text(turn_id) == response_text
     assert [item.type if hasattr(item, "type") else "binary" for item in outputs] == [
         "assistant.delta",
-        "tts.started",
-        "tts.chunk",
-        "binary",
-        "tts.done",
         "assistant.done",
     ]
-    assert [item.type if hasattr(item, "type") else "binary" for item in replay] == [
-        "tts.started",
-        "tts.chunk",
-        "binary",
-        "tts.done",
-    ]
-    assert [call.text for call in tts.calls] == [
-        "我暂时没有生成有效回答，请再试一次。",
-        "我暂时没有生成有效回答，请再试一次。",
-    ]
+    assert [item.type for item in replay] == ["tts.error"]
+    assert replay[0].code == "tts_empty"
+    assert tts.calls == []
     await orchestrator.stop()
 
 

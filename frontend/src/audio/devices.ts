@@ -29,6 +29,48 @@ export async function listMicrophones(): Promise<MicrophoneDevice[]> {
     .map(classifyMicrophone);
 }
 
+function permissionAbortError(): DOMException {
+  return new DOMException("Microphone permission request was cancelled", "AbortError");
+}
+
+async function requestMicrophonePermission(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw permissionAbortError();
+  const request = navigator.mediaDevices.getUserMedia({ audio: true });
+  if (signal) {
+    void request.then((lateStream) => {
+      if (signal.aborted) lateStream.getTracks().forEach((track) => track.stop());
+    }, () => undefined);
+  }
+  const stream = signal
+    ? await new Promise<MediaStream>((resolve, reject) => {
+        let settled = false;
+        const finish = (callback: () => void) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          callback();
+        };
+        const onAbort = () => finish(() => reject(permissionAbortError()));
+        signal.addEventListener("abort", onAbort, { once: true });
+        request.then(
+          (value) => finish(() => resolve(value)),
+          (error: unknown) => finish(() => reject(error)),
+        );
+      })
+    : await request;
+  stream.getTracks().forEach((track) => track.stop());
+}
+
+export async function listMicrophonesAfterPermission(signal?: AbortSignal): Promise<MicrophoneDevice[]> {
+  const initial = await listMicrophones();
+  if (signal?.aborted) throw permissionAbortError();
+  const labelsAreUsable = initial.length > 0 && initial.some((device) => device.label.trim().length > 0);
+  if (labelsAreUsable) return initial;
+  await requestMicrophonePermission(signal);
+  if (signal?.aborted) throw permissionAbortError();
+  return listMicrophones();
+}
+
 export function choosePreferredMicrophone(
   devices: readonly MicrophoneDevice[],
   savedDeviceId: string | null,

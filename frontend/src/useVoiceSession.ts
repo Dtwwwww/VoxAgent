@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MicrophoneCapture } from "./audio/capture";
-import { browserDefaultMatchesSelection, choosePreferredMicrophone, listMicrophones, type MicrophoneDevice } from "./audio/devices";
+import { browserDefaultMatchesSelection, choosePreferredMicrophone, listMicrophonesAfterPermission, type MicrophoneDevice } from "./audio/devices";
 import { AudioPlayback } from "./audio/playback";
-import { BrowserSpeechProvider, type BrowserSpeechFailure, type BrowserVoice } from "./audio/webSpeech";
+import { BrowserSpeechProvider, type BrowserSpeechFailure, type BrowserSpeechOwner, type BrowserVoice } from "./audio/webSpeech";
 import { type ServerEvent, type VoiceInfo, type VoiceSpeed, parseServerEventJson } from "./protocol";
 import { RealtimeVoiceEngine, type RealtimeSnapshot, type SpeechMode } from "./realtime/RealtimeVoiceEngine";
 import { StreamingSentenceQueue } from "./realtime/sentenceQueue";
@@ -12,6 +12,8 @@ import { loadVoiceSettings, reconcileVoiceSettings, saveVoiceSettings, type Voic
 export type ConnectionStatus = "disconnected" | "connecting" | "initializing" | "connected";
 export type VoiceStatus = "idle" | "listening" | "transcribing" | "thinking" | "preparing" | "speaking";
 export type MessageStatus = "streaming" | "complete" | "cancelled";
+
+const BROWSER_PREVIEW_TEXT = "你好，我是声灵，很高兴认识你。";
 
 export type ResponseSource =
   | { kind: "memory"; id: number; content: string; sourceText: string | null; sourceTurnId: number | null }
@@ -68,6 +70,7 @@ export interface VoiceSessionController {
   realtime: RealtimeSnapshot;
   microphones: MicrophoneDevice[];
   selectedMicrophoneId: string | null;
+  microphoneSettings?: Readonly<MediaTrackSettings> | null;
   speechMode: SpeechMode;
   browserVoices: BrowserVoice[];
   selectedBrowserVoiceKey: string | null;
@@ -80,7 +83,7 @@ export interface VoiceSessionController {
   speakMessage(turnId: number): void;
   stopSpeaking(turnId: number): void;
   selectVoice(voiceKey: string, speed: VoiceSpeed): void;
-  previewVoice(voiceKey: string, speed: VoiceSpeed): void;
+  previewVoice(voiceKey: string, speed: VoiceSpeed, provider?: "local" | "browser"): void;
   stopVoicePreview(): void;
   cancelActive(): void;
   dismissMemoryProposal(id: string): void;
@@ -128,6 +131,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const [realtime, setRealtime] = useState<RealtimeSnapshot>({ ...OFF_REALTIME_SNAPSHOT });
   const [microphones, setMicrophones] = useState<MicrophoneDevice[]>([]);
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState<string | null>(initialSettings.microphoneDeviceId);
+  const [microphoneSettings, setMicrophoneSettings] = useState<Readonly<MediaTrackSettings> | null>(null);
   const [speechMode, setSpeechModeState] = useState<SpeechMode>(initialSettings.speechMode);
   const [selectedBrowserVoiceKey, setSelectedBrowserVoiceKey] = useState<string | null>(initialSettings.browserVoiceKey);
   const [onlineSpeechNoticeAccepted, setOnlineSpeechNoticeAccepted] = useState(initialSettings.onlineSpeechNoticeAccepted);
@@ -136,8 +140,10 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const realtimeSnapshotRef = useRef<RealtimeSnapshot>({ ...OFF_REALTIME_SNAPSHOT });
   const realtimeStartGenerationRef = useRef(0);
   const realtimeCallRequestedRef = useRef(false);
+  const realtimePreparationAbortRef = useRef<AbortController | null>(null);
   const selectedMicrophoneIdRef = useRef<string | null>(initialSettings.microphoneDeviceId);
   const speechModeRef = useRef<SpeechMode>(initialSettings.speechMode);
+  const onlineSpeechNoticeAcceptedRef = useRef(initialSettings.onlineSpeechNoticeAccepted);
   const selectedBrowserVoiceKeyRef = useRef<string | null>(initialSettings.browserVoiceKey);
   const browserSpeechRef = useRef<BrowserSpeechProvider | null>(null);
   if (!browserSpeechRef.current) browserSpeechRef.current = new BrowserSpeechProvider();
@@ -169,6 +175,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const previewRequestedRef = useRef(false);
   const activePreviewIdRef = useRef<number | null>(null);
   const expectedPreviewIdRef = useRef(0);
+  const previewProviderRef = useRef<"local" | "browser" | null>(null);
+  const activeBrowserPreviewOwnerRef = useRef<BrowserSpeechOwner | null>(null);
   const messageIdRef = useRef(0);
   const handlePlaybackCompletion = useCallback((completion: { kind: "turn"; turnId: number } | { kind: "preview"; previewId: number }) => {
     if (completion.kind === "turn") {
@@ -189,6 +197,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     } else if (completion.previewId === activePreviewIdRef.current) {
       previewRequestedRef.current = false;
       activePreviewIdRef.current = null;
+      previewProviderRef.current = null;
       setPreviewingVoiceKey(null);
       setVoiceStatus("idle");
     }
@@ -211,6 +220,23 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     return next;
   }, []);
 
+  const cancelVoicePreview = useCallback((notifyServer: boolean): boolean => {
+    const provider = previewProviderRef.current;
+    const browserOwner = activeBrowserPreviewOwnerRef.current;
+    if (provider === null && browserOwner === null && !previewRequestedRef.current) return false;
+    if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
+    previewRequestedRef.current = false;
+    activePreviewIdRef.current = null;
+    previewProviderRef.current = null;
+    activeBrowserPreviewOwnerRef.current = null;
+    playbackRef.current.stopPreview();
+    if (browserOwner !== null) browserSpeechRef.current?.cancelSpeech(browserOwner);
+    if (provider === "local" && notifyServer) send({ type: "voice.preview.cancel" });
+    setPreviewingVoiceKey(null);
+    setVoiceStatus((current) => current === "speaking" ? "idle" : current);
+    return true;
+  }, [send]);
+
   if (!captureRef.current) {
     captureRef.current = new MicrophoneCapture({
       get deviceId() {
@@ -226,7 +252,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         realtimeSnapshotRef.current = snapshot;
         setRealtime(snapshot);
       },
-      onSettings() {},
+      onSettings(settings) {
+        setMicrophoneSettings({ ...settings });
+      },
     });
   }
   if (!realtimeEngineRef.current) {
@@ -288,6 +316,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     realtimeSpeechRequestRef.current = null;
     previewRequestedRef.current = false;
     activePreviewIdRef.current = null;
+    previewProviderRef.current = null;
+    activeBrowserPreviewOwnerRef.current = null;
     expectedPreviewIdRef.current = 0;
     setMemoryProposals([]);
   }, []);
@@ -295,12 +325,18 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const stopLocalResources = useCallback(async () => {
     realtimeCallRequestedRef.current = false;
     realtimeStartGenerationRef.current += 1;
+    realtimePreparationAbortRef.current?.abort();
+    realtimePreparationAbortRef.current = null;
     captureLifecycleRef.current += 1;
     manualSpeechGenerationRef.current += 1;
     setMicrophoneActive(false);
     setVoiceStatus("idle");
     setSpeakingTurnId(null);
     setPreviewingVoiceKey(null);
+    const browserPreviewOwner = activeBrowserPreviewOwnerRef.current;
+    activeBrowserPreviewOwnerRef.current = null;
+    previewProviderRef.current = null;
+    if (browserPreviewOwner !== null) browserSpeechRef.current?.cancelSpeech(browserPreviewOwner);
     const abort = captureAbortRef.current;
     captureAbortRef.current = null;
     abort?.abort();
@@ -609,6 +645,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           }
           previewRequestedRef.current = false;
           activePreviewIdRef.current = null;
+          previewProviderRef.current = null;
           setPreviewingVoiceKey(null);
         }
         setError({ code: event.code, message: event.message, recoverable: event.recoverable });
@@ -693,8 +730,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if (manualCaptureActiveRef.current || realtimeSnapshotRef.current.active) return Promise.resolve();
     if (captureStartRef.current) return captureStartRef.current;
     if (pendingAudioRef.current) pendingAudioRef.current.valid = false;
-    previewRequestedRef.current = false;
-    activePreviewIdRef.current = null;
+    cancelVoicePreview(true);
     playbackRef.current.stopAll();
     setSpeakingTurnId(null);
     setPreviewingVoiceKey(null);
@@ -708,7 +744,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       try {
         try {
           const devices = await Promise.race([
-            listMicrophones(),
+            listMicrophonesAfterPermission(abort.signal),
             new Promise<null>((resolve) => {
               if (abort.signal.aborted) resolve(null);
               else abort.signal.addEventListener("abort", () => resolve(null), { once: true });
@@ -754,7 +790,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     })();
     captureStartRef.current = operation;
     return operation;
-  }, [persistSettings, send]);
+  }, [cancelVoicePreview, persistSettings, send]);
 
   const stopMicrophone = useCallback(async () => {
     captureLifecycleRef.current += 1;
@@ -771,6 +807,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const startRealtimeCall = useCallback(async () => {
     realtimeCallRequestedRef.current = true;
     const generation = ++realtimeStartGenerationRef.current;
+    realtimePreparationAbortRef.current?.abort();
+    const preparationAbort = new AbortController();
+    realtimePreparationAbortRef.current = preparationAbort;
     pendingBrowserTranscriptRequestRef.current = null;
     activeBrowserTranscriptRef.current = null;
     realtimeSpeechRequestRef.current = null;
@@ -782,7 +821,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     }
     let availableMicrophones: MicrophoneDevice[] = [];
     try {
-      availableMicrophones = await listMicrophones();
+      availableMicrophones = await listMicrophonesAfterPermission(preparationAbort.signal);
       if (generation !== realtimeStartGenerationRef.current) return;
       setMicrophones(availableMicrophones);
       const selected = choosePreferredMicrophone(availableMicrophones, selectedMicrophoneIdRef.current);
@@ -793,9 +832,13 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         microphoneLabel: selected?.label ?? null,
       });
     } catch {
+      if (preparationAbort.signal.aborted || generation !== realtimeStartGenerationRef.current) return;
       // The capture path can still request the previously selected or browser-default input.
     }
     if (generation !== realtimeStartGenerationRef.current) return;
+    if (realtimePreparationAbortRef.current === preparationAbort) {
+      realtimePreparationAbortRef.current = null;
+    }
 
     const availableBrowserVoices = browserSpeechRef.current?.voices() ?? [];
     setBrowserVoices(availableBrowserVoices);
@@ -826,6 +869,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const stopRealtimeCall = useCallback(async () => {
     realtimeCallRequestedRef.current = false;
     realtimeStartGenerationRef.current += 1;
+    realtimePreparationAbortRef.current?.abort();
+    realtimePreparationAbortRef.current = null;
     pendingBrowserTranscriptRequestRef.current = null;
     activeBrowserTranscriptRef.current = null;
     realtimeSpeechRequestRef.current = null;
@@ -834,10 +879,42 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, []);
 
   const setSpeechMode = useCallback((mode: SpeechMode) => {
+    if (
+      mode === "online-preferred"
+      && realtimeSnapshotRef.current.active
+      && !onlineSpeechNoticeAcceptedRef.current
+    ) return;
+    if (mode === "local-only") cancelVoicePreview(true);
     speechModeRef.current = mode;
     setSpeechModeState(mode);
     persistSettings({ speechMode: mode });
-  }, [persistSettings]);
+    if (!realtimeSnapshotRef.current.active) return;
+
+    pendingBrowserTranscriptRequestRef.current = null;
+    activeBrowserTranscriptRef.current = null;
+    realtimeSpeechRequestRef.current = null;
+    const availableBrowserVoices = browserSpeechRef.current?.voices() ?? [];
+    let browserVoiceKey = selectedBrowserVoiceKeyRef.current;
+    if (browserVoiceKey && !availableBrowserVoices.some((voice) => voice.key === browserVoiceKey)) {
+      browserVoiceKey = null;
+    }
+    if (!browserVoiceKey) browserVoiceKey = availableBrowserVoices[0]?.key ?? null;
+    if (browserVoiceKey !== selectedBrowserVoiceKeyRef.current) {
+      selectedBrowserVoiceKeyRef.current = browserVoiceKey;
+      setSelectedBrowserVoiceKey(browserVoiceKey);
+      persistSettings({ browserVoiceKey });
+    }
+    void realtimeEngineRef.current?.switchMode({
+      mode,
+      deviceId: selectedMicrophoneIdRef.current,
+      browserVoiceKey,
+      speechRate: settingsRef.current.speed,
+      allowDefaultInputFallback: browserDefaultMatchesSelection(
+        microphones,
+        selectedMicrophoneIdRef.current,
+      ),
+    });
+  }, [cancelVoicePreview, microphones, persistSettings]);
 
   const selectMicrophone = useCallback(async (deviceId: string) => {
     const selected = microphones.find((device) => device.deviceId === deviceId);
@@ -856,6 +933,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [browserVoices, persistSettings]);
 
   const acceptOnlineSpeechNotice = useCallback(() => {
+    onlineSpeechNoticeAcceptedRef.current = true;
     setOnlineSpeechNoticeAccepted(true);
     persistSettings({ onlineSpeechNoticeAccepted: true });
   }, [persistSettings]);
@@ -1014,28 +1092,51 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     send({ type: "voice.select", voice_key: voiceKey, speed });
   }, [persistSettings, send]);
 
-  const previewVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
-    if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
-    playbackRef.current.stopPreview();
-    previewRequestedRef.current = false;
-    activePreviewIdRef.current = null;
-    setPreviewingVoiceKey(null);
+  const previewVoice = useCallback((voiceKey: string, speed: VoiceSpeed, provider: "local" | "browser" = "local") => {
+    cancelVoicePreview(true);
+    if (provider === "browser") {
+      if (
+        speechModeRef.current === "local-only"
+        || realtimeSnapshotRef.current.active
+        || activeReplayTurnRef.current !== null
+        || !browserVoices.some((voice) => voice.key === voiceKey)
+      ) return;
+      selectBrowserVoice(voiceKey);
+      const owner = Symbol(`voice-preview:${voiceKey}`);
+      activeBrowserPreviewOwnerRef.current = owner;
+      previewProviderRef.current = "browser";
+      setPreviewingVoiceKey(voiceKey);
+      setVoiceStatus("speaking");
+      void browserSpeechRef.current!.speak(BROWSER_PREVIEW_TEXT, voiceKey, speed, owner)
+        .then(() => {
+          if (activeBrowserPreviewOwnerRef.current !== owner) return;
+          activeBrowserPreviewOwnerRef.current = null;
+          previewProviderRef.current = null;
+          setPreviewingVoiceKey(null);
+          setVoiceStatus("idle");
+        })
+        .catch((speechError: unknown) => {
+          if (activeBrowserPreviewOwnerRef.current !== owner) return;
+          activeBrowserPreviewOwnerRef.current = null;
+          previewProviderRef.current = null;
+          setPreviewingVoiceKey(null);
+          setVoiceStatus("idle");
+          if (speechError instanceof DOMException && speechError.name === "AbortError") return;
+          setError({ code: "browser_speech", message: "当前中文音色无法试听，请选择其他音色", recoverable: true });
+        });
+      return;
+    }
     if (send({ type: "voice.preview", voice_key: voiceKey, speed })) {
       expectedPreviewIdRef.current += 1;
       previewRequestedRef.current = true;
+      previewProviderRef.current = "local";
       setPreviewingVoiceKey(voiceKey);
     }
-  }, [send]);
+  }, [browserVoices, cancelVoicePreview, selectBrowserVoice, send]);
 
   const stopVoicePreview = useCallback(() => {
-    if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
-    previewRequestedRef.current = false;
-    activePreviewIdRef.current = null;
-    playbackRef.current.stopPreview();
-    setPreviewingVoiceKey(null);
-    setVoiceStatus("idle");
-    send({ type: "turn.cancel" });
-  }, [send]);
+    cancelVoicePreview(true);
+  }, [cancelVoicePreview]);
 
   const cancelActive = useCallback(() => {
     if (pendingAudioRef.current) pendingAudioRef.current.valid = false;
@@ -1104,6 +1205,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     realtime,
     microphones,
     selectedMicrophoneId,
+    microphoneSettings,
     speechMode,
     browserVoices,
     selectedBrowserVoiceKey,

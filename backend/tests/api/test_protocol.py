@@ -76,6 +76,38 @@ def test_browser_transcript_request_ids_are_strict_and_echo_on_turn_events():
         )
 
 
+def test_assistant_speech_remainder_offset_is_strict_and_cannot_supply_text():
+    message = parse_client_message(
+        {"type": "assistant.speak", "turn_id": 7, "request_id": 11, "start_offset": 4}
+    )
+
+    assert (message.turn_id, message.request_id, message.start_offset) == (7, 11, 4)
+    for start_offset in (-1, 1.0, True):
+        with pytest.raises(ValidationError):
+            parse_client_message(
+                {
+                    "type": "assistant.speak",
+                    "turn_id": 7,
+                    "request_id": 11,
+                    "start_offset": start_offset,
+                }
+            )
+    with pytest.raises(ValidationError):
+        parse_client_message(
+            {
+                "type": "assistant.speak",
+                "turn_id": 7,
+                "request_id": 11,
+                "start_offset": 4,
+                "text": "客户端不能注入朗读文本",
+            }
+        )
+
+    assert parse_client_message({"type": "voice.preview.cancel"}).type == "voice.preview.cancel"
+    with pytest.raises(ValidationError):
+        parse_client_message({"type": "voice.preview.cancel", "turn_id": 7})
+
+
 def test_shared_astral_fixture_enforces_4000_code_point_boundary():
     fixtures = json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))
     boundary = fixtures["astral_text_boundaries"][0]

@@ -11,7 +11,7 @@ import { useVoiceSession } from "../useVoiceSession";
 
 const SESSION_ID = "00000000-0000-4000-8000-000000000001";
 const fixtures = JSON.parse(fixtureSource.replace(
-  /("(?:turn_id|request_id|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?\d+)\.0(?=\s*[,}])/gu,
+  /("(?:turn_id|request_id|start_offset|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?\d+)\.0(?=\s*[,}])/gu,
   "$1\"$2.0\"",
 )) as {
   valid_client: unknown[];
@@ -599,6 +599,77 @@ describe("useVoiceSession", () => {
     expect(socket.jsonMessages().at(-1)).toEqual({ type: "text.submit", text: "文字问题", speak_response: false });
   });
 
+  it("authorizes redacted microphones, re-enumerates, and reacquires the preferred Realtek track exactly", async () => {
+    const authorizationStop = vi.fn();
+    const actualStop = vi.fn();
+    const actualSettings = { deviceId: "realtek", groupId: "physical", channelCount: 1 } as MediaTrackSettings;
+    const actualTrack = {
+      readyState: "live",
+      getSettings: () => actualSettings,
+      stop: actualStop,
+    } as unknown as MediaStreamTrack;
+    const actualStream = {
+      getAudioTracks: () => [actualTrack],
+      getTracks: () => [actualTrack],
+    } as unknown as MediaStream;
+    vi.mocked(navigator.mediaDevices.enumerateDevices)
+      .mockResolvedValueOnce([
+        { deviceId: "default", groupId: "", label: "", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+        { deviceId: "virtual", groupId: "", label: "", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+      ])
+      .mockResolvedValueOnce([
+        { deviceId: "virtual", groupId: "virtual", label: "ToDesk Virtual Audio", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+        { deviceId: "realtek", groupId: "physical", label: "Microphone Array (Realtek)", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+      ]);
+    vi.mocked(navigator.mediaDevices.getUserMedia)
+      .mockResolvedValueOnce(microphoneStream(authorizationStop))
+      .mockResolvedValueOnce(actualStream);
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
+    const { hook } = openSession();
+
+    await act(async () => hook.result.current.startRealtimeCall());
+
+    expect(navigator.mediaDevices.enumerateDevices).toHaveBeenCalledTimes(2);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenNthCalledWith(1, { audio: true });
+    expect(authorizationStop).toHaveBeenCalledOnce();
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenNthCalledWith(2, {
+      audio: expect.objectContaining({ deviceId: { exact: "realtek" } }),
+    });
+    expect(hook.result.current.selectedMicrophoneId).toBe("realtek");
+    expect(hook.result.current.microphoneSettings).toEqual(actualSettings);
+  });
+
+  it("stops a late permission stream without letting an obsolete call start win", async () => {
+    const permission = deferred<MediaStream>();
+    const lateStop = vi.fn();
+    const currentStream = microphoneStream();
+    vi.mocked(navigator.mediaDevices.enumerateDevices)
+      .mockResolvedValueOnce([
+        { deviceId: "default", groupId: "", label: "", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+      ])
+      .mockResolvedValue([
+        { deviceId: "realtek", groupId: "physical", label: "Microphone Array (Realtek)", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+      ]);
+    vi.mocked(navigator.mediaDevices.getUserMedia)
+      .mockReturnValueOnce(permission.promise)
+      .mockResolvedValueOnce(currentStream);
+    const browserStart = vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
+    const { hook } = openSession();
+
+    let obsoleteStart!: Promise<void>;
+    act(() => { obsoleteStart = hook.result.current.startRealtimeCall(); });
+    await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({ audio: true }));
+    await act(async () => hook.result.current.stopRealtimeCall());
+    await act(async () => hook.result.current.startRealtimeCall());
+    permission.resolve(microphoneStream(lateStop));
+    await act(async () => obsoleteStart);
+
+    expect(lateStop).toHaveBeenCalledOnce();
+    expect(browserStart).toHaveBeenCalledOnce();
+    expect(hook.result.current.selectedMicrophoneId).toBe("realtek");
+    expect(hook.result.current.realtime).toMatchObject({ active: true, provider: "browser", state: "listening" });
+  });
+
   it("restarts an active realtime call on a newly selected physical microphone", async () => {
     const browserStart = vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
     const firstTrackStop = vi.fn();
@@ -750,6 +821,27 @@ describe("useVoiceSession", () => {
       speechMode: "local-only",
       onlineSpeechNoticeAccepted: true,
     });
+  });
+
+  it("switches providers in an active call without reconnecting the socket or reacquiring the microphone", async () => {
+    const browserStart = vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
+    vi.mocked(navigator.mediaDevices.enumerateDevices).mockResolvedValue([
+      { deviceId: "realtek", groupId: "physical", label: "Microphone Array (Realtek)", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+    ]);
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.acceptOnlineSpeechNotice());
+    act(() => hook.result.current.setSpeechMode("local-only"));
+    await act(async () => hook.result.current.startRealtimeCall());
+    expect(hook.result.current.realtime.provider).toBe("local");
+
+    act(() => hook.result.current.setSpeechMode("online-preferred"));
+    await waitFor(() => expect(hook.result.current.realtime.provider).toBe("browser"));
+
+    expect(browserStart).toHaveBeenCalledOnce();
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce();
+    expect(MockWebSocket.instances).toEqual([socket]);
+    expect(socket.readyState).toBe(MockWebSocket.OPEN);
   });
 
   it("uses positive monotonic request IDs for browser transcript submissions", async () => {
@@ -1407,6 +1499,9 @@ describe("useVoiceSession", () => {
     MockAudioContext.workletGates = [oldWorklet.promise, Promise.resolve()];
     const oldStop = vi.fn();
     const newStop = vi.fn();
+    vi.mocked(navigator.mediaDevices.enumerateDevices).mockResolvedValue([
+      { deviceId: "default", groupId: "physical", label: "Default microphone", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+    ]);
     vi.mocked(navigator.mediaDevices.getUserMedia)
       .mockResolvedValueOnce(microphoneStream(oldStop))
       .mockResolvedValueOnce(microphoneStream(newStop));
@@ -1439,6 +1534,9 @@ describe("useVoiceSession", () => {
     const resumeGate = deferred();
     MockAudioContext.resumeGates = [resumeGate.promise];
     const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.enumerateDevices).mockResolvedValue([
+      { deviceId: "default", groupId: "physical", label: "Default microphone", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+    ]);
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream(stop));
     const hook = renderHook(() => useVoiceSession({ url: "ws://localhost/v1/voice" }));
     let pending!: Promise<void>;
@@ -1725,7 +1823,7 @@ describe("useVoiceSession", () => {
 
     act(() => hook.result.current.stopVoicePreview());
     expect(stopPreview).toHaveBeenCalled();
-    expect(socket.jsonMessages().at(-1)).toEqual({ type: "turn.cancel" });
+    expect(socket.jsonMessages().at(-1)).toEqual({ type: "voice.preview.cancel" });
     expect(hook.result.current.previewingVoiceKey).toBeNull();
     expect(hook.result.current.voiceStatus).toBe("idle");
 
@@ -1733,6 +1831,28 @@ describe("useVoiceSession", () => {
     emit(socket, { type: "voice.preview.chunk", preview_id: 1, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
     await act(async () => socket.receive(wav));
     expect(MockAudioContext.instances.flatMap((context) => context.sources)).toHaveLength(0);
+  });
+
+  it("owns browser previews and ignores them completely in local-only mode", async () => {
+    const browserVoice = { key: "zh-preview", name: "Chinese", lang: "zh-CN", localService: true };
+    vi.spyOn(BrowserSpeechProvider.prototype, "voices").mockReturnValue([browserVoice]);
+    const preview = deferred();
+    const speak = vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockReturnValue(preview.promise);
+    const cancelSpeech = vi.spyOn(BrowserSpeechProvider.prototype, "cancelSpeech");
+    const { hook, socket } = openSession();
+    act(() => hook.result.current.selectBrowserVoice(browserVoice.key));
+
+    act(() => hook.result.current.previewVoice(browserVoice.key, 1, "browser"));
+    expect(speak).toHaveBeenCalledWith("你好，我是声灵，很高兴认识你。", browserVoice.key, 1, expect.anything());
+    expect(socket.jsonMessages().filter((event) => event.type === "voice.preview")).toEqual([]);
+    act(() => hook.result.current.stopVoicePreview());
+    expect(cancelSpeech).toHaveBeenCalledWith(expect.anything());
+    expect(socket.jsonMessages().filter((event) => event.type === "turn.cancel")).toEqual([]);
+
+    act(() => hook.result.current.setSpeechMode("local-only"));
+    speak.mockClear();
+    act(() => hook.result.current.previewVoice(browserVoice.key, 1, "browser"));
+    expect(speak).not.toHaveBeenCalled();
   });
 
   it("clears spoken state when browser playback ends naturally", async () => {
@@ -1917,6 +2037,9 @@ describe("useVoiceSession", () => {
 
   it("tears down microphone and playback on an unexpected socket close", async () => {
     const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.enumerateDevices).mockResolvedValue([
+      { deviceId: "default", groupId: "physical", label: "Default microphone", kind: "audioinput", toJSON: () => ({}) } as MediaDeviceInfo,
+    ]);
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream(stop));
     const { hook, socket } = openSession();
     await act(async () => hook.result.current.startMicrophone());

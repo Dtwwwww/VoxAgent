@@ -28,6 +28,8 @@ export interface BrowserSpeechFailure {
   message?: string;
 }
 
+export type BrowserSpeechOwner = symbol;
+
 const STABLE_RECOGNITION_ERROR_CODES = new Set<BrowserSpeechFailure["code"]>([
   "network",
   "language-not-supported",
@@ -71,7 +73,13 @@ export class BrowserSpeechProvider {
   private recognitionVersion = 0;
   private readonly processedFinalIndexes = new Set<number>();
   private speechVersion = 0;
-  private readonly activeUtterances = new Map<SpeechSynthesisUtterance, (reason: DOMException) => void>();
+  private readonly defaultSpeechOwner = Symbol("browser-speech-default");
+  private readonly cancelledSpeechOwners = new Set<BrowserSpeechOwner>();
+  private readonly pendingSpeechOwners = new Map<BrowserSpeechOwner, number>();
+  private readonly activeUtterances = new Map<SpeechSynthesisUtterance, {
+    owner: BrowserSpeechOwner;
+    reject(reason: DOMException): void;
+  }>();
 
   constructor(private readonly scope: Window = defaultScope() as Window) {}
 
@@ -198,40 +206,71 @@ export class BrowserSpeechProvider {
     return () => synthesis.removeEventListener("voiceschanged", handleVoicesChanged);
   }
 
-  speak(text: string, voiceKey: string | null, rate: number): Promise<void> {
+  async speak(
+    text: string,
+    voiceKey: string | null,
+    rate: number,
+    owner: BrowserSpeechOwner = this.defaultSpeechOwner,
+  ): Promise<void> {
     if (!this.scope?.speechSynthesis || !this.scope.SpeechSynthesisUtterance) {
-      return Promise.reject(new Error("Speech synthesis is not supported"));
+      throw new Error("Speech synthesis is not supported");
     }
-    const voices = this.scope.speechSynthesis.getVoices();
-    const selectedVoice = voiceKey === null
-      ? undefined
-      : voices.find((voice) => (voice.voiceURI || `${voice.name}:${voice.lang}`) === voiceKey && this.isChineseVoice(voice));
-    const utterance = new this.scope.SpeechSynthesisUtterance(text);
+    this.pendingSpeechOwners.set(owner, (this.pendingSpeechOwners.get(owner) ?? 0) + 1);
     const version = this.speechVersion;
-    utterance.lang = "zh-CN";
-    utterance.rate = rate;
-    if (selectedVoice) utterance.voice = selectedVoice;
-    return new Promise<void>((resolve, reject) => {
-      this.activeUtterances.set(utterance, reject);
-      const finish = (complete: () => void) => {
-        if (version !== this.speechVersion || !this.activeUtterances.has(utterance)) return;
-        this.activeUtterances.delete(utterance);
-        utterance.onend = null;
-        utterance.onerror = null;
-        complete();
-      };
-      utterance.onend = () => finish(resolve);
-      utterance.onerror = (event) => finish(() => reject(new Error(event.error || "Speech synthesis failed")));
-      this.scope.speechSynthesis.speak(utterance);
-    });
+    try {
+      const voices = await this.voicesAfterLoadingWindow();
+      if (version !== this.speechVersion || this.cancelledSpeechOwners.delete(owner)) {
+        throw new DOMException("Speech synthesis was cancelled", "AbortError");
+      }
+      const chineseVoices = voices.filter((voice) => this.isChineseVoice(voice));
+      const selectedVoice = voiceKey === null
+        ? chineseVoices[0]
+        : chineseVoices.find((voice) => (voice.voiceURI || `${voice.name}:${voice.lang}`) === voiceKey);
+      if (!selectedVoice) {
+        throw new Error(voiceKey === null
+          ? "No Chinese speech synthesis voice is available"
+          : "The requested Chinese speech synthesis voice is unavailable");
+      }
+      const utterance = new this.scope.SpeechSynthesisUtterance(text);
+      utterance.lang = "zh-CN";
+      utterance.rate = rate;
+      utterance.voice = selectedVoice;
+      await new Promise<void>((resolve, reject) => {
+        this.activeUtterances.set(utterance, { owner, reject });
+        const finish = (complete: () => void) => {
+          if (version !== this.speechVersion || !this.activeUtterances.has(utterance)) return;
+          this.activeUtterances.delete(utterance);
+          utterance.onend = null;
+          utterance.onerror = null;
+          complete();
+        };
+        utterance.onend = () => finish(resolve);
+        utterance.onerror = (event) => finish(() => reject(new Error(event.error || "Speech synthesis failed")));
+        this.scope.speechSynthesis.speak(utterance);
+      });
+    } finally {
+      const remaining = (this.pendingSpeechOwners.get(owner) ?? 1) - 1;
+      if (remaining > 0) this.pendingSpeechOwners.set(owner, remaining);
+      else {
+        this.pendingSpeechOwners.delete(owner);
+        this.cancelledSpeechOwners.delete(owner);
+      }
+    }
   }
 
-  cancelSpeech(): void {
+  cancelSpeech(owner?: BrowserSpeechOwner): void {
+    if (owner !== undefined) {
+      const hasPendingSpeech = (this.pendingSpeechOwners.get(owner) ?? 0) > 0;
+      const hasActiveSpeech = [...this.activeUtterances.values()].some((active) => active.owner === owner);
+      if (!hasPendingSpeech && !hasActiveSpeech) return;
+      this.cancelledSpeechOwners.add(owner);
+      if (!hasActiveSpeech) return;
+    }
     this.speechVersion += 1;
-    for (const [utterance, reject] of this.activeUtterances) {
+    for (const [utterance, active] of this.activeUtterances) {
       utterance.onend = null;
       utterance.onerror = null;
-      reject(new DOMException("Speech synthesis was cancelled", "AbortError"));
+      active.reject(new DOMException("Speech synthesis was cancelled", "AbortError"));
     }
     this.activeUtterances.clear();
     this.scope?.speechSynthesis?.cancel();
@@ -244,5 +283,24 @@ export class BrowserSpeechProvider {
 
   private isChineseVoice(voice: SpeechSynthesisVoice): boolean {
     return voice.lang.toLowerCase().startsWith("zh") || CHINESE_VOICE_NAME.test(voice.name);
+  }
+
+  private voicesAfterLoadingWindow(): Promise<SpeechSynthesisVoice[]> {
+    const synthesis = this.scope.speechSynthesis;
+    const immediate = synthesis.getVoices();
+    if (immediate.length > 0) return Promise.resolve(immediate);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        synthesis.removeEventListener("voiceschanged", onVoicesChanged);
+        resolve(synthesis.getVoices());
+      };
+      const onVoicesChanged = () => finish();
+      const timer = setTimeout(finish, 250);
+      synthesis.addEventListener("voiceschanged", onVoicesChanged);
+    });
   }
 }

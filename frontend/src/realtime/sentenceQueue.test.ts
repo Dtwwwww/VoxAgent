@@ -23,7 +23,23 @@ describe("StreamingSentenceQueue", () => {
     const queue = new StreamingSentenceQueue();
     const longText = `${"你".repeat(79)}😀后续`;
 
-    expect(queue.push(longText)).toEqual([`${"你".repeat(79)}😀`]);
+    expect(queue.push(longText)).toEqual(["你".repeat(79)]);
     expect(queue.push("。" )).toEqual(["后续。"]);
+  });
+
+  it("flushes one trimmed unterminated tail exactly once", () => {
+    const queue = new StreamingSentenceQueue();
+
+    expect(queue.push("  这是没有句号的结尾  ")).toEqual([]);
+    expect(queue.flush()).toEqual(["这是没有句号的结尾"]);
+    expect(queue.flush()).toEqual([]);
+  });
+
+  it("removes emoji and presentation-only symbols without emitting a separate utterance", () => {
+    const queue = new StreamingSentenceQueue();
+
+    expect(queue.push("你好😀，继续✨。" )).toEqual(["你好，继续\u3002"]);
+    expect(queue.push("😀✨。" )).toEqual([]);
+    expect(queue.flush()).toEqual([]);
   });
 });

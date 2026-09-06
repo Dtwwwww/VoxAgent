@@ -54,12 +54,14 @@ class Orchestrator(Protocol):
     ) -> AsyncIterator[_Output]: ...
 
     def speak_message(
-        self, turn_id: int, request_id: int = 0
+        self, turn_id: int, request_id: int = 0, start_offset: int = 0
     ) -> AsyncIterator[_Output]: ...
 
     def select_voice(self, voice_key: str, speed: float) -> _Output: ...
 
     def preview_voice(self, voice_key: str, speed: float) -> AsyncIterator[_Output]: ...
+
+    async def cancel_preview(self) -> None: ...
 
     async def cancel_active(self) -> _Output | None: ...
 
@@ -343,7 +345,10 @@ async def _dispatch_event(
         )
     elif event_type == "assistant.speak":
         await _forward_outputs(
-            orchestrator.speak_message(event.turn_id, event.request_id), writer
+            orchestrator.speak_message(
+                event.turn_id, event.request_id, event.start_offset
+            ),
+            writer,
         )
     elif event_type == "voice.select":
         await writer.send(orchestrator.select_voice(event.voice_key, event.speed))
@@ -351,6 +356,8 @@ async def _dispatch_event(
         await _forward_outputs(
             orchestrator.preview_voice(event.voice_key, event.speed), writer
         )
+    elif event_type == "voice.preview.cancel":
+        await orchestrator.cancel_preview()
     elif event_type == "turn.cancel":
         cancelled = await orchestrator.cancel_active()
         if cancelled is not None:

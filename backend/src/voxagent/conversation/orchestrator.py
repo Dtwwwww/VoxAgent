@@ -37,7 +37,7 @@ from voxagent.memory.models import PolicyStatus
 from voxagent.memory.policy import MemoryPolicy
 from voxagent.speech.asr import AsrEngine, PartialAsrEngine
 from voxagent.speech.endpoint import EndpointDecision, EndpointDetector
-from voxagent.speech.text_normalization import normalize_tts_text, split_tts_text, strip_emoji
+from voxagent.speech.text_normalization import normalize_tts_text, split_tts_text
 from voxagent.speech.tts import PUBLIC_TTS_SPEEDS, TtsEngine
 from voxagent.speech.vad import SAMPLE_RATE, VadDecision, VadDetector
 from voxagent.speech.voice_catalog import VoiceCatalog, VoiceCatalogError
@@ -436,7 +436,7 @@ class ConversationOrchestrator:
         return VoiceSelected(type="voice.selected", voice_key=voice_key, speed=float(speed))
 
     async def speak_message(
-        self, turn_id: int, request_id: int = 0
+        self, turn_id: int, request_id: int = 0, start_offset: int = 0
     ) -> AsyncIterator[Output]:
         async with self._action_lock:
             if self._is_closed():
@@ -454,18 +454,33 @@ class ConversationOrchestrator:
                     token = None
                     cancelled = None
                 else:
-                    error = None
-                    cancelled = await self._cancel_conversation()
-                    await self._cancel_preview()
-                    token = TurnToken(self.state.session_id, turn_id)
-                    await self._ensure_task_group()
-                    self._active_token = token
-                    self._active_has_pending_history = False
-                    self.state.phase = Phase.SPEAKING
-                    self._active_task = self._task_group.create_task(
-                        self._speech_worker(token, text, request_id),
-                        name=f"replay-{turn_id}-{request_id}",
-                    )
+                    if (
+                        isinstance(start_offset, bool)
+                        or not isinstance(start_offset, int)
+                        or start_offset < 0
+                        or start_offset >= len(text)
+                    ):
+                        error = self._error(
+                            "invalid_speech_offset",
+                            "朗读起点不属于这条已完成的助手消息",
+                        )
+                        token = None
+                        cancelled = None
+                    else:
+                        error = None
+                        cancelled = await self._cancel_conversation()
+                        await self._cancel_preview()
+                        token = TurnToken(self.state.session_id, turn_id)
+                        await self._ensure_task_group()
+                        self._active_token = token
+                        self._active_has_pending_history = False
+                        self.state.phase = Phase.SPEAKING
+                        self._active_task = self._task_group.create_task(
+                            self._speech_worker(
+                                token, text[start_offset:], request_id
+                            ),
+                            name=f"replay-{turn_id}-{request_id}",
+                        )
         if error is not None or token is None:
             yield error or self._stopped_error()
             return
@@ -516,6 +531,10 @@ class ConversationOrchestrator:
         if self._preview_id == preview_id:
             self._preview_task = None
             self._preview_cancel = None
+
+    async def cancel_preview(self) -> None:
+        async with self._action_lock:
+            await self._cancel_preview()
 
     async def cancel_active(self) -> TurnCancelled | None:
         async with self._action_lock:
@@ -633,7 +652,7 @@ class ConversationOrchestrator:
             async for delta in self.llm.stream_chat(self.model_id, model_messages):
                 if token.cancelled.is_set():
                     return
-                visible_delta = strip_emoji(delta)
+                visible_delta = delta
                 if not visible_delta.strip():
                     continue
                 answer.append(visible_delta)

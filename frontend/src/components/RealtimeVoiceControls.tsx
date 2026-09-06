@@ -7,7 +7,7 @@ import { Icon } from "./Icon";
 const SILENT_LEVEL = 0.01;
 
 export function RealtimeVoiceControls({ controller }: { controller: VoiceSessionController }) {
-  const [showOnlineNotice, setShowOnlineNotice] = useState(false);
+  const [onlineNoticeAction, setOnlineNoticeAction] = useState<"start" | "switch" | null>(null);
   const [silentTooLong, setSilentTooLong] = useState(false);
   const active = controller.realtime.active;
   const silent = active && controller.realtime.inputLevel <= SILENT_LEVEL;
@@ -25,8 +25,12 @@ export function RealtimeVoiceControls({ controller }: { controller: VoiceSession
   }, [silent]);
 
   const changeMode = (mode: SpeechMode) => {
+    if (mode === "online-preferred" && !controller.onlineSpeechNoticeAccepted) {
+      setOnlineNoticeAction("switch");
+      return;
+    }
     controller.setSpeechMode(mode);
-    setShowOnlineNotice(false);
+    setOnlineNoticeAction(null);
   };
 
   const toggleCall = () => {
@@ -35,7 +39,7 @@ export function RealtimeVoiceControls({ controller }: { controller: VoiceSession
       return;
     }
     if (controller.speechMode === "online-preferred" && !controller.onlineSpeechNoticeAccepted) {
-      setShowOnlineNotice(true);
+      setOnlineNoticeAction("start");
       return;
     }
     void controller.startRealtimeCall();
@@ -76,7 +80,7 @@ export function RealtimeVoiceControls({ controller }: { controller: VoiceSession
         </select>
       </label>
 
-      <fieldset className="speech-mode" role="radiogroup" aria-label="语音模式" disabled={active}>
+      <fieldset className="speech-mode" role="radiogroup" aria-label="语音模式">
         <legend>语音模式</legend>
         <label>
           <input
@@ -119,14 +123,15 @@ export function RealtimeVoiceControls({ controller }: { controller: VoiceSession
       </div>
     </div>
 
-    {showOnlineNotice && <aside className="online-speech-notice" aria-label="在线语音说明">
+    {onlineNoticeAction !== null && <aside className="online-speech-notice" aria-label="在线语音说明">
       <p>浏览器或系统平台可能在线处理麦克风语音。项目不需要语音 API Key，文字输入仍保持本地处理。</p>
       <div>
         <button type="button" onClick={() => {
           controller.acceptOnlineSpeechNotice();
-          setShowOnlineNotice(false);
-          void controller.startRealtimeCall();
-        }}>同意并开始</button>
+          setOnlineNoticeAction(null);
+          if (onlineNoticeAction === "switch") controller.setSpeechMode("online-preferred");
+          else void controller.startRealtimeCall();
+        }}>{onlineNoticeAction === "switch" ? "同意并切换" : "同意并开始"}</button>
         <button type="button" onClick={() => changeMode("local-only")}>改用仅本地</button>
       </div>
     </aside>}

@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
-import { BrowserSpeechProvider } from "../audio/webSpeech";
 import type { VoiceSpeed } from "../protocol";
 import type { VoiceSessionController } from "../useVoiceSession";
 import { Icon } from "./Icon";
@@ -10,8 +9,6 @@ const speeds: Array<{ value: VoiceSpeed; label: string }> = [
   { value: 1.0, label: "自然" },
   { value: 1.2, label: "稍快" },
 ];
-
-const BROWSER_PREVIEW_TEXT = "你好，我是声灵，很高兴认识你。";
 
 interface VoicePickerProps {
   controller: VoiceSessionController;
@@ -23,12 +20,11 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
-  const browserSpeechRef = useRef<BrowserSpeechProvider | null>(null);
-  const [previewingBrowserVoiceKey, setPreviewingBrowserVoiceKey] = useState<string | null>(null);
+  const previewingVoiceKeyRef = useRef(controller.previewingVoiceKey);
+  const stopVoicePreviewRef = useRef(controller.stopVoicePreview);
   onCloseRef.current = onClose;
-  if (!browserSpeechRef.current) browserSpeechRef.current = new BrowserSpeechProvider();
-
-  useEffect(() => () => browserSpeechRef.current?.close(), []);
+  previewingVoiceKeyRef.current = controller.previewingVoiceKey;
+  stopVoicePreviewRef.current = controller.stopVoicePreview;
 
   useEffect(() => {
     if (!open) return;
@@ -40,7 +36,7 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
     document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
-      browserSpeechRef.current?.cancelSpeech();
+      if (previewingVoiceKeyRef.current !== null) stopVoicePreviewRef.current();
       previousFocusRef.current?.focus();
     };
   }, [open]);
@@ -54,26 +50,18 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
   const selectedVoice = localFallback?.voice_key === selectedVoiceKey ? localFallback : null;
   const selectedBrowserVoice = controller.browserVoices.find((voice) => voice.key === controller.selectedBrowserVoiceKey);
   const speed = controller.selectedVoice?.speed ?? 1;
-  const previewBusy = controller.previewingVoiceKey !== null || previewingBrowserVoiceKey !== null;
-  const sessionBusy = controller.voiceStatus !== "idle" || controller.realtime.active;
-
-  const stopBrowserPreview = () => {
-    browserSpeechRef.current?.cancelSpeech();
-    setPreviewingBrowserVoiceKey(null);
-  };
+  const previewBusy = controller.previewingVoiceKey !== null;
+  const sessionBusy = controller.realtime.active
+    || controller.speakingTurnId !== null
+    || (controller.voiceStatus !== "idle" && !previewBusy);
 
   const previewBrowserVoice = (voiceKey: string) => {
-    if (previewingBrowserVoiceKey === voiceKey) {
-      stopBrowserPreview();
+    if (controller.previewingVoiceKey === voiceKey) {
+      controller.stopVoicePreview();
       return;
     }
-    browserSpeechRef.current?.cancelSpeech();
-    if (controller.previewingVoiceKey !== null) controller.stopVoicePreview();
     controller.selectBrowserVoice(voiceKey);
-    setPreviewingBrowserVoiceKey(voiceKey);
-    void browserSpeechRef.current?.speak(BROWSER_PREVIEW_TEXT, voiceKey, speed)
-      .catch(() => undefined)
-      .finally(() => setPreviewingBrowserVoiceKey((current) => current === voiceKey ? null : current));
+    controller.previewVoice(voiceKey, speed, "browser");
   };
 
   return <div className="voice-picker-layer" onMouseDown={(event) => {
@@ -93,7 +81,7 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
       <div className="voice-list">
         {controller.browserVoices.map((voice) => {
           const selected = voice.key === controller.selectedBrowserVoiceKey;
-          const previewing = voice.key === previewingBrowserVoiceKey;
+          const previewing = voice.key === controller.previewingVoiceKey;
           return <article className="voice-card" key={voice.key} data-selected={selected} data-provider="browser">
             <button
               className="voice-card__select"
@@ -109,7 +97,7 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
               className="preview-button"
               type="button"
               aria-label={`${previewing ? "停止试听" : "试听"} ${voice.name}`}
-              disabled={sessionBusy || (previewBusy && !previewing)}
+              disabled={controller.speechMode === "local-only" || sessionBusy || (previewBusy && !previewing)}
               onClick={() => previewBrowserVoice(voice.key)}
             >
               <Icon name={previewing ? "stop" : "volume"} size={16} />
@@ -138,7 +126,6 @@ export function VoicePicker({ controller, open, onClose }: VoicePickerProps) {
               aria-label={`${previewing ? "停止试听" : "试听"} ${voice.display_name}`}
               disabled={!voice.previewable || sessionBusy || (previewBusy && !previewing)}
               onClick={() => {
-                stopBrowserPreview();
                 if (previewing) controller.stopVoicePreview();
                 else controller.previewVoice(voice.voice_key, speed);
               }}

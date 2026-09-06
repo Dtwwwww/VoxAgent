@@ -4,9 +4,10 @@ export type ClientEvent =
   | { type: "session.start" }
   | { type: "text.submit"; text: string; speak_response?: boolean }
   | { type: "voice.transcript.submit"; text: string; request_id: number }
-  | { type: "assistant.speak"; turn_id: number; request_id?: number }
+  | { type: "assistant.speak"; turn_id: number; request_id?: number; start_offset?: number }
   | { type: "voice.select"; voice_key: string; speed: VoiceSpeed }
   | { type: "voice.preview"; voice_key: string; speed: VoiceSpeed }
+  | { type: "voice.preview.cancel" }
   | { type: "turn.cancel" }
   | { type: "audio.commit" }
   | { type: "session.stop" };
@@ -148,6 +149,7 @@ export function parseClientEvent(value: unknown): ClientEvent {
   switch (type) {
     case "session.start":
     case "turn.cancel":
+    case "voice.preview.cancel":
     case "audio.commit":
     case "session.stop":
       objectWithExactKeys(value, ["type"]);
@@ -169,11 +171,20 @@ export function parseClientEvent(value: unknown): ClientEvent {
       };
     }
     case "assistant.speak": {
-      const object = objectWithExactKeys(value, ["type", "turn_id"], ["request_id"]);
+      const object = objectWithExactKeys(value, ["type", "turn_id"], ["request_id", "start_offset"]);
       const turnId = integer(object.turn_id, "turn_id");
-      return object.request_id === undefined
-        ? { type, turn_id: turnId }
-        : { type, turn_id: turnId, request_id: integer(object.request_id, "request_id", 0) };
+      const requestId = object.request_id === undefined
+        ? undefined
+        : integer(object.request_id, "request_id", 0);
+      const startOffset = object.start_offset === undefined
+        ? undefined
+        : integer(object.start_offset, "start_offset", 0);
+      return {
+        type,
+        turn_id: turnId,
+        ...(requestId === undefined ? {} : { request_id: requestId }),
+        ...(startOffset === undefined ? {} : { start_offset: startOffset }),
+      };
     }
     case "voice.select":
     case "voice.preview": {
@@ -185,7 +196,7 @@ export function parseClientEvent(value: unknown): ClientEvent {
   }
 }
 
-const STRICT_INTEGER_TOKEN = /("(?:id|turn_id|request_id|source_turn_id|source_message_id|document_id|chunk_id|page_number|proposal_index|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
+const STRICT_INTEGER_TOKEN = /("(?:id|turn_id|request_id|start_offset|source_turn_id|source_message_id|document_id|chunk_id|page_number|proposal_index|preview_id|sequence|sample_rate|byte_length|frame_samples|frame_bytes)"\s*:\s*)(-?(?:(?:\d+\.\d*|\d*\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+))(?=\s*[,}])/gu;
 
 function parseProtocolJson(raw: string): unknown {
   if (typeof raw !== "string") throw new TypeError("event JSON must be a string");

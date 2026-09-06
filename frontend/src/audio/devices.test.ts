@@ -5,6 +5,7 @@ import {
   choosePreferredMicrophone,
   classifyMicrophone,
   listMicrophones,
+  listMicrophonesAfterPermission,
   microphoneConstraints,
 } from "./devices";
 
@@ -39,6 +40,22 @@ describe("microphone device selection", () => {
       expect.objectContaining({ deviceId: "r", virtual: false }),
       expect.objectContaining({ deviceId: "v", virtual: true }),
     ]);
+  });
+
+  it("requests permission and re-enumerates when the initial inventory is empty", async () => {
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.enumerateDevices)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([device("r", "麦克风阵列 (Realtek(R) Audio")]);
+    Object.assign(navigator.mediaDevices, {
+      getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [{ stop }] } as unknown as MediaStream),
+    });
+
+    await expect(listMicrophonesAfterPermission()).resolves.toEqual([
+      expect.objectContaining({ deviceId: "r", preferred: true }),
+    ]);
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({ audio: true });
+    expect(stop).toHaveBeenCalledOnce();
   });
 
   it("prefers saved devices before physical Realtek microphones and browser default", () => {
