@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MicrophoneCapture } from "./audio/capture";
-import { choosePreferredMicrophone, listMicrophones } from "./audio/devices";
+import { browserDefaultMatchesSelection, choosePreferredMicrophone, listMicrophones, type MicrophoneDevice } from "./audio/devices";
 import { AudioPlayback } from "./audio/playback";
+import { BrowserSpeechProvider, type BrowserSpeechFailure, type BrowserVoice } from "./audio/webSpeech";
 import { type ServerEvent, type VoiceInfo, type VoiceSpeed, parseServerEventJson } from "./protocol";
-import { loadVoiceSettings, reconcileVoiceSettings, saveVoiceSettings } from "./voiceSettings";
+import { RealtimeVoiceEngine, type RealtimeSnapshot, type SpeechMode } from "./realtime/RealtimeVoiceEngine";
+import { StreamingSentenceQueue } from "./realtime/sentenceQueue";
+import { loadVoiceSettings, reconcileVoiceSettings, saveVoiceSettings, type VoiceSettings } from "./voiceSettings";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "initializing" | "connected";
 export type VoiceStatus = "idle" | "listening" | "transcribing" | "thinking" | "preparing" | "speaking";
@@ -62,6 +65,13 @@ export interface VoiceSessionController {
   speakingTurnId: number | null;
   previewingVoiceKey: string | null;
   memoryProposals: MemoryProposal[];
+  realtime: RealtimeSnapshot;
+  microphones: MicrophoneDevice[];
+  selectedMicrophoneId: string | null;
+  speechMode: SpeechMode;
+  browserVoices: BrowserVoice[];
+  selectedBrowserVoiceKey: string | null;
+  onlineSpeechNoticeAccepted: boolean;
   connect(): void;
   disconnect(): Promise<void>;
   startMicrophone(): Promise<void>;
@@ -75,6 +85,12 @@ export interface VoiceSessionController {
   cancelActive(): void;
   dismissMemoryProposal(id: string): void;
   clearLocalData(): void;
+  startRealtimeCall(): Promise<void>;
+  stopRealtimeCall(): Promise<void>;
+  setSpeechMode(mode: SpeechMode): void;
+  selectMicrophone(deviceId: string): void;
+  selectBrowserVoice(voiceKey: string): void;
+  acceptOnlineSpeechNotice(): void;
 }
 
 type AudioMetadata =
@@ -84,6 +100,16 @@ type AudioMetadata =
 function binaryData(value: unknown): value is ArrayBuffer | Blob {
   return value instanceof ArrayBuffer || value instanceof Blob;
 }
+
+const OFF_REALTIME_SNAPSHOT: RealtimeSnapshot = {
+  active: false,
+  state: "off",
+  provider: null,
+  interimText: "",
+  inputLevel: 0,
+  fallbackReason: null,
+  notice: null,
+};
 
 export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionController {
   const [initialSettings] = useState(() => loadVoiceSettings(localStorage));
@@ -99,8 +125,24 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const [speakingTurnId, setSpeakingTurnId] = useState<number | null>(null);
   const [previewingVoiceKey, setPreviewingVoiceKey] = useState<string | null>(null);
   const [memoryProposals, setMemoryProposals] = useState<MemoryProposal[]>([]);
+  const [realtime, setRealtime] = useState<RealtimeSnapshot>({ ...OFF_REALTIME_SNAPSHOT });
+  const [microphones, setMicrophones] = useState<MicrophoneDevice[]>([]);
+  const [selectedMicrophoneId, setSelectedMicrophoneId] = useState<string | null>(initialSettings.microphoneDeviceId);
+  const [speechMode, setSpeechModeState] = useState<SpeechMode>(initialSettings.speechMode);
+  const [selectedBrowserVoiceKey, setSelectedBrowserVoiceKey] = useState<string | null>(initialSettings.browserVoiceKey);
+  const [onlineSpeechNoticeAccepted, setOnlineSpeechNoticeAccepted] = useState(initialSettings.onlineSpeechNoticeAccepted);
   const socketRef = useRef<WebSocket | null>(null);
+  const settingsRef = useRef<VoiceSettings>(initialSettings);
+  const realtimeSnapshotRef = useRef<RealtimeSnapshot>({ ...OFF_REALTIME_SNAPSHOT });
+  const selectedMicrophoneIdRef = useRef<string | null>(initialSettings.microphoneDeviceId);
+  const speechModeRef = useRef<SpeechMode>(initialSettings.speechMode);
+  const selectedBrowserVoiceKeyRef = useRef<string | null>(initialSettings.browserVoiceKey);
+  const browserSpeechRef = useRef<BrowserSpeechProvider | null>(null);
+  if (!browserSpeechRef.current) browserSpeechRef.current = new BrowserSpeechProvider();
+  const [browserVoices, setBrowserVoices] = useState<BrowserVoice[]>(() => browserSpeechRef.current?.voices() ?? []);
   const captureRef = useRef<MicrophoneCapture | null>(null);
+  const realtimeEngineRef = useRef<RealtimeVoiceEngine | null>(null);
+  const manualCaptureActiveRef = useRef(false);
   const captureStartRef = useRef<Promise<void> | null>(null);
   const captureAbortRef = useRef<AbortController | null>(null);
   const captureLifecycleRef = useRef(0);
@@ -118,6 +160,10 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const activeReplayTurnRef = useRef<number | null>(null);
   const activeReplayRequestRef = useRef(0);
   const replayRequestCounterRef = useRef(0);
+  const manualSpeechGenerationRef = useRef(0);
+  const pendingBrowserTranscriptRequestRef = useRef<number | null>(null);
+  const activeBrowserTranscriptRef = useRef<{ requestId: number; turnId: number } | null>(null);
+  const realtimeSpeechRequestRef = useRef<{ requestId: number; turnId: number } | null>(null);
   const previewRequestedRef = useRef(false);
   const activePreviewIdRef = useRef<number | null>(null);
   const expectedPreviewIdRef = useRef(0);
@@ -132,6 +178,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         }
         allowedReplayTurnsRef.current.delete(completion.turnId);
         sentReplayTurnsRef.current.delete(completion.turnId);
+        if (realtimeSpeechRequestRef.current?.turnId === completion.turnId) {
+          realtimeSpeechRequestRef.current = null;
+        }
         setVoiceStatus("idle");
         return null;
       });
@@ -153,6 +202,69 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     return true;
   }, []);
 
+  const persistSettings = useCallback((patch: Partial<VoiceSettings>): VoiceSettings => {
+    const next = { ...settingsRef.current, ...patch };
+    settingsRef.current = next;
+    saveVoiceSettings(localStorage, next);
+    return next;
+  }, []);
+
+  if (!captureRef.current) {
+    captureRef.current = new MicrophoneCapture({
+      get deviceId() {
+        return selectedMicrophoneIdRef.current;
+      },
+      forwardPcm: true,
+      onFrame(frame) {
+        const socket = socketRef.current;
+        if (socket?.readyState === WebSocket.OPEN) socket.send(frame);
+      },
+      onLevel(level) {
+        const snapshot = { ...realtimeSnapshotRef.current, inputLevel: level };
+        realtimeSnapshotRef.current = snapshot;
+        setRealtime(snapshot);
+      },
+      onSettings() {},
+    });
+  }
+  if (!realtimeEngineRef.current) {
+    realtimeEngineRef.current = new RealtimeVoiceEngine({
+      capture: captureRef.current,
+      browserSpeech: browserSpeechRef.current!,
+      sentenceQueue: new StreamingSentenceQueue(),
+      sendJson(event) {
+        if (!send(event)) return;
+        if (event.type === "voice.transcript.submit") {
+          pendingBrowserTranscriptRequestRef.current = event.request_id;
+        }
+        if (event.type === "assistant.speak") {
+          realtimeSpeechRequestRef.current = {
+            requestId: event.request_id ?? 0,
+            turnId: event.turn_id,
+          };
+        }
+      },
+      onSnapshot(snapshot) {
+        realtimeSnapshotRef.current = snapshot;
+        setRealtime(snapshot);
+        if (!snapshot.active) setMicrophoneActive(false);
+        else if (snapshot.state !== "connecting") setMicrophoneActive(true);
+      },
+      onTerminalError(browserError: BrowserSpeechFailure) {
+        setError({
+          code: browserError.code,
+          message: browserError.message || "实时语音启动失败，请检查麦克风权限后重试",
+          recoverable: browserError.recoverable,
+        });
+      },
+      cancelLocalPlayback() {
+        realtimeSpeechRequestRef.current = null;
+        playbackRef.current.stopConversation();
+        setSpeakingTurnId(null);
+      },
+    });
+  }
+
   const resetSessionTracking = useCallback(() => {
     pendingAudioRef.current = null;
     discardedPayloadsRef.current = 0;
@@ -168,6 +280,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     activeReplayTurnRef.current = null;
     activeReplayRequestRef.current = 0;
     replayRequestCounterRef.current = 0;
+    pendingBrowserTranscriptRequestRef.current = null;
+    activeBrowserTranscriptRef.current = null;
+    realtimeSpeechRequestRef.current = null;
     previewRequestedRef.current = false;
     activePreviewIdRef.current = null;
     expectedPreviewIdRef.current = 0;
@@ -176,6 +291,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
 
   const stopLocalResources = useCallback(async () => {
     captureLifecycleRef.current += 1;
+    manualSpeechGenerationRef.current += 1;
     setMicrophoneActive(false);
     setVoiceStatus("idle");
     setSpeakingTurnId(null);
@@ -186,13 +302,18 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     const pendingStart = captureStartRef.current;
     captureStartRef.current = null;
     const capture = captureRef.current;
-    captureRef.current = null;
+    const realtimeWasActive = realtimeSnapshotRef.current.active;
+    const realtimeStop = realtimeEngineRef.current?.stop();
+    if (!realtimeWasActive) browserSpeechRef.current?.cancelSpeech();
+    const captureStop = manualCaptureActiveRef.current ? capture?.stop() : undefined;
+    manualCaptureActiveRef.current = false;
     const playback = playbackRef.current;
     playbackRef.current = new AudioPlayback(handlePlaybackCompletion);
     resetSessionTracking();
     await Promise.all([
+      realtimeStop,
       pendingStart?.catch(() => undefined),
-      capture?.stop(),
+      captureStop,
       playback.close(),
     ]);
   }, [handlePlaybackCompletion, resetSessionTracking]);
@@ -217,6 +338,10 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, []);
 
   const acceptsTtsTurn = useCallback((turnId: number, requestId: number): boolean => {
+    if (
+      realtimeSpeechRequestRef.current?.turnId === turnId
+      && realtimeSpeechRequestRef.current.requestId === requestId
+    ) return true;
     if (activeReplayTurnRef.current === turnId && allowedReplayTurnsRef.current.has(turnId)) {
       return requestId === activeReplayRequestRef.current;
     }
@@ -265,6 +390,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if ("turn_id" in event) maximumTurnIdRef.current = Math.max(maximumTurnIdRef.current, event.turn_id);
     switch (event.type) {
       case "session.ready":
+        if (realtimeSnapshotRef.current.active) void realtimeEngineRef.current?.stop();
         sessionIdRef.current = event.session_id;
         assistantDraftsRef.current.clear();
         maximumTurnIdRef.current = 0;
@@ -276,6 +402,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         activeReplayTurnRef.current = null;
         activeReplayRequestRef.current = 0;
         replayRequestCounterRef.current = 0;
+        pendingBrowserTranscriptRequestRef.current = null;
+        activeBrowserTranscriptRef.current = null;
+        realtimeSpeechRequestRef.current = null;
         previewRequestedRef.current = false;
         activePreviewIdRef.current = null;
         expectedPreviewIdRef.current = 0;
@@ -285,14 +414,14 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         break;
       case "voices.available": {
         setVoices(event.voices);
-        setSelectedVoice((current) => {
-          const settings = reconcileVoiceSettings({ voiceKey: current?.voiceKey ?? null, speed: current?.speed ?? 1 }, event.voices);
-          saveVoiceSettings(localStorage, settings);
-          return settings.voiceKey ? { voiceKey: settings.voiceKey, speed: settings.speed } : null;
-        });
+        const settings = reconcileVoiceSettings(settingsRef.current, event.voices);
+        settingsRef.current = settings;
+        saveVoiceSettings(localStorage, settings);
+        setSelectedVoice(settings.voiceKey ? { voiceKey: settings.voiceKey, speed: settings.speed } : null);
         break;
       }
       case "voice.selected":
+        persistSettings({ voiceKey: event.voice_key, speed: event.speed });
         setSelectedVoice({ voiceKey: event.voice_key, speed: event.speed });
         break;
       case "voice.preview.chunk":
@@ -342,6 +471,11 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setVoiceStatus("transcribing");
         break;
       case "asr.final":
+        if (event.request_id !== undefined) {
+          if (pendingBrowserTranscriptRequestRef.current !== event.request_id) break;
+          pendingBrowserTranscriptRequestRef.current = null;
+          activeBrowserTranscriptRef.current = { requestId: event.request_id, turnId: event.turn_id };
+        }
         setMessages((current) => [...current, { id: nextId("voice-user"), turnId: event.turn_id, role: "user", origin: "voice", text: event.text, status: "complete" }]);
         setVoiceStatus((current) => current === "preparing" || current === "speaking" ? current : "thinking");
         break;
@@ -384,6 +518,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         }
         assistantDraftsRef.current.delete(event.turn_id);
         responseSourcesRef.current.delete(event.turn_id);
+        if (activeBrowserTranscriptRef.current?.turnId === event.turn_id) {
+          activeBrowserTranscriptRef.current = null;
+        }
         setVoiceStatus((current) => current === "thinking" ? "idle" : current);
         break;
       case "memory.proposed": {
@@ -402,6 +539,17 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         break;
       }
       case "turn.cancelled":
+        if (event.request_id !== undefined) {
+          const pendingMatches = pendingBrowserTranscriptRequestRef.current === event.request_id;
+          const activeMatches = activeBrowserTranscriptRef.current?.requestId === event.request_id
+            && activeBrowserTranscriptRef.current.turnId === event.turn_id;
+          if (!pendingMatches && !activeMatches) break;
+          if (pendingMatches) pendingBrowserTranscriptRequestRef.current = null;
+          if (activeMatches) activeBrowserTranscriptRef.current = null;
+        }
+        if (realtimeSpeechRequestRef.current?.turnId === event.turn_id) {
+          realtimeSpeechRequestRef.current = null;
+        }
         if (
           activeReplayTurnRef.current === event.turn_id
           && allowedReplayTurnsRef.current.has(event.turn_id)
@@ -410,6 +558,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         allowedReplayTurnsRef.current.delete(event.turn_id);
         sentReplayTurnsRef.current.delete(event.turn_id);
         if (activeReplayTurnRef.current === event.turn_id) {
+          manualSpeechGenerationRef.current += 1;
+          browserSpeechRef.current?.cancelSpeech();
           activeReplayTurnRef.current = null;
           activeReplayRequestRef.current = 0;
         }
@@ -429,6 +579,10 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         break;
       case "tts.error":
         if (acceptsTtsTurn(event.turn_id, event.request_id)) {
+          if (
+            realtimeSpeechRequestRef.current?.turnId === event.turn_id
+            && realtimeSpeechRequestRef.current.requestId === event.request_id
+          ) realtimeSpeechRequestRef.current = null;
           allowedReplayTurnsRef.current.delete(event.turn_id);
           sentReplayTurnsRef.current.delete(event.turn_id);
           if (activeReplayTurnRef.current === event.turn_id) {
@@ -453,7 +607,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setError({ code: event.code, message: event.message, recoverable: event.recoverable });
         break;
     }
-  }, [acceptsTtsTurn, nextId]);
+  }, [acceptsTtsTurn, nextId, persistSettings]);
 
   const connect = useCallback(() => {
     if (socketRef.current && socketRef.current.readyState < WebSocket.CLOSING) return;
@@ -483,6 +637,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           failProtocol();
           return;
         }
+        realtimeEngineRef.current?.handleServerEvent(event);
         const pending = pendingAudioRef.current;
         const audioMetadata = event.type === "tts.chunk" || event.type === "voice.preview.chunk";
         if (discardedPayloadsRef.current > 0) {
@@ -528,7 +683,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [consumeBinary, failConnection, failProtocol, handleServerEvent, stopLocalResources, url]);
 
   const startMicrophone = useCallback((): Promise<void> => {
-    if (captureRef.current) return Promise.resolve();
+    if (manualCaptureActiveRef.current || realtimeSnapshotRef.current.active) return Promise.resolve();
     if (captureStartRef.current) return captureStartRef.current;
     if (pendingAudioRef.current) pendingAudioRef.current.valid = false;
     previewRequestedRef.current = false;
@@ -540,11 +695,10 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     const lifecycle = captureLifecycleRef.current;
     const abort = new AbortController();
     captureAbortRef.current = abort;
-    let capture: MicrophoneCapture | null = null;
+    const capture = captureRef.current;
     let operation!: Promise<void>;
     operation = (async () => {
       try {
-        let deviceId: string | null = null;
         try {
           const devices = await Promise.race([
             listMicrophones(),
@@ -554,33 +708,35 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
             }),
           ]);
           if (abort.signal.aborted || lifecycle !== captureLifecycleRef.current) return;
-          deviceId = devices ? choosePreferredMicrophone(devices, null)?.deviceId ?? null : null;
+          if (devices) {
+            setMicrophones(devices);
+            const selected = choosePreferredMicrophone(devices, selectedMicrophoneIdRef.current);
+            selectedMicrophoneIdRef.current = selected?.deviceId ?? null;
+            setSelectedMicrophoneId(selected?.deviceId ?? null);
+            persistSettings({
+              microphoneDeviceId: selected?.deviceId ?? null,
+              microphoneLabel: selected?.label ?? null,
+            });
+          }
         } catch {
           // Continue with browser-default microphone selection when enumeration is unavailable.
         }
         if (abort.signal.aborted || lifecycle !== captureLifecycleRef.current) return;
-        capture = new MicrophoneCapture({
-          deviceId,
-          forwardPcm: true,
-          onFrame(frame) {
-            const socket = socketRef.current;
-            if (socket?.readyState === WebSocket.OPEN) socket.send(frame);
-          },
-          onLevel() {},
-          onSettings() {},
-        });
+        if (!capture) throw new Error("Microphone capture is unavailable");
+        capture.setForwardPcm(true);
         await capture.start(abort.signal);
         if (lifecycle !== captureLifecycleRef.current) {
           await capture.stop();
           return;
         }
-        captureRef.current = capture;
+        manualCaptureActiveRef.current = true;
         setMicrophoneActive(true);
         setError(null);
         setVoiceStatus("listening");
       } catch {
         await capture?.stop();
         if (lifecycle === captureLifecycleRef.current) {
+          manualCaptureActiveRef.current = false;
           setError({ code: "microphone_permission", message: "无法使用麦克风，请允许权限后重试；文字输入仍可使用", recoverable: true });
           setMicrophoneActive(false);
         }
@@ -591,19 +747,103 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     })();
     captureStartRef.current = operation;
     return operation;
-  }, [send]);
+  }, [persistSettings, send]);
 
   const stopMicrophone = useCallback(async () => {
     captureLifecycleRef.current += 1;
     captureAbortRef.current?.abort();
     captureAbortRef.current = null;
     const capture = captureRef.current;
-    captureRef.current = null;
     if (capture) await capture.stop();
+    manualCaptureActiveRef.current = false;
     setMicrophoneActive(false);
     setVoiceStatus("transcribing");
     send({ type: "audio.commit" });
   }, [send]);
+
+  const startRealtimeCall = useCallback(async () => {
+    pendingBrowserTranscriptRequestRef.current = null;
+    activeBrowserTranscriptRef.current = null;
+    realtimeSpeechRequestRef.current = null;
+    if (manualCaptureActiveRef.current) {
+      await captureRef.current?.stop();
+      manualCaptureActiveRef.current = false;
+      setMicrophoneActive(false);
+    }
+    let availableMicrophones: MicrophoneDevice[] = [];
+    try {
+      availableMicrophones = await listMicrophones();
+      setMicrophones(availableMicrophones);
+      const selected = choosePreferredMicrophone(availableMicrophones, selectedMicrophoneIdRef.current);
+      selectedMicrophoneIdRef.current = selected?.deviceId ?? null;
+      setSelectedMicrophoneId(selected?.deviceId ?? null);
+      persistSettings({
+        microphoneDeviceId: selected?.deviceId ?? null,
+        microphoneLabel: selected?.label ?? null,
+      });
+    } catch {
+      // The capture path can still request the previously selected or browser-default input.
+    }
+
+    const availableBrowserVoices = browserSpeechRef.current?.voices() ?? [];
+    setBrowserVoices(availableBrowserVoices);
+    let browserVoiceKey = selectedBrowserVoiceKeyRef.current;
+    if (browserVoiceKey && !availableBrowserVoices.some((voice) => voice.key === browserVoiceKey)) {
+      browserVoiceKey = null;
+    }
+    if (!browserVoiceKey) browserVoiceKey = availableBrowserVoices[0]?.key ?? null;
+    if (browserVoiceKey !== selectedBrowserVoiceKeyRef.current) {
+      selectedBrowserVoiceKeyRef.current = browserVoiceKey;
+      setSelectedBrowserVoiceKey(browserVoiceKey);
+      persistSettings({ browserVoiceKey });
+    }
+
+    setError(null);
+    await realtimeEngineRef.current?.start({
+      mode: speechModeRef.current,
+      deviceId: selectedMicrophoneIdRef.current,
+      browserVoiceKey,
+      speechRate: settingsRef.current.speed,
+      allowDefaultInputFallback: browserDefaultMatchesSelection(
+        availableMicrophones,
+        selectedMicrophoneIdRef.current,
+      ),
+    });
+  }, [persistSettings]);
+
+  const stopRealtimeCall = useCallback(async () => {
+    pendingBrowserTranscriptRequestRef.current = null;
+    activeBrowserTranscriptRef.current = null;
+    realtimeSpeechRequestRef.current = null;
+    await realtimeEngineRef.current?.stop();
+    setMicrophoneActive(false);
+  }, []);
+
+  const setSpeechMode = useCallback((mode: SpeechMode) => {
+    speechModeRef.current = mode;
+    setSpeechModeState(mode);
+    persistSettings({ speechMode: mode });
+  }, [persistSettings]);
+
+  const selectMicrophone = useCallback((deviceId: string) => {
+    const selected = microphones.find((device) => device.deviceId === deviceId);
+    if (!selected) return;
+    selectedMicrophoneIdRef.current = selected.deviceId;
+    setSelectedMicrophoneId(selected.deviceId);
+    persistSettings({ microphoneDeviceId: selected.deviceId, microphoneLabel: selected.label });
+  }, [microphones, persistSettings]);
+
+  const selectBrowserVoice = useCallback((voiceKey: string) => {
+    if (!browserVoices.some((voice) => voice.key === voiceKey)) return;
+    selectedBrowserVoiceKeyRef.current = voiceKey;
+    setSelectedBrowserVoiceKey(voiceKey);
+    persistSettings({ browserVoiceKey: voiceKey });
+  }, [browserVoices, persistSettings]);
+
+  const acceptOnlineSpeechNotice = useCallback(() => {
+    setOnlineSpeechNoticeAccepted(true);
+    persistSettings({ onlineSpeechNoticeAccepted: true });
+  }, [persistSettings]);
 
   const submitText = useCallback((rawText: string) => {
     const text = rawText.trim();
@@ -614,6 +854,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     }
     if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
     blockedThroughTurnRef.current = Math.max(blockedThroughTurnRef.current, maximumTurnIdRef.current);
+    manualSpeechGenerationRef.current += 1;
+    browserSpeechRef.current?.cancelSpeech();
+    realtimeSpeechRequestRef.current = null;
     allowedReplayTurnsRef.current.clear();
     sentReplayTurnsRef.current.clear();
     activeReplayTurnRef.current = null;
@@ -626,9 +869,15 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [nextId, send]);
 
   const speakMessage = useCallback((turnId: number) => {
+    const generation = ++manualSpeechGenerationRef.current;
+    const priorTurn = activeReplayTurnRef.current;
+    const priorWasSent = priorTurn !== null && sentReplayTurnsRef.current.delete(priorTurn);
+    browserSpeechRef.current?.cancelSpeech();
+    realtimeSpeechRequestRef.current = null;
     const playback = playbackRef.current;
     if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
     playback.stopConversation();
+    if (priorWasSent) send({ type: "turn.cancel" });
     playback.prepareTurnReplay(turnId);
     manualReplayTurnsRef.current.add(turnId);
     allowedReplayTurnsRef.current.add(turnId);
@@ -637,32 +886,86 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     activeReplayRequestRef.current = requestId;
     setSpeakingTurnId(turnId);
     setVoiceStatus("preparing");
-    void playback.unlock().then(() => {
+
+    const requestLocalReplay = () => {
       if (
-        activeReplayTurnRef.current !== turnId
+        manualSpeechGenerationRef.current !== generation
+        || activeReplayTurnRef.current !== turnId
         || activeReplayRequestRef.current !== requestId
         || !allowedReplayTurnsRef.current.has(turnId)
       ) return;
-      if (send({ type: "assistant.speak", turn_id: turnId, request_id: requestId })) {
-        sentReplayTurnsRef.current.add(turnId);
-        return;
-      }
+      setVoiceStatus("preparing");
+      void playback.unlock().then(() => {
+        if (
+          manualSpeechGenerationRef.current !== generation
+          || activeReplayTurnRef.current !== turnId
+          || activeReplayRequestRef.current !== requestId
+          || !allowedReplayTurnsRef.current.has(turnId)
+        ) return;
+        if (send({ type: "assistant.speak", turn_id: turnId, request_id: requestId })) {
+          sentReplayTurnsRef.current.add(turnId);
+          return;
+        }
+        allowedReplayTurnsRef.current.delete(turnId);
+        activeReplayTurnRef.current = null;
+        activeReplayRequestRef.current = 0;
+        setSpeakingTurnId(null);
+        setVoiceStatus("idle");
+      }).catch(() => {
+        if (
+          manualSpeechGenerationRef.current !== generation
+          || activeReplayTurnRef.current !== turnId
+          || activeReplayRequestRef.current !== requestId
+        ) return;
+        allowedReplayTurnsRef.current.delete(turnId);
+        activeReplayTurnRef.current = null;
+        activeReplayRequestRef.current = 0;
+        playback.stopTurn(turnId);
+        setSpeakingTurnId((current) => current === turnId ? null : current);
+        setVoiceStatus("idle");
+        setError({ code: "audio_playback", message: "浏览器无法启用音频播放，请重试", recoverable: true });
+      });
+    };
+
+    const completedMessage = [...messages].reverse().find((message) => (
+      message.role === "assistant"
+      && message.turnId === turnId
+      && message.status === "complete"
+      && message.text.trim().length > 0
+    ));
+    if (speechModeRef.current === "local-only" || !completedMessage) {
+      requestLocalReplay();
+      return;
+    }
+
+    setVoiceStatus("speaking");
+    let browserSpeech: Promise<void>;
+    try {
+      browserSpeech = browserSpeechRef.current!.speak(
+        completedMessage.text,
+        selectedBrowserVoiceKeyRef.current,
+        settingsRef.current.speed,
+      );
+    } catch {
+      requestLocalReplay();
+      return;
+    }
+    void browserSpeech.then(() => {
+      if (
+        manualSpeechGenerationRef.current !== generation
+        || activeReplayTurnRef.current !== turnId
+        || activeReplayRequestRef.current !== requestId
+        || !allowedReplayTurnsRef.current.has(turnId)
+      ) return;
       allowedReplayTurnsRef.current.delete(turnId);
       activeReplayTurnRef.current = null;
       activeReplayRequestRef.current = 0;
       setSpeakingTurnId(null);
       setVoiceStatus("idle");
     }).catch(() => {
-      if (activeReplayTurnRef.current !== turnId || activeReplayRequestRef.current !== requestId) return;
-      allowedReplayTurnsRef.current.delete(turnId);
-      activeReplayTurnRef.current = null;
-      activeReplayRequestRef.current = 0;
-      playback.stopTurn(turnId);
-      setSpeakingTurnId((current) => current === turnId ? null : current);
-      setVoiceStatus("idle");
-      setError({ code: "audio_playback", message: "浏览器无法启用音频播放，请重试", recoverable: true });
+      requestLocalReplay();
     });
-  }, [send]);
+  }, [messages, send]);
 
   const stopSpeaking = useCallback((turnId: number) => {
     if (pendingAudioRef.current?.kind === "turn" && pendingAudioRef.current.turnId === turnId) {
@@ -671,6 +974,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     allowedReplayTurnsRef.current.delete(turnId);
     cancelledTurnsRef.current.add(turnId);
     if (activeReplayTurnRef.current === turnId) {
+      manualSpeechGenerationRef.current += 1;
+      browserSpeechRef.current?.cancelSpeech();
       activeReplayTurnRef.current = null;
       activeReplayRequestRef.current = 0;
     }
@@ -687,9 +992,9 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const selectVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     const selection = { voiceKey, speed };
     setSelectedVoice(selection);
-    saveVoiceSettings(localStorage, { voiceKey, speed });
+    persistSettings({ voiceKey, speed });
     send({ type: "voice.select", voice_key: voiceKey, speed });
-  }, [send]);
+  }, [persistSettings, send]);
 
   const previewVoice = useCallback((voiceKey: string, speed: VoiceSpeed) => {
     if (pendingAudioRef.current?.kind === "preview") pendingAudioRef.current.valid = false;
@@ -721,6 +1026,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     sentReplayTurnsRef.current.clear();
     activeReplayTurnRef.current = null;
     activeReplayRequestRef.current = 0;
+    browserSpeechRef.current?.cancelSpeech();
+    realtimeSpeechRequestRef.current = null;
     playbackRef.current.stopAll();
     setSpeakingTurnId(null);
     setPreviewingVoiceKey(null);
@@ -732,6 +1039,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, []);
 
   const clearLocalData = useCallback(() => {
+    void realtimeEngineRef.current?.stop();
     cancelActive();
     assistantDraftsRef.current.clear();
     responseSourcesRef.current.clear();
@@ -751,16 +1059,11 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [stopLocalResources]);
 
   useEffect(() => () => {
-    captureLifecycleRef.current += 1;
-    captureAbortRef.current?.abort();
-    captureAbortRef.current = null;
     const socket = socketRef.current;
     socketRef.current = null;
     socket?.close();
-    void captureRef.current?.stop();
-    void playbackRef.current.close();
-    resetSessionTracking();
-  }, [resetSessionTracking]);
+    void stopLocalResources();
+  }, [stopLocalResources]);
 
   return {
     messages,
@@ -775,6 +1078,13 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     speakingTurnId,
     previewingVoiceKey,
     memoryProposals,
+    realtime,
+    microphones,
+    selectedMicrophoneId,
+    speechMode,
+    browserVoices,
+    selectedBrowserVoiceKey,
+    onlineSpeechNoticeAccepted,
     connect,
     disconnect,
     startMicrophone,
@@ -788,5 +1098,11 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     cancelActive,
     dismissMemoryProposal,
     clearLocalData,
+    startRealtimeCall,
+    stopRealtimeCall,
+    setSpeechMode,
+    selectMicrophone,
+    selectBrowserVoice,
+    acceptOnlineSpeechNotice,
   };
 }
