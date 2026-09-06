@@ -75,6 +75,8 @@ export class StreamingSentenceQueue {
   private cancelled = false;
   private skippedSourceCodePoints = 0;
   private bufferedSegment: StreamingSpeechSegment | null = null;
+  private bufferedFromPreviousPush = false;
+  private appendedThisPush = false;
 
   push(delta: string): string[] {
     return this.pushSegments(delta).map((segment) => segment.text);
@@ -82,6 +84,8 @@ export class StreamingSentenceQueue {
 
   pushSegments(delta: string): StreamingSpeechSegment[] {
     if (this.cancelled || delta.length === 0) return [];
+    this.bufferedFromPreviousPush = this.bufferedSegment !== null;
+    this.appendedThisPush = false;
     this.pending += delta;
     const codePoints = Array.from(this.pending);
     const sentences: StreamingSpeechSegment[] = [];
@@ -126,6 +130,7 @@ export class StreamingSentenceQueue {
       start = index + 1;
     }
     this.pending = codePoints.slice(start).join("");
+    if (this.bufferedSegment) this.bufferedFromPreviousPush = true;
     return sentences;
   }
 
@@ -153,6 +158,8 @@ export class StreamingSentenceQueue {
     this.pending = "";
     this.skippedSourceCodePoints = 0;
     this.bufferedSegment = null;
+    this.bufferedFromPreviousPush = false;
+    this.appendedThisPush = false;
   }
 
   reset(): void {
@@ -160,6 +167,8 @@ export class StreamingSentenceQueue {
     this.pending = "";
     this.skippedSourceCodePoints = 0;
     this.bufferedSegment = null;
+    this.bufferedFromPreviousPush = false;
+    this.appendedThisPush = false;
   }
 
   private appendSegment(segments: StreamingSpeechSegment[], source: string): void {
@@ -182,9 +191,12 @@ export class StreamingSentenceQueue {
     } else {
       this.bufferedSegment = nextSegment;
     }
-    if (this.bufferedSegment.sourceCodePoints >= MIN_SPEECH_CODE_POINTS) {
+    const firstSegmentInPush = !this.appendedThisPush;
+    this.appendedThisPush = true;
+    if (this.bufferedSegment.sourceCodePoints >= MIN_SPEECH_CODE_POINTS || (!firstSegmentInPush && !this.bufferedFromPreviousPush)) {
       segments.push(this.bufferedSegment);
       this.bufferedSegment = null;
+      this.bufferedFromPreviousPush = false;
     }
   }
 }

@@ -69,8 +69,8 @@ describe("StreamingSentenceQueue", () => {
 
     expect(queue.pushSegments(`${prefix} ${url} 后续。`)).toEqual([
       { text: `${prefix} 链接`, sourceCodePoints: Array.from(`${prefix} ${url} `).length },
+      { text: "后续。", sourceCodePoints: 3 },
     ]);
-    expect(queue.flushSegments()).toEqual([{ text: "后续。", sourceCodePoints: 3 }]);
   });
 
   it("maps normalized segments to exact raw code-point spans across hidden constructs", () => {
