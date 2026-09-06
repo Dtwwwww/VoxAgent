@@ -39,6 +39,8 @@ export interface RealtimeVoiceDependencies {
   sendJson(event: ClientEvent): void;
   onSnapshot(snapshot: RealtimeSnapshot): void;
   onTerminalError(error: BrowserSpeechFailure): void;
+  hasExternalBrowserSpeech(): boolean;
+  cancelBrowserSpeech(): void;
   cancelLocalPlayback(): void;
 }
 
@@ -170,7 +172,10 @@ export class RealtimeVoiceEngine {
     }
     this.track = track;
 
-    if (options.mode === "local-only") {
+    const activeOptions = this.options;
+    if (!activeOptions) return;
+    this.dependencies.capture.setForwardPcm(activeOptions.mode === "local-only");
+    if (activeOptions.mode === "local-only") {
       this.publish({ provider: "local", state: "listening" });
       return;
     }
@@ -180,8 +185,13 @@ export class RealtimeVoiceEngine {
   }
 
   async switchMode(options: StartRealtimeOptions): Promise<void> {
-    if (!this.snapshot.active || !this.track) return;
+    if (!this.snapshot.active) return;
     const provider: ActiveSpeechProvider = options.mode === "local-only" ? "local" : "browser";
+    if (!this.track) {
+      this.options = { ...options };
+      this.dependencies.capture.setForwardPcm(provider === "local");
+      return;
+    }
     if (this.snapshot.provider === provider) {
       this.options = { ...options };
       this.dependencies.capture.setForwardPcm(provider === "local");
@@ -195,7 +205,7 @@ export class RealtimeVoiceEngine {
     this.clearTimers();
     const cancelPendingTurn = this.preparePendingCancellation();
     this.dependencies.browserSpeech.stopRecognition();
-    this.dependencies.browserSpeech.cancelSpeech(this.browserSpeechOwner);
+    this.dependencies.cancelBrowserSpeech();
     this.dependencies.cancelLocalPlayback();
     this.dependencies.sentenceQueue.cancel();
     this.pendingSentences = [];
@@ -241,7 +251,7 @@ export class RealtimeVoiceEngine {
     const cancelPendingTurn = this.preparePendingCancellation();
 
     this.dependencies.browserSpeech.stopRecognition();
-    this.dependencies.browserSpeech.cancelSpeech(this.browserSpeechOwner);
+    this.dependencies.cancelBrowserSpeech();
     this.dependencies.cancelLocalPlayback();
     this.dependencies.sentenceQueue.cancel();
     this.pendingSentences = [];
@@ -259,7 +269,7 @@ export class RealtimeVoiceEngine {
     if (!this.snapshot.active) return;
     ++this.speechEpoch;
     const cancelPendingTurn = this.preparePendingCancellation();
-    this.dependencies.browserSpeech.cancelSpeech(this.browserSpeechOwner);
+    this.dependencies.cancelBrowserSpeech();
     this.dependencies.cancelLocalPlayback();
     this.dependencies.sentenceQueue.cancel();
     this.pendingSentences = [];
@@ -403,7 +413,8 @@ export class RealtimeVoiceEngine {
   private handleUserSpeechStart(): void {
     const interrupted = this.snapshot.state === "thinking"
       || this.snapshot.state === "responding"
-      || this.snapshot.state === "speaking";
+      || this.snapshot.state === "speaking"
+      || this.dependencies.hasExternalBrowserSpeech();
     if (!interrupted) {
       this.browserFinalOpen = true;
       this.publish({ state: "user_speaking" });
@@ -411,7 +422,7 @@ export class RealtimeVoiceEngine {
     }
 
     ++this.speechEpoch;
-    this.dependencies.browserSpeech.cancelSpeech(this.browserSpeechOwner);
+    this.dependencies.cancelBrowserSpeech();
     this.dependencies.cancelLocalPlayback();
     this.dependencies.sentenceQueue.cancel();
     this.pendingSentences = [];
@@ -571,7 +582,7 @@ export class RealtimeVoiceEngine {
     const cancelPendingTurn = preservedSpeechTurn === null && this.preparePendingCancellation();
 
     this.dependencies.browserSpeech.stopRecognition();
-    this.dependencies.browserSpeech.cancelSpeech(this.browserSpeechOwner);
+    this.dependencies.cancelBrowserSpeech();
     this.dependencies.cancelLocalPlayback();
     this.dependencies.sentenceQueue.cancel();
     this.pendingSentences = [];
@@ -630,7 +641,7 @@ export class RealtimeVoiceEngine {
       && event.request_id === this.awaitingBrowserRequestId;
     if (!matchesAwaitingBrowser && !matchesOwnedTurn) return;
     ++this.speechEpoch;
-    this.dependencies.browserSpeech.cancelSpeech(this.browserSpeechOwner);
+    this.dependencies.cancelBrowserSpeech();
     this.dependencies.cancelLocalPlayback();
     this.dependencies.sentenceQueue.cancel();
     this.pendingSentences = [];
@@ -649,7 +660,7 @@ export class RealtimeVoiceEngine {
     ++this.speechEpoch;
     const cancelPendingTurn = this.preparePendingCancellation();
     this.dependencies.browserSpeech.stopRecognition();
-    this.dependencies.browserSpeech.cancelSpeech(this.browserSpeechOwner);
+    this.dependencies.cancelBrowserSpeech();
     this.dependencies.cancelLocalPlayback();
     this.dependencies.sentenceQueue.cancel();
     if (cancelPendingTurn) this.dependencies.sendJson({ type: "turn.cancel" });

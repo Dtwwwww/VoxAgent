@@ -37,6 +37,32 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+function mockOwnedBrowserReplay() {
+  const speech = deferred<void>();
+  let activeOwner: symbol | undefined;
+  let cancelled = false;
+  const speak = vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockImplementation(
+    async (_text, _voiceKey, _rate, owner) => {
+      activeOwner = owner;
+      return speech.promise;
+    },
+  );
+  const cancelSpeech = vi.spyOn(BrowserSpeechProvider.prototype, "cancelSpeech").mockImplementation(
+    (owner) => {
+      if (activeOwner === undefined) return;
+      if (owner !== undefined && owner !== activeOwner) return;
+      cancelled = true;
+      activeOwner = undefined;
+      speech.reject(new DOMException("cancelled", "AbortError"));
+    },
+  );
+  return {
+    cancelSpeech,
+    speak,
+    wasCancelled: () => cancelled,
+  };
+}
+
 function microphoneStream(stop = vi.fn()): MediaStream {
   const track = {
     readyState: "live",
@@ -903,8 +929,57 @@ describe("useVoiceSession", () => {
     });
 
     expect(speak).toHaveBeenCalledOnce();
-    expect(speak).toHaveBeenCalledWith("这是完整回答。", browserVoice.key, 1);
+    expect(speak).toHaveBeenCalledWith("这是完整回答。", browserVoice.key, 1, expect.anything());
     expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
+  });
+
+  it("normalizes a completed manual browser replay without changing displayed raw text", async () => {
+    const browserVoice = { key: "zh-xiaoxiao", name: "Xiaoxiao", lang: "zh-CN", localService: false };
+    vi.spyOn(BrowserSpeechProvider.prototype, "voices").mockReturnValue([browserVoice]);
+    const speak = vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockResolvedValue();
+    const { hook, socket } = openSession();
+    const raw = "你好😀。[文档](https://example.com?q=a?b) `inline?code`\n```ts\nsecret?query\n```";
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: raw });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+    act(() => hook.result.current.selectBrowserVoice(browserVoice.key));
+
+    await act(async () => {
+      hook.result.current.speakMessage(7);
+      await Promise.resolve();
+    });
+
+    expect(speak.mock.calls[0]?.slice(0, 3)).toEqual([
+      "你好。文档 inline?code",
+      browserVoice.key,
+      1,
+    ]);
+    expect(hook.result.current.messages).toContainEqual(expect.objectContaining({
+      turnId: 7,
+      text: raw,
+      status: "complete",
+    }));
+  });
+
+  it("keeps an empty normalized manual replay silent without requesting local fallback", async () => {
+    const browserVoice = { key: "zh-xiaoxiao", name: "Xiaoxiao", lang: "zh-CN", localService: false };
+    vi.spyOn(BrowserSpeechProvider.prototype, "voices").mockReturnValue([browserVoice]);
+    const speak = vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockResolvedValue();
+    const { hook, socket } = openSession();
+    const raw = "😀✨\n```ts\nsecret?query\n```";
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: raw });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+    act(() => hook.result.current.selectBrowserVoice(browserVoice.key));
+
+    await act(async () => {
+      hook.result.current.speakMessage(7);
+      await Promise.resolve();
+    });
+
+    expect(speak).not.toHaveBeenCalled();
+    expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
+    expect(hook.result.current.speakingTurnId).toBeNull();
+    expect(hook.result.current.voiceStatus).toBe("idle");
+    expect(hook.result.current.messages).toContainEqual(expect.objectContaining({ text: raw }));
   });
 
   it("falls back to one local replay when browser speech fails", async () => {
@@ -1177,6 +1252,85 @@ describe("useVoiceSession", () => {
     await waitFor(() => expect(speak).toHaveBeenCalledTimes(2));
     await act(async () => Promise.resolve());
 
+    expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
+  });
+
+  it("stops the actual manual browser replay owner during an active realtime call", async () => {
+    const browserVoice = { key: "zh-xiaoxiao", name: "Xiaoxiao", lang: "zh-CN", localService: false };
+    let callbacks!: BrowserSpeechCallbacks;
+    vi.spyOn(BrowserSpeechProvider.prototype, "voices").mockReturnValue([browserVoice]);
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockImplementation(async (_track, nextCallbacks) => {
+      callbacks = nextCallbacks;
+    });
+    const owned = mockOwnedBrowserReplay();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    expect(callbacks).toBeDefined();
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: "手动重放。" });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+    act(() => hook.result.current.selectBrowserVoice(browserVoice.key));
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(owned.speak).toHaveBeenCalledOnce());
+    owned.cancelSpeech.mockClear();
+
+    act(() => hook.result.current.stopSpeaking(7));
+    await act(async () => Promise.resolve());
+
+    const manualOwner = owned.speak.mock.calls[0]?.[3];
+    expect(manualOwner).toBeDefined();
+    expect(owned.cancelSpeech).toHaveBeenCalledWith(manualOwner);
+    expect(owned.wasCancelled()).toBe(true);
+    expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
+  });
+
+  it("barge-in cancels an active manual browser replay without local fallback", async () => {
+    const browserVoice = { key: "zh-xiaoxiao", name: "Xiaoxiao", lang: "zh-CN", localService: false };
+    let callbacks!: BrowserSpeechCallbacks;
+    vi.spyOn(BrowserSpeechProvider.prototype, "voices").mockReturnValue([browserVoice]);
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockImplementation(async (_track, nextCallbacks) => {
+      callbacks = nextCallbacks;
+    });
+    const owned = mockOwnedBrowserReplay();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: "手动重放。" });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+    act(() => hook.result.current.selectBrowserVoice(browserVoice.key));
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(owned.speak).toHaveBeenCalledOnce());
+    owned.cancelSpeech.mockClear();
+
+    act(() => callbacks.onSpeechStart());
+    await act(async () => Promise.resolve());
+
+    expect(owned.wasCancelled()).toBe(true);
+    expect(hook.result.current.speakingTurnId).toBeNull();
+    expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
+  });
+
+  it("switching an active call to local-only cancels manual browser replay without resuming audio", async () => {
+    const browserVoice = { key: "zh-xiaoxiao", name: "Xiaoxiao", lang: "zh-CN", localService: false };
+    vi.spyOn(BrowserSpeechProvider.prototype, "voices").mockReturnValue([browserVoice]);
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
+    const owned = mockOwnedBrowserReplay();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: "手动重放。" });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+    act(() => hook.result.current.selectBrowserVoice(browserVoice.key));
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(owned.speak).toHaveBeenCalledOnce());
+    owned.cancelSpeech.mockClear();
+
+    act(() => hook.result.current.setSpeechMode("local-only"));
+    await act(async () => Promise.resolve());
+
+    expect(owned.wasCancelled()).toBe(true);
+    expect(hook.result.current.realtime).toMatchObject({ active: true, provider: "local" });
+    expect(hook.result.current.speakingTurnId).toBeNull();
     expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
   });
 

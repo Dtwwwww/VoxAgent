@@ -3,10 +3,12 @@ from __future__ import annotations
 import re
 import textwrap
 
-_URL_RE = re.compile(r"\b(?:https?://|www\.)[^\s\]\)<>'\"`]+", re.IGNORECASE)
+_URL_RE = re.compile(
+    r"\b(?:https?://|www\.)[^\s\]\)<>'\"`。！？；，]+", re.IGNORECASE
+)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:https?://|www\.)[^\s)]+\)")
-_CODE_FENCE_RE = re.compile(r"```[\s\S]*?```")
-_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_CODE_FENCE_RE = re.compile(r"```[\s\S]*?(?:```|$)")
+_INLINE_CODE_RE = re.compile(r"`([^`]*)`?")
 _KEYCAP_RE = re.compile(r"[0-9#*]\ufe0f?\u20e3")
 _EMOJI_RE = re.compile(
     r"[\U0001F1E6-\U0001F1FF"  # flags

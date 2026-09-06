@@ -42,4 +42,43 @@ describe("StreamingSentenceQueue", () => {
     expect(queue.push("😀✨。" )).toEqual([]);
     expect(queue.flush()).toEqual([]);
   });
+
+  it("holds chunked fenced code until the closing fence and never speaks its contents", () => {
+    const queue = new StreamingSentenceQueue();
+
+    expect(queue.push("先说明。```ts\nconst query = 'a?" )).toEqual(['先说明。']);
+    expect(queue.push("b';\nconsole.log(query);\n```\n继续说明。" )).toEqual(['继续说明。']);
+  });
+
+  it("does not split chunked markdown links or raw URL query strings", () => {
+    const queue = new StreamingSentenceQueue();
+
+    expect(queue.push("请看[使用说明？](https://example.com/search?q=声" )).toEqual([]);
+    expect(queue.push("灵?lang=zh)再继续。" )).toEqual(['请看使用说明？再继续。']);
+    expect(queue.push("地址 https://example.com/search?q=声灵?lang=zh 后续。" )).toEqual([
+      '地址 链接 后续。',
+    ]);
+  });
+
+  it("defers the 80-code-point cap until an open URL reaches a safe raw boundary", () => {
+    const queue = new StreamingSentenceQueue();
+    const prefix = "甲".repeat(76);
+    const url = "https://example.com/search?q=one?lang=zh";
+
+    expect(queue.pushSegments(`${prefix} ${url} 后续。`)).toEqual([
+      { text: `${prefix} 链接`, sourceCodePoints: Array.from(`${prefix} ${url} `).length },
+      { text: "后续。", sourceCodePoints: 3 },
+    ]);
+  });
+
+  it("maps normalized segments to exact raw code-point spans across hidden constructs", () => {
+    const queue = new StreamingSentenceQueue();
+    const first = "Hi😀。";
+    const remainder = "```js\nconst q = 'x?y';\n```\n请看 [文档](https://example.com?q=a?b) 继续。";
+
+    expect(queue.pushSegments(first + remainder)).toEqual([
+      { text: "Hi。", sourceCodePoints: Array.from(first).length },
+      { text: "请看 文档 继续。", sourceCodePoints: Array.from(remainder).length },
+    ]);
+  });
 });

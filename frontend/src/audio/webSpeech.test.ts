@@ -463,6 +463,29 @@ describe("BrowserSpeechProvider", () => {
     await expect(current).resolves.toBeUndefined();
   });
 
+  it("serializes the native global synthesis queue by superseding the current owner", async () => {
+    const recognition = new FakeRecognition();
+    const chineseVoice = {
+      voiceURI: "zh",
+      name: "Chinese",
+      lang: "zh-CN",
+      localService: true,
+    } as SpeechSynthesisVoice;
+    const { scope, synthesis, utterances } = fakeWindow(recognition, [chineseVoice]);
+    const provider = new BrowserSpeechProvider(scope);
+    const first = provider.speak("第一段", null, 1, Symbol("first"));
+    await Promise.resolve();
+
+    const second = provider.speak("第二段", null, 1, Symbol("second"));
+    await Promise.resolve();
+
+    expect(synthesis.cancel).toHaveBeenCalledOnce();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    expect(synthesis.speak).toHaveBeenCalledTimes(2);
+    utterances[1].onend?.();
+    await expect(second).resolves.toBeUndefined();
+  });
+
   it("does not poison the next utterance when an idle owner is cancelled", async () => {
     const recognition = new FakeRecognition();
     const chineseVoice = {

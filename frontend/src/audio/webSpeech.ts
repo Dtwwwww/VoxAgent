@@ -215,6 +215,9 @@ export class BrowserSpeechProvider {
     if (!this.scope?.speechSynthesis || !this.scope.SpeechSynthesisUtterance) {
       throw new Error("Speech synthesis is not supported");
     }
+    if (this.pendingSpeechOwners.size > 0 || this.activeUtterances.size > 0) {
+      this.cancelSpeech();
+    }
     this.pendingSpeechOwners.set(owner, (this.pendingSpeechOwners.get(owner) ?? 0) + 1);
     const version = this.speechVersion;
     try {

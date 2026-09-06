@@ -539,6 +539,30 @@ async def test_speak_message_synthesizes_only_the_server_stored_remainder():
 
 
 @pytest.mark.asyncio
+async def test_speak_message_normalizes_a_safe_markdown_url_remainder():
+    first = "Hi😀。"
+    remainder = (
+        "```js\nconst query = 'secret?value';\n```\n"
+        "请看 [文档](https://example.com/docs?q=a?b) 或 https://example.com?q=x?y。"
+    )
+    orchestrator, _, tts = make_orchestrator(replies=[[first + remainder]])
+    done = [event async for event in orchestrator.submit_text("问题", False)]
+    turn_id = next(item.turn_id for item in done if item.type == "assistant.done")
+
+    _ = [
+        item
+        async for item in orchestrator.speak_message(
+            turn_id,
+            request_id=43,
+            start_offset=len(first),
+        )
+    ]
+
+    assert [call.text for call in tts.calls] == ["请看 文档 或 链接。"]
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
 async def test_speak_message_rejects_an_offset_outside_the_stored_assistant_text():
     orchestrator, _, tts = make_orchestrator(replies=[["短回答"]])
     done = [event async for event in orchestrator.submit_text("问题", False)]

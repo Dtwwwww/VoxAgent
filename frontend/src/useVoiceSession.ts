@@ -6,7 +6,7 @@ import { AudioPlayback } from "./audio/playback";
 import { BrowserSpeechProvider, type BrowserSpeechFailure, type BrowserSpeechOwner, type BrowserVoice } from "./audio/webSpeech";
 import { type ServerEvent, type VoiceInfo, type VoiceSpeed, parseServerEventJson } from "./protocol";
 import { RealtimeVoiceEngine, type RealtimeSnapshot, type SpeechMode } from "./realtime/RealtimeVoiceEngine";
-import { StreamingSentenceQueue } from "./realtime/sentenceQueue";
+import { normalizeBrowserSpeechText, StreamingSentenceQueue } from "./realtime/sentenceQueue";
 import { loadVoiceSettings, reconcileVoiceSettings, saveVoiceSettings, type VoiceSettings } from "./voiceSettings";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "initializing" | "connected";
@@ -169,6 +169,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const activeReplayRequestRef = useRef(0);
   const replayRequestCounterRef = useRef(0);
   const manualSpeechGenerationRef = useRef(0);
+  const activeBrowserReplayOwnerRef = useRef<BrowserSpeechOwner | null>(null);
   const pendingBrowserTranscriptRequestRef = useRef<number | null>(null);
   const activeBrowserTranscriptRef = useRef<{ requestId: number; turnId: number } | null>(null);
   const realtimeSpeechRequestRef = useRef<{ requestId: number; turnId: number } | null>(null);
@@ -289,6 +290,26 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           recoverable: browserError.recoverable,
         });
       },
+      hasExternalBrowserSpeech() {
+        return activeBrowserReplayOwnerRef.current !== null;
+      },
+      cancelBrowserSpeech() {
+        const manualOwner = activeBrowserReplayOwnerRef.current;
+        if (manualOwner !== null) {
+          activeBrowserReplayOwnerRef.current = null;
+          manualSpeechGenerationRef.current += 1;
+          const turnId = activeReplayTurnRef.current;
+          if (turnId !== null) {
+            allowedReplayTurnsRef.current.delete(turnId);
+            sentReplayTurnsRef.current.delete(turnId);
+          }
+          activeReplayTurnRef.current = null;
+          activeReplayRequestRef.current = 0;
+          setSpeakingTurnId(null);
+          setVoiceStatus("idle");
+        }
+        browserSpeechRef.current?.cancelSpeech();
+      },
       cancelLocalPlayback() {
         realtimeSpeechRequestRef.current = null;
         playbackRef.current.stopConversation();
@@ -311,6 +332,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     sentReplayTurnsRef.current.clear();
     activeReplayTurnRef.current = null;
     activeReplayRequestRef.current = 0;
+    activeBrowserReplayOwnerRef.current = null;
     pendingBrowserTranscriptRequestRef.current = null;
     activeBrowserTranscriptRef.current = null;
     realtimeSpeechRequestRef.current = null;
@@ -950,6 +972,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     manualSpeechGenerationRef.current += 1;
     if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
     else browserSpeechRef.current?.cancelSpeech();
+    activeBrowserReplayOwnerRef.current = null;
     realtimeSpeechRequestRef.current = null;
     allowedReplayTurnsRef.current.clear();
     sentReplayTurnsRef.current.clear();
@@ -963,11 +986,12 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [nextId, send]);
 
   const speakMessage = useCallback((turnId: number) => {
-    const generation = ++manualSpeechGenerationRef.current;
     const priorTurn = activeReplayTurnRef.current;
     const priorWasSent = priorTurn !== null && sentReplayTurnsRef.current.delete(priorTurn);
     if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
     else browserSpeechRef.current?.cancelSpeech();
+    activeBrowserReplayOwnerRef.current = null;
+    const generation = ++manualSpeechGenerationRef.current;
     realtimeSpeechRequestRef.current = null;
     const playback = playbackRef.current;
     if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
@@ -1033,15 +1057,31 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       return;
     }
 
+    const browserReplayText = normalizeBrowserSpeechText(completedMessage.text);
+    if (!/[\p{L}\p{N}]/u.test(browserReplayText)) {
+      allowedReplayTurnsRef.current.delete(turnId);
+      activeReplayTurnRef.current = null;
+      activeReplayRequestRef.current = 0;
+      setSpeakingTurnId(null);
+      setVoiceStatus("idle");
+      return;
+    }
+
     setVoiceStatus("speaking");
+    const browserOwner = Symbol(`manual-replay:${turnId}:${requestId}`);
+    activeBrowserReplayOwnerRef.current = browserOwner;
     let browserSpeech: Promise<void>;
     try {
       browserSpeech = browserSpeechRef.current!.speak(
-        completedMessage.text,
+        browserReplayText,
         selectedBrowserVoiceKeyRef.current,
         settingsRef.current.speed,
+        browserOwner,
       );
     } catch {
+      if (activeBrowserReplayOwnerRef.current === browserOwner) {
+        activeBrowserReplayOwnerRef.current = null;
+      }
       requestLocalReplay();
       return;
     }
@@ -1052,12 +1092,19 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         || activeReplayRequestRef.current !== requestId
         || !allowedReplayTurnsRef.current.has(turnId)
       ) return;
+      if (activeBrowserReplayOwnerRef.current === browserOwner) {
+        activeBrowserReplayOwnerRef.current = null;
+      }
       allowedReplayTurnsRef.current.delete(turnId);
       activeReplayTurnRef.current = null;
       activeReplayRequestRef.current = 0;
       setSpeakingTurnId(null);
       setVoiceStatus("idle");
-    }).catch(() => {
+    }).catch((speechError: unknown) => {
+      if (activeBrowserReplayOwnerRef.current === browserOwner) {
+        activeBrowserReplayOwnerRef.current = null;
+      }
+      if (speechError instanceof DOMException && speechError.name === "AbortError") return;
       requestLocalReplay();
     });
   }, [messages, send]);
@@ -1070,8 +1117,11 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     cancelledTurnsRef.current.add(turnId);
     if (activeReplayTurnRef.current === turnId) {
       manualSpeechGenerationRef.current += 1;
+      const browserOwner = activeBrowserReplayOwnerRef.current;
+      activeBrowserReplayOwnerRef.current = null;
+      if (browserOwner !== null) browserSpeechRef.current?.cancelSpeech(browserOwner);
       if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
-      else browserSpeechRef.current?.cancelSpeech();
+      else if (browserOwner === null) browserSpeechRef.current?.cancelSpeech();
       activeReplayTurnRef.current = null;
       activeReplayRequestRef.current = 0;
     }
@@ -1147,6 +1197,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     activeReplayRequestRef.current = 0;
     if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
     else browserSpeechRef.current?.cancelSpeech();
+    activeBrowserReplayOwnerRef.current = null;
     realtimeSpeechRequestRef.current = null;
     playbackRef.current.stopAll();
     setSpeakingTurnId(null);

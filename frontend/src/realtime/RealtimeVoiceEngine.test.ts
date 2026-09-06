@@ -102,6 +102,8 @@ function makeHarness() {
     sendJson: (event) => sentJson.push(event),
     onSnapshot: (snapshot) => states.push(snapshot),
     onTerminalError: (error) => terminalErrors.push(error),
+    hasExternalBrowserSpeech: () => false,
+    cancelBrowserSpeech: () => browserSpeech.cancelSpeech(),
     cancelLocalPlayback,
   });
   return {
@@ -544,6 +546,50 @@ describe("RealtimeVoiceEngine", () => {
     expect(states.at(-1)).toMatchObject({ provider: "local", state: "speaking" });
   });
 
+  it("falls back from a safe raw boundary before chunked Markdown and URL constructs", async () => {
+    const { browserSpeech, engine, sentJson } = makeHarness();
+    browserSpeech.speak
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("synthesis failed"));
+    await engine.start(ONLINE_OPTIONS);
+    browserSpeech.runs[0].onFinal("请回答");
+    engine.handleServerEvent(browserAsrFinal(SESSION_ID, 6, "请回答", 1));
+    engine.handleServerEvent({
+      type: "assistant.delta",
+      session_id: SESSION_ID,
+      turn_id: 6,
+      delta: "Hi😀。```js\nconst q = 'x?",
+    });
+    engine.handleServerEvent({
+      type: "assistant.delta",
+      session_id: SESSION_ID,
+      turn_id: 6,
+      delta: "y';\n```\n请看 https://example.com/search?q=a?b 继续。",
+    });
+    engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 6 });
+
+    await vi.waitFor(() => expect(sentJson).toContainEqual({
+      type: "assistant.speak",
+      turn_id: 6,
+      request_id: 1,
+      start_offset: Array.from("Hi😀。").length,
+    }));
+    expect(browserSpeech.speak).toHaveBeenNthCalledWith(
+      1,
+      "Hi。",
+      "zh-voice",
+      1,
+      expect.anything(),
+    );
+    expect(browserSpeech.speak).toHaveBeenNthCalledWith(
+      2,
+      "请看 链接 继续。",
+      "zh-voice",
+      1,
+      expect.anything(),
+    );
+  });
+
   it("ignores non-matching local TTS request events", async () => {
     const { browserSpeech, engine, states } = makeHarness();
     browserSpeech.speak.mockRejectedValueOnce(new Error("synthesis failed"));
@@ -616,7 +662,7 @@ describe("RealtimeVoiceEngine", () => {
     speech.resolve();
     await speech.promise;
 
-    expect(browserSpeech.cancelSpeech).toHaveBeenCalledWith(expect.anything());
+    expect(browserSpeech.cancelSpeech).toHaveBeenCalledOnce();
     expect(sentJson.filter((event) => event.type === "turn.cancel")).toHaveLength(1);
     expect(capture.start).toHaveBeenCalledOnce();
     expect(states.at(-1)).toMatchObject({ active: true, provider: "local", state: "listening" });
@@ -638,5 +684,42 @@ describe("RealtimeVoiceEngine", () => {
     expect(capture.stop).not.toHaveBeenCalled();
     expect(capture.setForwardPcm).toHaveBeenLastCalledWith(true);
     expect(states.at(-1)).toMatchObject({ active: true, provider: "local", state: "listening" });
+  });
+
+  it("uses the latest mode selected while microphone capture is still connecting", async () => {
+    const captureStart = deferred<MediaStreamTrack>();
+    const { browserSpeech, capture, engine, states } = makeHarness();
+    capture.start.mockReturnValueOnce(captureStart.promise);
+
+    const starting = engine.start({ ...ONLINE_OPTIONS, mode: "local-only" });
+    await vi.waitFor(() => expect(states.at(-1)).toMatchObject({ active: true, state: "connecting" }));
+    await engine.switchMode(ONLINE_OPTIONS);
+    await engine.switchMode({ ...ONLINE_OPTIONS, mode: "local-only" });
+    await engine.switchMode(ONLINE_OPTIONS);
+
+    captureStart.resolve(capture.track);
+    await starting;
+
+    expect(capture.start).toHaveBeenCalledOnce();
+    expect(capture.setForwardPcm).toHaveBeenLastCalledWith(false);
+    expect(browserSpeech.start).toHaveBeenCalledOnce();
+    expect(states.at(-1)).toMatchObject({ active: true, provider: "browser", state: "listening" });
+  });
+
+  it("does not revive a connecting mode switch after stop wins", async () => {
+    const captureStart = deferred<MediaStreamTrack>();
+    const { browserSpeech, capture, engine, states } = makeHarness();
+    capture.start.mockReturnValueOnce(captureStart.promise);
+
+    const starting = engine.start(ONLINE_OPTIONS);
+    await vi.waitFor(() => expect(states.at(-1)).toMatchObject({ active: true, state: "connecting" }));
+    await engine.switchMode({ ...ONLINE_OPTIONS, mode: "local-only" });
+    const stopping = engine.stop();
+
+    captureStart.resolve(capture.track);
+    await Promise.all([starting, stopping]);
+
+    expect(browserSpeech.start).not.toHaveBeenCalled();
+    expect(states.at(-1)).toMatchObject({ active: false, provider: null, state: "off" });
   });
 });
