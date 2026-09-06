@@ -15,9 +15,29 @@ export interface BrowserVoice {
 }
 
 export interface BrowserSpeechFailure {
-  code: "unsupported" | "track_not_supported" | "recognition_error";
+  code:
+    | "unsupported"
+    | "track_not_supported"
+    | "network"
+    | "language-not-supported"
+    | "service-not-allowed"
+    | "not-allowed"
+    | "recognition_error";
   recoverable: boolean;
   message?: string;
+}
+
+const STABLE_RECOGNITION_ERROR_CODES = new Set<BrowserSpeechFailure["code"]>([
+  "network",
+  "language-not-supported",
+  "service-not-allowed",
+  "not-allowed",
+]);
+
+function stableRecognitionErrorCode(code: string): BrowserSpeechFailure["code"] {
+  return STABLE_RECOGNITION_ERROR_CODES.has(code as BrowserSpeechFailure["code"])
+    ? code as BrowserSpeechFailure["code"]
+    : "recognition_error";
 }
 
 const CHINESE_VOICE_NAME = /Chinese|中文|Xiaoxiao|Yunxi|Huihui|Yaoyao/i;
@@ -98,8 +118,10 @@ export class BrowserSpeechProvider {
     recognition.onerror = (event) => {
       if (version !== this.recognitionVersion) return;
       callbacks.onError({
-        code: "recognition_error",
-        recoverable: event.error !== "not-allowed" && event.error !== "service-not-allowed",
+        code: stableRecognitionErrorCode(event.error),
+        recoverable: event.error !== "not-allowed"
+          && event.error !== "service-not-allowed"
+          && event.error !== "audio-capture",
         message: event.message || event.error,
       });
     };

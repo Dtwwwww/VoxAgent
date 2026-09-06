@@ -222,6 +222,35 @@ describe("BrowserSpeechProvider", () => {
     expect(handlers.onRecognitionEnd).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["network", true],
+    ["language-not-supported", true],
+    ["service-not-allowed", false],
+    ["not-allowed", false],
+  ] as const)("preserves the stable recognition error code %s", async (code, recoverable) => {
+    const recognition = new FakeRecognition();
+    const handlers = callbacks();
+    await new BrowserSpeechProvider(fakeWindow(recognition).scope).start({} as MediaStreamTrack, handlers, false);
+
+    recognition.onerror?.({ error: code, message: "browser detail" } as SpeechRecognitionErrorEvent);
+
+    expect(handlers.onError).toHaveBeenCalledWith({ code, recoverable, message: "browser detail" });
+  });
+
+  it("normalizes unknown recognition error codes", async () => {
+    const recognition = new FakeRecognition();
+    const handlers = callbacks();
+    await new BrowserSpeechProvider(fakeWindow(recognition).scope).start({} as MediaStreamTrack, handlers, false);
+
+    recognition.onerror?.({ error: "audio-capture", message: "capture failed" } as SpeechRecognitionErrorEvent);
+
+    expect(handlers.onError).toHaveBeenCalledWith({
+      code: "recognition_error",
+      recoverable: false,
+      message: "capture failed",
+    });
+  });
+
   it("rejects a cancelled utterance and ignores its later completion callback", async () => {
     const recognition = new FakeRecognition();
     const { scope, utterances } = fakeWindow(recognition);
