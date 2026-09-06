@@ -1,4 +1,5 @@
 const SENTENCE_BOUNDARY = new Set(["。", "！", "？", "!", "?", "；", ";", "\n"]);
+const MIN_SPEECH_CODE_POINTS = 8;
 const MAX_SENTENCE_CODE_POINTS = 80;
 const URL = /\b(?:https?:\/\/|www\.)[^\s\]\)<>\'"`。！？；，]+/gi;
 const MARKDOWN_LINK = /\[([^\]]+)\]\((?:https?:\/\/|www\.)[^\s)]+\)/giu;
@@ -73,6 +74,7 @@ export class StreamingSentenceQueue {
   private pending = "";
   private cancelled = false;
   private skippedSourceCodePoints = 0;
+  private bufferedSegment: StreamingSpeechSegment | null = null;
 
   push(delta: string): string[] {
     return this.pushSegments(delta).map((segment) => segment.text);
@@ -132,11 +134,17 @@ export class StreamingSentenceQueue {
   }
 
   flushSegments(): StreamingSpeechSegment[] {
-    if (this.cancelled || this.pending.length === 0) return [];
-    const source = this.pending;
-    this.pending = "";
     const segments: StreamingSpeechSegment[] = [];
-    this.appendSegment(segments, source);
+    if (this.cancelled) return segments;
+    if (this.pending.length > 0) {
+      const source = this.pending;
+      this.pending = "";
+      this.appendSegment(segments, source);
+    }
+    if (this.bufferedSegment) {
+      segments.push(this.bufferedSegment);
+      this.bufferedSegment = null;
+    }
     return segments;
   }
 
@@ -144,12 +152,14 @@ export class StreamingSentenceQueue {
     this.cancelled = true;
     this.pending = "";
     this.skippedSourceCodePoints = 0;
+    this.bufferedSegment = null;
   }
 
   reset(): void {
     this.cancelled = false;
     this.pending = "";
     this.skippedSourceCodePoints = 0;
+    this.bufferedSegment = null;
   }
 
   private appendSegment(segments: StreamingSpeechSegment[], source: string): void {
@@ -159,10 +169,22 @@ export class StreamingSentenceQueue {
       this.skippedSourceCodePoints += sourceCodePoints;
       return;
     }
-    segments.push({
+    const nextSegment: StreamingSpeechSegment = {
       text,
       sourceCodePoints: this.skippedSourceCodePoints + sourceCodePoints,
-    });
+    };
     this.skippedSourceCodePoints = 0;
+    if (this.bufferedSegment) {
+      this.bufferedSegment = {
+        text: this.bufferedSegment.text + nextSegment.text,
+        sourceCodePoints: this.bufferedSegment.sourceCodePoints + nextSegment.sourceCodePoints,
+      };
+    } else {
+      this.bufferedSegment = nextSegment;
+    }
+    if (this.bufferedSegment.sourceCodePoints >= MIN_SPEECH_CODE_POINTS) {
+      segments.push(this.bufferedSegment);
+      this.bufferedSegment = null;
+    }
   }
 }
