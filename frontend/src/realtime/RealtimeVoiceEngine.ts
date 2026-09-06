@@ -35,6 +35,7 @@ export interface RealtimeVoiceDependencies {
   capture: MicrophoneCapture;
   browserSpeech: BrowserSpeechProvider;
   sentenceQueue: StreamingSentenceQueue;
+  nextSpeechRequestId(): number;
   sendJson(event: ClientEvent): void;
   onSnapshot(snapshot: RealtimeSnapshot): void;
   onTerminalError(error: BrowserSpeechFailure): void;
@@ -120,7 +121,6 @@ export class RealtimeVoiceEngine {
   private fallbackSpeechDone = false;
   private fallbackSpeechRequested = false;
   private localSpeechRequest: LocalSpeechRequest | null = null;
-  private requestCounter = 0;
   private transcriptRequestCounter = 0;
   private readonly cancelledTurnKeys = new Set<string>();
   private readonly highestTurnBySession = new Map<string, number>();
@@ -198,6 +198,20 @@ export class RealtimeVoiceEngine {
     this.publish({ ...INITIAL_SNAPSHOT });
 
     return this.beginCaptureStop();
+  }
+
+  cancelCurrentOutput(): void {
+    if (!this.snapshot.active) return;
+    ++this.speechEpoch;
+    const cancelPendingTurn = this.preparePendingCancellation();
+    this.dependencies.browserSpeech.cancelSpeech();
+    this.dependencies.cancelLocalPlayback();
+    this.dependencies.sentenceQueue.cancel();
+    this.pendingSentences = [];
+    if (cancelPendingTurn) this.dependencies.sendJson({ type: "turn.cancel" });
+    this.clearTurnOwnership();
+    this.browserFinalOpen = true;
+    this.publish({ state: "listening", interimText: "" });
   }
 
   handleServerEvent(event: ServerEvent): void {
@@ -509,7 +523,7 @@ export class RealtimeVoiceEngine {
   private requestFallbackSpeech(): void {
     if (!this.fallbackSpeechTurn || !this.fallbackSpeechDone || this.fallbackSpeechRequested) return;
     this.fallbackSpeechRequested = true;
-    const requestId = ++this.requestCounter;
+    const requestId = this.dependencies.nextSpeechRequestId();
     this.localSpeechRequest = { turn: this.fallbackSpeechTurn, requestId };
     this.dependencies.sendJson({
       type: "assistant.speak",

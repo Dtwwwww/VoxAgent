@@ -134,6 +134,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const socketRef = useRef<WebSocket | null>(null);
   const settingsRef = useRef<VoiceSettings>(initialSettings);
   const realtimeSnapshotRef = useRef<RealtimeSnapshot>({ ...OFF_REALTIME_SNAPSHOT });
+  const realtimeStartGenerationRef = useRef(0);
   const selectedMicrophoneIdRef = useRef<string | null>(initialSettings.microphoneDeviceId);
   const speechModeRef = useRef<SpeechMode>(initialSettings.speechMode);
   const selectedBrowserVoiceKeyRef = useRef<string | null>(initialSettings.browserVoiceKey);
@@ -232,6 +233,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       capture: captureRef.current,
       browserSpeech: browserSpeechRef.current!,
       sentenceQueue: new StreamingSentenceQueue(),
+      nextSpeechRequestId: () => ++replayRequestCounterRef.current,
       sendJson(event) {
         if (!send(event)) return;
         if (event.type === "voice.transcript.submit") {
@@ -279,7 +281,6 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     sentReplayTurnsRef.current.clear();
     activeReplayTurnRef.current = null;
     activeReplayRequestRef.current = 0;
-    replayRequestCounterRef.current = 0;
     pendingBrowserTranscriptRequestRef.current = null;
     activeBrowserTranscriptRef.current = null;
     realtimeSpeechRequestRef.current = null;
@@ -290,6 +291,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, []);
 
   const stopLocalResources = useCallback(async () => {
+    realtimeStartGenerationRef.current += 1;
     captureLifecycleRef.current += 1;
     manualSpeechGenerationRef.current += 1;
     setMicrophoneActive(false);
@@ -390,6 +392,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if ("turn_id" in event) maximumTurnIdRef.current = Math.max(maximumTurnIdRef.current, event.turn_id);
     switch (event.type) {
       case "session.ready":
+        realtimeStartGenerationRef.current += 1;
         if (realtimeSnapshotRef.current.active) void realtimeEngineRef.current?.stop();
         sessionIdRef.current = event.session_id;
         assistantDraftsRef.current.clear();
@@ -401,7 +404,6 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         sentReplayTurnsRef.current.clear();
         activeReplayTurnRef.current = null;
         activeReplayRequestRef.current = 0;
-        replayRequestCounterRef.current = 0;
         pendingBrowserTranscriptRequestRef.current = null;
         activeBrowserTranscriptRef.current = null;
         realtimeSpeechRequestRef.current = null;
@@ -559,7 +561,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         sentReplayTurnsRef.current.delete(event.turn_id);
         if (activeReplayTurnRef.current === event.turn_id) {
           manualSpeechGenerationRef.current += 1;
-          browserSpeechRef.current?.cancelSpeech();
+          if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
+          else browserSpeechRef.current?.cancelSpeech();
           activeReplayTurnRef.current = null;
           activeReplayRequestRef.current = 0;
         }
@@ -762,17 +765,20 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [send]);
 
   const startRealtimeCall = useCallback(async () => {
+    const generation = ++realtimeStartGenerationRef.current;
     pendingBrowserTranscriptRequestRef.current = null;
     activeBrowserTranscriptRef.current = null;
     realtimeSpeechRequestRef.current = null;
     if (manualCaptureActiveRef.current) {
       await captureRef.current?.stop();
+      if (generation !== realtimeStartGenerationRef.current) return;
       manualCaptureActiveRef.current = false;
       setMicrophoneActive(false);
     }
     let availableMicrophones: MicrophoneDevice[] = [];
     try {
       availableMicrophones = await listMicrophones();
+      if (generation !== realtimeStartGenerationRef.current) return;
       setMicrophones(availableMicrophones);
       const selected = choosePreferredMicrophone(availableMicrophones, selectedMicrophoneIdRef.current);
       selectedMicrophoneIdRef.current = selected?.deviceId ?? null;
@@ -784,6 +790,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     } catch {
       // The capture path can still request the previously selected or browser-default input.
     }
+    if (generation !== realtimeStartGenerationRef.current) return;
 
     const availableBrowserVoices = browserSpeechRef.current?.voices() ?? [];
     setBrowserVoices(availableBrowserVoices);
@@ -812,6 +819,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [persistSettings]);
 
   const stopRealtimeCall = useCallback(async () => {
+    realtimeStartGenerationRef.current += 1;
     pendingBrowserTranscriptRequestRef.current = null;
     activeBrowserTranscriptRef.current = null;
     realtimeSpeechRequestRef.current = null;
@@ -855,7 +863,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
     blockedThroughTurnRef.current = Math.max(blockedThroughTurnRef.current, maximumTurnIdRef.current);
     manualSpeechGenerationRef.current += 1;
-    browserSpeechRef.current?.cancelSpeech();
+    if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
+    else browserSpeechRef.current?.cancelSpeech();
     realtimeSpeechRequestRef.current = null;
     allowedReplayTurnsRef.current.clear();
     sentReplayTurnsRef.current.clear();
@@ -872,7 +881,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     const generation = ++manualSpeechGenerationRef.current;
     const priorTurn = activeReplayTurnRef.current;
     const priorWasSent = priorTurn !== null && sentReplayTurnsRef.current.delete(priorTurn);
-    browserSpeechRef.current?.cancelSpeech();
+    if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
+    else browserSpeechRef.current?.cancelSpeech();
     realtimeSpeechRequestRef.current = null;
     const playback = playbackRef.current;
     if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
@@ -975,7 +985,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     cancelledTurnsRef.current.add(turnId);
     if (activeReplayTurnRef.current === turnId) {
       manualSpeechGenerationRef.current += 1;
-      browserSpeechRef.current?.cancelSpeech();
+      if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
+      else browserSpeechRef.current?.cancelSpeech();
       activeReplayTurnRef.current = null;
       activeReplayRequestRef.current = 0;
     }
@@ -1026,7 +1037,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     sentReplayTurnsRef.current.clear();
     activeReplayTurnRef.current = null;
     activeReplayRequestRef.current = 0;
-    browserSpeechRef.current?.cancelSpeech();
+    if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
+    else browserSpeechRef.current?.cancelSpeech();
     realtimeSpeechRequestRef.current = null;
     playbackRef.current.stopAll();
     setSpeakingTurnId(null);
@@ -1039,6 +1051,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, []);
 
   const clearLocalData = useCallback(() => {
+    realtimeStartGenerationRef.current += 1;
     void realtimeEngineRef.current?.stop();
     cancelActive();
     assistantDraftsRef.current.clear();

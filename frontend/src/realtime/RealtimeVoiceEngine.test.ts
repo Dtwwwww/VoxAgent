@@ -82,11 +82,13 @@ function makeHarness() {
   const states: RealtimeSnapshot[] = [];
   const terminalErrors: BrowserSpeechFailure[] = [];
   const cancelLocalPlayback = vi.fn();
+  let speechRequestId = 0;
   const queueCancel = vi.spyOn(sentenceQueue, "cancel");
   const engine = new RealtimeVoiceEngine({
     capture: capture as unknown as MicrophoneCapture,
     browserSpeech: browserSpeech as unknown as BrowserSpeechProvider,
     sentenceQueue,
+    nextSpeechRequestId: () => ++speechRequestId,
     sendJson: (event) => sentJson.push(event),
     onSnapshot: (snapshot) => states.push(snapshot),
     onTerminalError: (error) => terminalErrors.push(error),

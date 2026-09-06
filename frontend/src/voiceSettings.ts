@@ -52,6 +52,17 @@ function parseSettings(raw: string | null): VoiceSettings {
   };
 }
 
+function migrateV1Settings(raw: string): VoiceSettings {
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { ...defaults };
+  const value = parsed as Record<string, unknown>;
+  return {
+    ...defaults,
+    voiceKey: optionalString(value.voiceKey),
+    speed: speed(value.speed),
+  };
+}
+
 export function loadVoiceSettings(storage: StorageLike): VoiceSettings {
   const current = storage.getItem(VOICE_SETTINGS_KEY);
   try {
@@ -64,7 +75,7 @@ export function loadVoiceSettings(storage: StorageLike): VoiceSettings {
   if (legacy === null) return { ...defaults };
   let migrated: VoiceSettings;
   try {
-    migrated = parseSettings(legacy);
+    migrated = migrateV1Settings(legacy);
   } catch {
     migrated = { ...defaults };
   }

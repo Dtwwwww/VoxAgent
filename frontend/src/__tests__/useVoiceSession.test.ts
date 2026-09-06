@@ -675,6 +675,38 @@ describe("useVoiceSession", () => {
     expect(MockAudioContext.instances.flatMap((context) => context.sources).filter((source) => source.start.mock.calls.length > 0)).toHaveLength(1);
   });
 
+  it("uses one request sequence for engine fallback and manual replay", async () => {
+    let callbacks!: BrowserSpeechCallbacks;
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockImplementation(async (_track, nextCallbacks) => {
+      callbacks = nextCallbacks;
+    });
+    vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockRejectedValue(new Error("browser speech failed"));
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    act(() => callbacks.onFinal("请回答"));
+    const transcriptRequestId = socket.jsonMessages().at(-1)!.request_id as number;
+    emit(socket, { type: "asr.final", session_id: SESSION_ID, turn_id: 7, request_id: transcriptRequestId, text: "请回答" });
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: "回退后重播。" });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+    await waitFor(() => expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toHaveLength(1));
+    const engineRequestId = socket.jsonMessages().filter((event) => event.type === "assistant.speak")[0].request_id as number;
+
+    act(() => hook.result.current.setSpeechMode("local-only"));
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toHaveLength(2));
+    const manualRequestId = socket.jsonMessages().filter((event) => event.type === "assistant.speak")[1].request_id as number;
+
+    expect(manualRequestId).toBeGreaterThan(engineRequestId);
+    const wav = wavBytes();
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: engineRequestId, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances.flatMap((context) => context.sources)).toHaveLength(0);
+    emit(socket, { type: "tts.chunk", session_id: SESSION_ID, turn_id: 7, request_id: manualRequestId, sequence: 0, sample_rate: 24_000, mime_type: "audio/wav", byte_length: wav.byteLength });
+    await act(async () => socket.receive(wav));
+    expect(MockAudioContext.instances.flatMap((context) => context.sources).filter((source) => source.start.mock.calls.length > 0)).toHaveLength(1);
+  });
+
   it("uses local replay immediately in local-only mode", async () => {
     const speak = vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockResolvedValue();
     const { hook, socket } = openSession();
@@ -732,6 +764,60 @@ describe("useVoiceSession", () => {
     expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
   });
 
+  it("does not turn intentional realtime speech cancellation into typed-input fallback", async () => {
+    let callbacks!: BrowserSpeechCallbacks;
+    const engineSpeech = deferred();
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockImplementation(async (_track, nextCallbacks) => {
+      callbacks = nextCallbacks;
+    });
+    vi.spyOn(BrowserSpeechProvider.prototype, "speak").mockReturnValue(engineSpeech.promise);
+    vi.spyOn(BrowserSpeechProvider.prototype, "cancelSpeech").mockImplementation(() => {
+      engineSpeech.reject(new DOMException("cancelled", "AbortError"));
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    act(() => callbacks.onFinal("语音问题"));
+    const requestId = socket.jsonMessages().at(-1)!.request_id as number;
+    emit(socket, { type: "asr.final", session_id: SESSION_ID, turn_id: 7, request_id: requestId, text: "语音问题" });
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: "正在通过浏览器朗读。" });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+
+    act(() => hook.result.current.submitText("只返回文字"));
+    await act(async () => Promise.resolve());
+
+    expect(socket.jsonMessages().at(-1)).toEqual({ type: "text.submit", text: "只返回文字", speak_response: false });
+    expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
+  });
+
+  it("does not turn intentional realtime speech cancellation into manual-replay fallback", async () => {
+    let callbacks!: BrowserSpeechCallbacks;
+    const engineSpeech = deferred();
+    vi.spyOn(BrowserSpeechProvider.prototype, "start").mockImplementation(async (_track, nextCallbacks) => {
+      callbacks = nextCallbacks;
+    });
+    const speak = vi.spyOn(BrowserSpeechProvider.prototype, "speak")
+      .mockReturnValueOnce(engineSpeech.promise)
+      .mockResolvedValueOnce();
+    vi.spyOn(BrowserSpeechProvider.prototype, "cancelSpeech").mockImplementation(() => {
+      engineSpeech.reject(new DOMException("cancelled", "AbortError"));
+    });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
+    const { hook, socket } = openSession();
+    await act(async () => hook.result.current.startRealtimeCall());
+    act(() => callbacks.onFinal("语音问题"));
+    const requestId = socket.jsonMessages().at(-1)!.request_id as number;
+    emit(socket, { type: "asr.final", session_id: SESSION_ID, turn_id: 7, request_id: requestId, text: "语音问题" });
+    emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: "可手动重播。" });
+    emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+
+    act(() => hook.result.current.speakMessage(7));
+    await waitFor(() => expect(speak).toHaveBeenCalledTimes(2));
+    await act(async () => Promise.resolve());
+
+    expect(socket.jsonMessages().filter((event) => event.type === "assistant.speak")).toEqual([]);
+  });
+
   it("stops realtime voice on socket close and session reset", async () => {
     vi.spyOn(BrowserSpeechProvider.prototype, "start").mockResolvedValue();
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue(microphoneStream());
@@ -773,6 +859,35 @@ describe("useVoiceSession", () => {
 
     expect(stop).toHaveBeenCalledOnce();
   });
+
+  it.each(["stop", "socket-close", "session-reset", "clear", "unmount"] as const)(
+    "does not start realtime capture after %s wins during device enumeration",
+    async (cleanupKind) => {
+      const enumeration = deferred<MediaDeviceInfo[]>();
+      Object.assign(navigator.mediaDevices, { enumerateDevices: vi.fn(() => enumeration.promise) });
+      const { hook, socket } = openSession();
+      let starting!: Promise<void>;
+      act(() => { starting = hook.result.current.startRealtimeCall(); });
+      await waitFor(() => expect(navigator.mediaDevices.enumerateDevices).toHaveBeenCalledOnce());
+
+      if (cleanupKind === "stop") await act(async () => hook.result.current.stopRealtimeCall());
+      if (cleanupKind === "socket-close") act(() => socket.close());
+      if (cleanupKind === "session-reset") emit(socket, readyEvent());
+      if (cleanupKind === "clear") act(() => hook.result.current.clearLocalData());
+      if (cleanupKind === "unmount") hook.unmount();
+      enumeration.resolve([{
+        deviceId: "late-realtek",
+        groupId: "late-group",
+        label: "Microphone Array (Realtek)",
+        kind: "audioinput",
+        toJSON: () => ({}),
+      }]);
+      await act(async () => starting);
+
+      expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+      expect(localStorage.getItem("voxagent.voice-settings.v2")).toBeNull();
+    },
+  );
 
   it("binds retrieved sources to the matching assistant answer", () => {
     const { hook, socket } = openSession();

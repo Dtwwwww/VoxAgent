@@ -53,7 +53,15 @@ describe("voice settings", () => {
   });
 
   it("migrates v1 settings once with safe v2 defaults", () => {
-    const storage = new Map<string, string>([["voxagent.voice-settings.v1", JSON.stringify({ voiceKey: "default_voice", speed: 1.2 })]]);
+    const storage = new Map<string, string>([["voxagent.voice-settings.v1", JSON.stringify({
+      voiceKey: "default_voice",
+      speed: 1.2,
+      speechMode: "local-only",
+      microphoneDeviceId: "private-device",
+      microphoneLabel: "Injected microphone",
+      browserVoiceKey: "injected-browser-voice",
+      onlineSpeechNoticeAccepted: true,
+    })]]);
     const api = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) };
 
     expect(loadVoiceSettings(api)).toEqual({ ...defaults, voiceKey: "default_voice", speed: 1.2 });
