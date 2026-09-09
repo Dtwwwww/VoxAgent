@@ -149,9 +149,13 @@ describe("RealtimeVoiceEngine", () => {
       delta: "你好！今天想聊什么？",
     });
 
-    await vi.waitFor(() => expect(browserSpeech.spoken).toEqual(["你好！", "今天想聊什么？"]));
-    expect(browserSpeech.speak).toHaveBeenNthCalledWith(1, "你好！", "zh-voice", 1, expect.anything());
-    expect(browserSpeech.speak).toHaveBeenNthCalledWith(2, "今天想聊什么？", "zh-voice", 1, expect.anything());
+    await vi.waitFor(() => expect(browserSpeech.spoken).toEqual(["你好！今天想聊什么？"]));
+    expect(browserSpeech.speak).toHaveBeenCalledWith(
+      "你好！今天想聊什么？",
+      "zh-voice",
+      1,
+      expect.anything(),
+    );
   });
 
   it("flushes and speaks an unterminated assistant tail before returning to listening", async () => {
@@ -208,7 +212,7 @@ describe("RealtimeVoiceEngine", () => {
       type: "assistant.delta",
       session_id: SESSION_ID,
       turn_id: 4,
-      delta: "正在朗读。",
+      delta: "这是正在朗读的完整回答。",
     });
     await vi.waitFor(() => expect(states.at(-1)?.state).toBe("speaking"));
 
@@ -408,6 +412,7 @@ describe("RealtimeVoiceEngine", () => {
     engine.handleServerEvent(browserAsrFinal(SESSION_ID, 10, "迟到旧问题", 1));
     engine.handleServerEvent(browserAsrFinal(SESSION_ID, 11, "新问题", 2));
     engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 11, delta: "新回答。" });
+    engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 11 });
 
     await vi.waitFor(() => expect(browserSpeech.spoken).toEqual(["新回答。"]));
   });
@@ -421,19 +426,19 @@ describe("RealtimeVoiceEngine", () => {
     await engine.start(ONLINE_OPTIONS);
     browserSpeech.runs[0].onFinal("旧问题");
     engine.handleServerEvent(browserAsrFinal(SESSION_ID, 20, "旧问题", 1));
-    engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 20, delta: "旧回答。" });
+    engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 20, delta: "这是不会结束的旧回答。" });
     expect(browserSpeech.speak).toHaveBeenCalledTimes(1);
 
     await engine.stop();
     await engine.start(ONLINE_OPTIONS);
     browserSpeech.runs[1].onFinal("新问题");
     engine.handleServerEvent(browserAsrFinal(SESSION_ID, 21, "新问题", 2));
-    engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 21, delta: "新回答。" });
+    engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 21, delta: "这是可以正常播放的新回答。" });
 
     await vi.waitFor(() => expect(browserSpeech.speak).toHaveBeenCalledTimes(2));
     expect(browserSpeech.spoken).toHaveLength(2);
-    expect(browserSpeech.spoken[0]).toBe("旧回答。");
-    expect(browserSpeech.spoken[1]).toBe("新回答。");
+    expect(browserSpeech.spoken[0]).toBe("这是不会结束的旧回答。");
+    expect(browserSpeech.spoken[1]).toBe("这是可以正常播放的新回答。");
   });
 
   it("accepts the next echo in a new call after stopping an unbound browser turn", async () => {
@@ -446,6 +451,7 @@ describe("RealtimeVoiceEngine", () => {
     browserSpeech.runs[1].onFinal("新问题");
     engine.handleServerEvent(browserAsrFinal(OTHER_SESSION_ID, 1, "新问题", 2));
     engine.handleServerEvent({ type: "assistant.delta", session_id: OTHER_SESSION_ID, turn_id: 1, delta: "新回答。" });
+    engine.handleServerEvent({ type: "assistant.done", session_id: OTHER_SESSION_ID, turn_id: 1 });
 
     await vi.waitFor(() => expect(browserSpeech.spoken).toEqual(["新回答。"]));
   });
@@ -478,6 +484,7 @@ describe("RealtimeVoiceEngine", () => {
     }
     engine.handleServerEvent(browserAsrFinal(SESSION_ID, 1, "相同问题", 2));
     engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 1, delta: "新回答。" });
+    engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 1 });
 
     await vi.waitFor(() => expect(browserSpeech.spoken).toEqual(["新回答。"]));
   });
@@ -493,6 +500,7 @@ describe("RealtimeVoiceEngine", () => {
     browser.engine.handleServerEvent(browserAsrFinal(SESSION_ID, 30, "迟到第一问", 1));
     browser.engine.handleServerEvent(browserAsrFinal(SESSION_ID, 31, "第二问", 2));
     browser.engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 31, delta: "第二答。" });
+    browser.engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 31 });
     await vi.waitFor(() => expect(browser.browserSpeech.spoken).toEqual(["第二答。"]));
 
     const local = makeHarness();
@@ -510,7 +518,7 @@ describe("RealtimeVoiceEngine", () => {
     let rejectSecond!: (reason: unknown) => void;
     browserSpeech.speak.mockImplementation((text: string) => {
       browserSpeech.spoken.push(text);
-      if (text === "第二句。") {
+      if (text === "第三句。") {
         return new Promise<void>((_resolve, reject) => {
           rejectSecond = reject;
         });
@@ -526,22 +534,21 @@ describe("RealtimeVoiceEngine", () => {
       turn_id: 5,
       delta: "Hi😀。第二句。第三句。",
     });
-    await vi.waitFor(() => expect(browserSpeech.speak).toHaveBeenCalledTimes(2));
-
     engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 5 });
+    await vi.waitFor(() => expect(browserSpeech.speak).toHaveBeenCalledTimes(2));
     rejectSecond(new Error("synthesis failed"));
 
     await vi.waitFor(() => expect(sentJson).toContainEqual({
       type: "assistant.speak",
       turn_id: 5,
       request_id: 1,
-      start_offset: 4,
+      start_offset: 8,
     }));
     engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 5 });
     expect(sentJson.filter((event) => event.type === "assistant.speak")).toHaveLength(1);
     expect(browserSpeech.spoken).toHaveLength(2);
-    expect(browserSpeech.spoken[0]).toBe("Hi。");
-    expect(browserSpeech.spoken[1]).toBe("第二句。");
+    expect(browserSpeech.spoken[0]).toBe("Hi。第二句。");
+    expect(browserSpeech.spoken[1]).toBe("第三句。");
     expect(queueCancel).toHaveBeenCalledOnce();
     expect(states.at(-1)).toMatchObject({ provider: "local", state: "speaking" });
   });
@@ -558,7 +565,7 @@ describe("RealtimeVoiceEngine", () => {
       type: "assistant.delta",
       session_id: SESSION_ID,
       turn_id: 6,
-      delta: "Hi😀。```js\nconst q = 'x?",
+      delta: "这是完整第一句😀。```js\nconst q = 'x?",
     });
     engine.handleServerEvent({
       type: "assistant.delta",
@@ -572,11 +579,11 @@ describe("RealtimeVoiceEngine", () => {
       type: "assistant.speak",
       turn_id: 6,
       request_id: 1,
-      start_offset: Array.from("Hi😀。").length,
+      start_offset: Array.from("这是完整第一句😀。").length,
     }));
     expect(browserSpeech.speak).toHaveBeenNthCalledWith(
       1,
-      "Hi。",
+      "这是完整第一句。",
       "zh-voice",
       1,
       expect.anything(),
@@ -597,6 +604,7 @@ describe("RealtimeVoiceEngine", () => {
     browserSpeech.runs[0].onFinal("请回答");
     engine.handleServerEvent(browserAsrFinal(SESSION_ID, 6, "请回答", 1));
     engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 6, delta: "失败。" });
+    engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 6 });
     await vi.waitFor(() => expect(states.at(-1)?.provider).toBe("local"));
     engine.handleServerEvent({ type: "assistant.done", session_id: SESSION_ID, turn_id: 6 });
     await vi.waitFor(() => expect(states.at(-1)?.state).toBe("speaking"));
@@ -655,7 +663,7 @@ describe("RealtimeVoiceEngine", () => {
     await engine.start(ONLINE_OPTIONS);
     browserSpeech.runs[0].onFinal("请回答");
     engine.handleServerEvent(browserAsrFinal(SESSION_ID, 71, "请回答", 1));
-    engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 71, delta: "尚未说完。" });
+    engine.handleServerEvent({ type: "assistant.delta", session_id: SESSION_ID, turn_id: 71, delta: "这是尚未说完的完整回答。" });
     await vi.waitFor(() => expect(browserSpeech.speak).toHaveBeenCalledOnce());
 
     await engine.switchMode({ ...ONLINE_OPTIONS, mode: "local-only" });

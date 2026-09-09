@@ -1256,6 +1256,14 @@ describe("useVoiceSession", () => {
     emit(socket, { type: "asr.final", session_id: SESSION_ID, turn_id: 7, request_id: requestId, text: "语音问题" });
     emit(socket, { type: "assistant.delta", session_id: SESSION_ID, turn_id: 7, delta: "可手动重播。" });
     emit(socket, { type: "assistant.done", session_id: SESSION_ID, turn_id: 7 });
+    expect(hook.result.current.messages).toContainEqual(expect.objectContaining({
+      turnId: 7,
+      text: "可手动重播。",
+      status: "complete",
+    }));
+    expect(hook.result.current.speechMode).toBe("online-preferred");
+    await waitFor(() => expect(speak).toHaveBeenCalledOnce());
+    expect(speak.mock.calls[0]?.[0]).toBe("可手动重播。");
 
     act(() => hook.result.current.speakMessage(7));
     await waitFor(() => expect(speak).toHaveBeenCalledTimes(2));
