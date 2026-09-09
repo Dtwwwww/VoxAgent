@@ -20,6 +20,18 @@ committed. Override the root with `-DataRoot` or `VOXAGENT_DATA_ROOT`; the selec
 the single source for Ollama models, speech models, uv cache, application data, logs, and test
 temporary files.
 
+## One-command verification
+
+From PowerShell at the repository root, run every backend, frontend, lint, type-check, and build gate:
+
+```powershell
+& .\scripts\verify.ps1 -Scope All
+```
+
+Use `-Scope Backend` or `-Scope Frontend` while iterating on one side of the application. The
+script prefers the repository-local virtual environment and frontend dependencies, and falls back
+to `uv` and `pnpm` when those local executables are not present.
+
 ## Standard local runtime entry
 
 From PowerShell at the repository root:
