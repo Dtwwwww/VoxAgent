@@ -76,7 +76,11 @@ export function loadVoiceSettings(storage: StorageLike): VoiceSettings {
   }
 
   const legacy = storage.getItem(V1_VOICE_SETTINGS_KEY);
-  if (legacy === null) return { ...defaults };
+  if (legacy === null) {
+    const initialSettings = { ...defaults };
+    saveVoiceSettings(storage, initialSettings);
+    return initialSettings;
+  }
   let migrated: VoiceSettings;
   try {
     migrated = migrateV1Settings(legacy);

@@ -14,6 +14,20 @@ const defaults = {
 const voices = [{ voice_key: "default_voice", display_name: "声灵默认音色", description: "自然清晰，适合日常对话", gender: "neutral", is_default: true, previewable: true }];
 
 describe("voice settings", () => {
+  it("defaults to local-only and does not persist a browser mode implicitly", () => {
+    const storage = new Map<string, string>();
+    const api = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    };
+
+    expect(loadVoiceSettings(api).speechMode).toBe("local-only");
+    expect(JSON.parse(storage.get(VOICE_SETTINGS_KEY) ?? "null")).toMatchObject({
+      speechMode: "local-only",
+    });
+  });
+
   it("migrates saved online-preferred speech mode to local-only", () => {
     const storage = new Map<string, string>();
     const api = {
