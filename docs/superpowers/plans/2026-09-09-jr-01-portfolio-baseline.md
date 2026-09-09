@@ -34,7 +34,7 @@
 - Produces: 测试辅助函数 `seedVoiceSettings(overrides?: Partial<VoiceSettings>): void`
 - Invariant: 无论旧设置中保存什么，首次或迁移后的默认模式都是 `local-only`；在线测试必须显式播种在线设置。
 
-- [ ] **Step 1: 为默认模式写明确测试**
+- [x] **Step 1: 为默认模式写明确测试**
 
 在 `voiceSettings.test.ts` 增加：
 
@@ -54,13 +54,13 @@ it("normalizes a previously persisted online mode back to local-only", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试并确认当前契约**
+- [x] **Step 2: 运行测试并确认当前契约**
 
 Run: `cd frontend; pnpm exec vitest run src/__tests__/voiceSettings.test.ts`
 
 Expected: 新测试通过；若第二项失败，只修改 `parseSettings()` 使其固定返回 `local-only`，不修改持久化键名。
 
-- [ ] **Step 3: 给浏览器语音测试显式播种设置**
+- [x] **Step 3: 给浏览器语音测试显式播种设置**
 
 在 `useVoiceSession.test.ts` 的测试辅助区加入：
 
@@ -91,13 +91,13 @@ seedVoiceSettings({
 
 本地回退测试保持 `local-only`，不得全局把默认值改回在线。
 
-- [ ] **Step 4: 运行受影响测试**
+- [x] **Step 4: 运行受影响测试**
 
 Run: `cd frontend; pnpm exec vitest run src/__tests__/voiceSettings.test.ts src/__tests__/useVoiceSession.test.ts`
 
 Expected: 所有默认模式、浏览器识别、手动朗读和回退测试通过；不存在 `callbacks is undefined` 或 `provider local/browser` 断言失败。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add frontend/src/voiceSettings.ts frontend/src/__tests__/voiceSettings.test.ts frontend/src/__tests__/useVoiceSession.test.ts
@@ -118,7 +118,7 @@ git commit -m "test: align voice sessions with local-first default"
 - Consumes: `StreamingSentenceQueue.pushSegments()`, `flushSegments()`, `RealtimeVoiceEngine`
 - Produces: 小于 8 个 Unicode code point 的相邻短句合并；完成、取消和模式切换不丢失或恢复旧音频。
 
-- [ ] **Step 1: 写出短句合并的规范测试**
+- [x] **Step 1: 写出短句合并的规范测试**
 
 ```ts
 it("merges adjacent short sentences into one speakable segment", () => {
@@ -134,7 +134,7 @@ it("flushes one buffered short tail exactly once", () => {
 });
 ```
 
-- [ ] **Step 2: 更新 Engine happy-path 预期而非撤销合并行为**
+- [x] **Step 2: 更新 Engine happy-path 预期而非撤销合并行为**
 
 把 `RealtimeVoiceEngine.test.ts` 中同一增量的：
 
@@ -156,7 +156,7 @@ expect(browserSpeech.speak).toHaveBeenCalledWith(
 
 只有由合并规则导致的失败可以更新预期；取消、关联 ID、重复播放和 fallback 失败必须修实现。
 
-- [ ] **Step 3: 为取消后新一轮增加回归测试**
+- [x] **Step 3: 为取消后新一轮增加回归测试**
 
 ```ts
 it("speaks a new turn after the previous synthesis was cancelled", async () => {
@@ -177,7 +177,7 @@ it("speaks a new turn after the previous synthesis was cancelled", async () => {
 });
 ```
 
-- [ ] **Step 4: 最小修复所有权状态**
+- [x] **Step 4: 最小修复所有权状态**
 
 在 `RealtimeVoiceEngine` 中把取消所有权与当前生成所有权分开保存。实现必须遵守以下形状：
 
@@ -193,13 +193,13 @@ private ownsGeneration(generation: number): boolean {
 
 开始新用户转写时递增 `activeGeneration`；取消时只标记当时 generation，不得清除后来 generation 的浏览器回声或朗读队列。
 
-- [ ] **Step 5: 运行实时语音测试**
+- [x] **Step 5: 运行实时语音测试**
 
 Run: `cd frontend; pnpm exec vitest run src/realtime/sentenceQueue.test.ts src/realtime/RealtimeVoiceEngine.test.ts`
 
 Expected: 两个文件全部通过；不存在超时等待 `browserSpeech.spoken` 的测试。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add frontend/src/realtime/sentenceQueue.ts frontend/src/realtime/sentenceQueue.test.ts frontend/src/realtime/RealtimeVoiceEngine.ts frontend/src/realtime/RealtimeVoiceEngine.test.ts
@@ -218,7 +218,7 @@ git commit -m "fix: restore realtime voice regression coverage"
 - Produces: `scripts/verify.ps1 -Scope All|Backend|Frontend`
 - Exit contract: 任一子命令非零则最终退出非零，同时仍运行另一个独立测试组。
 
-- [ ] **Step 1: 写验证脚本结构测试**
+- [x] **Step 1: 写验证脚本结构测试**
 
 ```python
 from pathlib import Path
@@ -232,13 +232,13 @@ def test_verify_script_has_all_required_gates() -> None:
     assert "exit 1" in text
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd backend; uv run --extra dev pytest tests/scripts/test_verify_script.py -v`
 
 Expected: FAIL because `scripts/verify.ps1` does not exist.
 
-- [ ] **Step 3: 实现脚本**
+- [x] **Step 3: 实现脚本**
 
 ```powershell
 param(
@@ -292,7 +292,7 @@ if ($Failures.Count -gt 0) {
 Write-Host 'Verification passed.'
 ```
 
-- [ ] **Step 4: 运行结构测试和完整验证**
+- [x] **Step 4: 运行结构测试和完整验证**
 
 Run: `cd backend; uv run --extra dev pytest tests/scripts/test_verify_script.py -v`
 
@@ -302,7 +302,7 @@ Run: `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -Scope All`
 
 Expected: `Verification passed.` and exit 0.
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add scripts/verify.ps1 backend/tests/scripts/test_verify_script.py README.md
@@ -322,7 +322,7 @@ git commit -m "test: add one-command project verification"
 - Produces: 清晰区分“已实现”“下一阶段”“已知限制”的公开入口。
 - Invariant: 本地令牌、模型、录音、数据库、临时评测和依赖目录不能被 Git 跟踪。
 
-- [ ] **Step 1: 写仓库卫生测试**
+- [x] **Step 1: 写仓库卫生测试**
 
 ```python
 from pathlib import Path
@@ -341,7 +341,7 @@ def test_gitignore_covers_private_runtime_artifacts() -> None:
         assert pattern in text
 ```
 
-- [ ] **Step 2: 增加精确忽略项**
+- [x] **Step 2: 增加精确忽略项**
 
 ```gitignore
 .token_tmp
@@ -356,7 +356,7 @@ qa/reports/local-*.json
 
 不得增加会忽略全部 `benchmarks/*.json` 或全部 `qa/reports/*.json` 的宽泛规则。
 
-- [ ] **Step 3: 重写 README 首屏**
+- [x] **Step 3: 重写 README 首屏**
 
 README 首屏必须按以下顺序出现：
 
@@ -377,7 +377,7 @@ README 首屏必须按以下顺序出现：
 
 “当前可运行能力”只能引用现有代码和已提交报告，不能提前宣称 Tool Calling、MCP 或 Hybrid RAG 已完成。
 
-- [ ] **Step 4: 编写三分钟演示脚本**
+- [x] **Step 4: 编写三分钟演示脚本**
 
 `docs/portfolio/demo-script.md` 固定演示：
 
@@ -389,7 +389,7 @@ README 首屏必须按以下顺序出现：
 
 每一步写明操作、预期界面、需要讲解的工程取舍和失败时停止条件。
 
-- [ ] **Step 5: 验证并提交**
+- [x] **Step 5: 验证并提交**
 
 Run: `cd backend; uv run --extra dev pytest tests/scripts/test_repository_hygiene.py -v`
 
@@ -413,13 +413,13 @@ git commit -m "docs: establish reproducible portfolio baseline"
 **Interfaces:**
 - Produces: 绑定 Git 提交的基线报告。
 
-- [ ] **Step 1: 运行统一验证**
+- [x] **Step 1: 运行统一验证**
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1 -Scope All`
 
 Expected: 所有 gate 通过，exit 0。
 
-- [ ] **Step 2: 记录机器可读结果**
+- [x] **Step 2: 记录机器可读结果**
 
 在仓库根目录执行以下 PowerShell，让提交值来自 Git 而不是手工填写：
 
@@ -446,13 +446,13 @@ Run: `Get-Content qa/reports/jr-01-baseline.json -Raw | ConvertFrom-Json | Selec
 
 Expected: `git_commit` 是 40 位当前提交 SHA，文件中没有尖括号占位符。
 
-- [ ] **Step 3: 检查工作树**
+- [x] **Step 3: 检查工作树**
 
 Run: `git status --short`
 
 Expected: 只显示本任务的报告和计划勾选修改；没有模型、令牌、数据库、录音、`node_modules` 或构建目录。
 
-- [ ] **Step 4: 提交验收证据**
+- [x] **Step 4: 提交验收证据**
 
 ```powershell
 git add qa/reports/jr-01-baseline.json docs/superpowers/plans/2026-09-09-jr-01-portfolio-baseline.md
@@ -469,3 +469,13 @@ git commit -m "test: approve JR-01 portfolio baseline"
 - README 不声明尚未实现的 Agent、MCP 或 Hybrid RAG。
 - 私有运行数据和依赖目录全部处于忽略状态。
 - `qa/reports/jr-01-baseline.json` 绑定真实 Git 提交。
+
+## Execution Record（2026-09-09）
+
+- 验证提交：`1f6d7659773533a2951f617298beeb35381a8f25`。
+- 干净提交快照执行 `scripts/verify.ps1 -Scope All`：后端收集 437 项（436 通过、1 项原有条件跳过），Ruff 通过；前端 240 项通过，TypeScript 与 Vite 构建通过。
+- 当前工作区还包含任务开始前已有、未暂存的 `frontend/src/main.tsx`、`frontend/src/token.ts` 和 `frontend/src/__tests__/token.test.ts`；工作区前端口径为 242 项通过。这些文件未纳入 JR-01 提交，也未冒充为绑定提交的证据。
+- `loadVoiceSettings()` 会把持久化的在线模式迁回 `local-only`，因此不能按原示例在 `localStorage` 预置在线模式。在线测试改为在 Hook 创建后显式接受说明并调用 `setSpeechMode("online-preferred")`，安全契约不变。
+- 短句合并实现和取消所有权隔离在执行前已存在；红灯来自 Engine 旧用例仍假定短句会立即发声，以及一个用例未等待自动朗读启动。对齐 `assistant.done` 冲刷契约和异步前置条件后，取消、旧事件隔离、fallback 与请求 ID 回归全部通过，无证据支持额外修改生产所有权状态。
+- 验证脚本优先使用仓库本地 `.venv` 与 `node_modules`，缺失时回退 `uv` / `pnpm`；pytest 临时目录位于系统临时区并禁用工作区缓存写入。
+- 真机物理麦克风、扬声器听感和批量插话未在 JR-01 重跑，报告中的 `manual_claims` 保持 `not_run`。
