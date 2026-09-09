@@ -2,7 +2,7 @@
 
 **日期：** 2026-09-09
 
-**状态：** 已确认设计，等待书面审阅
+**状态：** 已确认，实施计划已生成
 
 **目标周期：** 4–6 周
 
@@ -218,7 +218,7 @@ MCP Client 负责：
 - 同一事务写入文档表、向量和 FTS5 索引；任一步失败均不发布半成品。
 - BM25 与向量召回各取最多 20 个候选。
 - RRF 使用固定 `k=60` 融合排名。
-- 融合后前 10 个候选进入小型 ONNX Reranker。
+- 融合后前 8 个候选进入小型 ONNX Reranker。
 - 最终最多向上下文注入 4 个片段，继续遵循字符和 Token 上限。
 - Reranker 不可用、超时或内存压力过高时，使用 RRF 结果继续回答。
 
@@ -293,7 +293,7 @@ CI 在 Windows 或跨平台可运行部分执行：
 - Embedding 与 Reranker 批量大小最多为 8。
 - 同一时间只执行一个重型 ONNX 推理任务。
 - Reranker 模型文件目标小于 150MB，并只使用 CPUExecutionProvider。
-- Docker/pgvector 只作为独立演示配置，不与完整语音模式同时运行。
+- Docker 无模型 Web/API Demo 只作为独立演示配置，不与完整语音模式同时运行。
 - 开发和验收时关闭其他模型服务、过多浏览器页和高内存应用。
 
 可实现并可在目标机器运行：LangGraph、Tool Calling、MCP、SQLite FTS5、RRF、小型 Reranker、评测、CI、日志和 Metrics。
