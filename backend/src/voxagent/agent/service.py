@@ -63,14 +63,19 @@ class AgentService:
         session_id: str,
         turn_id: int,
         messages: Sequence[ModelMessage],
-        authorized_roots: Sequence[Path] = (),
+        authorized_roots: Sequence[Path] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         key = (session_id, turn_id)
+        roots = (
+            tuple(authorized_roots)
+            if authorized_roots is not None
+            else self._repository.list_authorized_roots()
+        )
         state = {
             "session_id": session_id,
             "turn_id": turn_id,
             "messages": _checkpoint_messages(messages),
-            "authorized_roots": [str(path) for path in authorized_roots],
+            "authorized_roots": [str(path) for path in roots],
             "tool_call_count": 0,
             "node_visit_count": 0,
             "cancelled": key in self._cancelled,

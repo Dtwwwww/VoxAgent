@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 from voxagent.tools.schema import PermissionLevel, ToolCall
@@ -452,6 +453,12 @@ class ToolRepository:
             (limit, offset),
         ).fetchall()
         return tuple(self._audit_record(row) for row in rows)
+
+    def list_authorized_roots(self) -> tuple[Path, ...]:
+        rows = self._connection.execute(
+            "SELECT canonical_path FROM authorized_roots ORDER BY id"
+        ).fetchall()
+        return tuple(Path(row["canonical_path"]) for row in rows)
 
     def recover_incomplete(self, now_utc: datetime) -> int:
         timestamp = _utc_text(now_utc)

@@ -7,6 +7,24 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from voxagent.agent.events import (
+    AgentTextDelta,
+)
+from voxagent.agent.events import (
+    ToolApprovalRequired as AgentToolApprovalRequired,
+)
+from voxagent.agent.events import (
+    ToolCompleted as AgentToolCompleted,
+)
+from voxagent.agent.events import (
+    ToolFailed as AgentToolFailed,
+)
+from voxagent.agent.events import (
+    ToolStarted as AgentToolStarted,
+)
+from voxagent.agent.events import (
+    TurnDone as AgentTurnDone,
+)
 from voxagent.conversation.context import ContextAssembler, KnowledgeContext, MemoryContext
 from voxagent.conversation.events import ErrorMessage
 from voxagent.conversation.history import SYSTEM_INSTRUCTION, ChatMessage
@@ -23,6 +41,7 @@ from voxagent.speech.endpoint import EndpointDecision, EndpointDetector
 from voxagent.speech.tts import AudioChunk
 from voxagent.speech.vad import VadDecision
 from voxagent.speech.voice_catalog import VoiceCatalog, VoiceProfile
+from voxagent.tools.schema import PermissionLevel
 
 FRAME = b"\x00" * 640
 
@@ -83,6 +102,40 @@ class BlockingAsr(FakeAsr):
 class FailingAsr(FakeAsr):
     def transcribe(self, samples: np.ndarray, sample_rate: int) -> AsrResult:
         raise RuntimeError("recognizer failed")
+
+
+class FakeAgentService:
+    confirmation_id = "00000000-0000-4000-8000-000000000002"
+
+    def __init__(self) -> None:
+        self.resume_calls: list[tuple[str, str, int, bool]] = []
+        self.cancel_calls: list[tuple[str, int]] = []
+
+    async def start_turn(self, session_id, turn_id, messages):
+        assert session_id and turn_id == 1 and messages[-1].content == "创建提醒"
+        yield AgentToolApprovalRequired(
+            self.confirmation_id,
+            "call-1",
+            "reminders.create",
+            PermissionLevel.L1,
+        )
+
+    async def resume_confirmation(
+        self, confirmation_id, session_id, turn_id, *, approved
+    ):
+        self.resume_calls.append((confirmation_id, session_id, turn_id, approved))
+        if approved:
+            yield AgentToolStarted("call-1", "reminders.create")
+            yield AgentToolCompleted("call-1", "reminders.create", "提醒已创建")
+            yield AgentTextDelta("已经帮你创建提醒。")
+        else:
+            yield AgentToolFailed(
+                "call-1", "reminders.create", "confirmation_denied"
+            )
+        yield AgentTurnDone()
+
+    def cancel(self, session_id, turn_id):
+        self.cancel_calls.append((session_id, turn_id))
 
 
 class FakePartialAsr:
@@ -290,6 +343,7 @@ def make_orchestrator(
     context_assembler: ContextAssembler | None = None,
     memory_proposer: FakeMemoryProposer | None = None,
     conversation_store: FakeConversationStore | None = None,
+    agent_service: object | None = None,
     max_utterance_frames: int = MAX_UTTERANCE_FRAMES,
 ) -> tuple[ConversationOrchestrator, FakeLlm, FakeTts]:
     llm = FakeLlm(replies or [["回答。"]])
@@ -308,6 +362,7 @@ def make_orchestrator(
         memory_proposer=memory_proposer,
         memory_policy=MemoryPolicy() if memory_proposer is not None else None,
         conversation_store=conversation_store,
+        agent_service=agent_service,
     )
     return orchestrator, llm, tts
 
@@ -1581,6 +1636,65 @@ async def test_concurrent_commits_waiting_on_partial_asr_claim_live_turn_once():
         ChatMessage("user", "只能提交一次"),
         ChatMessage("assistant", "单次回答"),
     )
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_pauses_for_one_time_confirmation_and_resumes():
+    agent = FakeAgentService()
+    orchestrator, llm, _ = make_orchestrator(agent_service=agent)
+
+    first = [item async for item in orchestrator.submit_text("创建提醒", False)]
+    assert [item.type for item in first] == ["tool.approval_required"]
+    assert str(first[0].confirmation_id) == agent.confirmation_id
+    assert llm.calls == []
+
+    resumed = [
+        item
+        async for item in orchestrator.resolve_tool_confirmation(
+            agent.confirmation_id, approved=True
+        )
+    ]
+    assert [item.type for item in resumed] == [
+        "tool.started",
+        "tool.completed",
+        "assistant.delta",
+        "assistant.done",
+    ]
+    assert agent.resume_calls[0][3] is True
+    assert orchestrator.history.assistant_text(1) == "已经帮你创建提醒。"
+
+    replay = [
+        item
+        async for item in orchestrator.resolve_tool_confirmation(
+            agent.confirmation_id, approved=True
+        )
+    ]
+    assert replay[0].code == "confirmation_unavailable"
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_confirmation_denial_finishes_without_starting_tool():
+    agent = FakeAgentService()
+    orchestrator, _, _ = make_orchestrator(agent_service=agent)
+    _ = [item async for item in orchestrator.submit_text("创建提醒", False)]
+
+    denied = [
+        item
+        async for item in orchestrator.resolve_tool_confirmation(
+            agent.confirmation_id, approved=False
+        )
+    ]
+
+    assert [item.type for item in denied] == [
+        "tool.failed",
+        "assistant.delta",
+        "assistant.done",
+    ]
+    assert denied[0].error_code == "confirmation_denied"
+    assert all(item.type != "tool.started" for item in denied)
+    assert agent.resume_calls[0][3] is False
     await orchestrator.stop()
 
 

@@ -97,6 +97,12 @@ class FakeOrchestrator:
             turn_id=7,
         )
 
+    async def resolve_tool_confirmation(self, confirmation_id: str, approved: bool):
+        self.calls.append(("resolve_tool_confirmation", confirmation_id, approved))
+        yield ErrorMessage(
+            type="error", code="resolved_tool", message="test", recoverable=True
+        )
+
     async def commit_audio(self):
         self.calls.append(("commit_audio",))
         yield ErrorMessage(
@@ -408,6 +414,14 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
         {"type": "voice.preview", "voice_key": "clear_female", "speed": 0.8},
         {"type": "voice.preview.cancel"},
         {"type": "turn.cancel"},
+        {
+            "type": "tool.confirm",
+            "confirmation_id": "00000000-0000-4000-8000-000000000002",
+        },
+        {
+            "type": "tool.deny",
+            "confirmation_id": "00000000-0000-4000-8000-000000000003",
+        },
         {"type": "audio.commit"},
     )
     for payload in payloads:
@@ -431,6 +445,16 @@ async def test_every_task_1_client_event_dispatches_to_exact_orchestrator_operat
         ("preview_voice", "clear_female", 0.8),
         ("cancel_preview",),
         ("cancel_active",),
+        (
+            "resolve_tool_confirmation",
+            "00000000-0000-4000-8000-000000000002",
+            True,
+        ),
+        (
+            "resolve_tool_confirmation",
+            "00000000-0000-4000-8000-000000000003",
+            False,
+        ),
         ("commit_audio",),
         ("accept_audio", frame),
     ]

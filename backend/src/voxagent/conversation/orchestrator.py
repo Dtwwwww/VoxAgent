@@ -8,6 +8,25 @@ from typing import Literal, TypeVar
 
 import numpy as np
 
+from voxagent.agent.events import (
+    AgentTextDelta,
+)
+from voxagent.agent.events import (
+    ToolApprovalRequired as AgentToolApprovalRequired,
+)
+from voxagent.agent.events import (
+    ToolCompleted as AgentToolCompleted,
+)
+from voxagent.agent.events import (
+    ToolFailed as AgentToolFailed,
+)
+from voxagent.agent.events import (
+    ToolStarted as AgentToolStarted,
+)
+from voxagent.agent.events import (
+    TurnDone as AgentTurnDone,
+)
+from voxagent.agent.service import AgentService
 from voxagent.conversation.context import ContextAssembler, MemoryProposalService
 from voxagent.conversation.events import (
     AsrFinal,
@@ -18,6 +37,10 @@ from voxagent.conversation.events import (
     ErrorMessage,
     MemoryProposed,
     ServerMessage,
+    ToolApprovalRequired,
+    ToolCompleted,
+    ToolFailed,
+    ToolStarted,
     TtsChunk,
     TtsDone,
     TtsError,
@@ -57,6 +80,14 @@ class _OutputBatch:
     terminal: bool = False
 
 
+@dataclass(slots=True)
+class _PendingAgentTurn:
+    token: TurnToken
+    answer: list[str]
+    last_tool_summary: str | None = None
+    last_tool_error: str | None = None
+
+
 class ConversationOrchestrator:
     """Coordinate one interruptible, session-scoped local conversation."""
 
@@ -79,6 +110,7 @@ class ConversationOrchestrator:
         memory_proposer: MemoryProposalService | None = None,
         memory_policy: MemoryPolicy | None = None,
         conversation_store: ConversationStore | None = None,
+        agent_service: AgentService | None = None,
     ) -> None:
         if not 2 <= max_utterance_frames <= MAX_UTTERANCE_FRAMES:
             raise ValueError(
@@ -100,8 +132,11 @@ class ConversationOrchestrator:
             MemoryPolicy() if memory_proposer is not None else None
         )
         self.conversation_store = conversation_store
+        self.agent_service = agent_service
         self._source_message_ids: dict[int, int] = {}
         self._voice_transcript_request_ids: dict[int, int] = {}
+        self._pending_tool_confirmations: dict[str, _PendingAgentTurn] = {}
+        self._pending_confirmation_by_turn: dict[int, str] = {}
         self._clock_ms = clock_ms or (lambda: int(monotonic() * 1000))
         default = next(profile for profile in voice_catalog.public_profiles() if profile.is_default)
         self._voice_key = default.voice_key
@@ -348,7 +383,8 @@ class ConversationOrchestrator:
             return
         async for output in self._drain(("turn", token.turn_id), token.cancelled):
             yield output
-        self._finish_active(token)
+        if token.turn_id not in self._pending_confirmation_by_turn:
+            self._finish_active(token)
 
     async def submit_text(self, text: str, speak_response: bool) -> AsyncIterator[Output]:
         async for item in self._submit_text_turn(
@@ -423,7 +459,8 @@ class ConversationOrchestrator:
             )
         async for output in self._drain(("turn", token.turn_id), token.cancelled):
             yield output
-        self._finish_active(token)
+        if token.turn_id not in self._pending_confirmation_by_turn:
+            self._finish_active(token)
 
     def select_voice(self, voice_key: str, speed: float) -> VoiceSelected | ErrorMessage:
         if self._is_closed():
@@ -544,6 +581,44 @@ class ConversationOrchestrator:
             await self._cancel_preview()
             return cancelled
 
+    async def resolve_tool_confirmation(
+        self, confirmation_id: str, approved: bool
+    ) -> AsyncIterator[Output]:
+        async with self._action_lock:
+            pending = self._pending_tool_confirmations.pop(confirmation_id, None)
+            if pending is None or self.agent_service is None:
+                error = self._error(
+                    "confirmation_unavailable",
+                    "该确认已失效、已使用或不属于当前会话",
+                )
+                token = None
+            else:
+                token = pending.token
+                expected = self._pending_confirmation_by_turn.get(token.turn_id)
+                if expected != confirmation_id or not self._owns_live_turn(token):
+                    error = self._error(
+                        "confirmation_unavailable",
+                        "该确认已失效、已使用或不属于当前会话",
+                    )
+                    token = None
+                else:
+                    error = None
+                    self._pending_confirmation_by_turn.pop(token.turn_id, None)
+                    await self._ensure_task_group()
+                    self._active_task = self._task_group.create_task(
+                        self._agent_resume_worker(
+                            pending, confirmation_id, approved
+                        ),
+                        name=f"agent-resume-{pending.token.turn_id}",
+                    )
+        if error is not None or token is None:
+            yield error
+            return
+        async for output in self._drain(("turn", token.turn_id), token.cancelled):
+            yield output
+        if token.turn_id not in self._pending_confirmation_by_turn:
+            self._finish_active(token)
+
     async def reset_conversation(self) -> None:
         async with self._action_lock:
             if self._is_closed():
@@ -597,6 +672,9 @@ class ConversationOrchestrator:
         )
 
     async def _reply_worker(self, token: TurnToken, speak_response: bool) -> None:
+        if self.agent_service is not None:
+            await self._agent_reply_worker(token)
+            return
         owner = ("turn", token.turn_id)
         chunker = SentenceChunker()
         answer: list[str] = []
@@ -759,6 +837,164 @@ class ConversationOrchestrator:
                     terminal=True,
                 )
             )
+
+    async def _agent_reply_worker(self, token: TurnToken) -> None:
+        assert self.agent_service is not None
+        pending = _PendingAgentTurn(token=token, answer=[])
+        events = self.agent_service.start_turn(
+            str(token.session_id), token.turn_id, self.history.messages_for_model()
+        )
+        await self._consume_agent_events(pending, events)
+
+    async def _agent_resume_worker(
+        self, pending: _PendingAgentTurn, confirmation_id: str, approved: bool
+    ) -> None:
+        assert self.agent_service is not None
+        token = pending.token
+        events = self.agent_service.resume_confirmation(
+            confirmation_id,
+            str(token.session_id),
+            token.turn_id,
+            approved=approved,
+        )
+        await self._consume_agent_events(pending, events)
+
+    async def _consume_agent_events(
+        self, pending: _PendingAgentTurn, events: AsyncIterator[object]
+    ) -> None:
+        token = pending.token
+        owner = ("turn", token.turn_id)
+        try:
+            async for event in events:
+                if token.cancelled.is_set():
+                    return
+                if isinstance(event, AgentTextDelta):
+                    if not event.delta.strip():
+                        continue
+                    pending.answer.append(event.delta)
+                    output: ServerMessage = AssistantDelta(
+                        type="assistant.delta",
+                        session_id=token.session_id,
+                        turn_id=token.turn_id,
+                        delta=event.delta,
+                    )
+                elif isinstance(event, AgentToolApprovalRequired):
+                    self._pending_tool_confirmations[event.confirmation_id] = pending
+                    self._pending_confirmation_by_turn[token.turn_id] = (
+                        event.confirmation_id
+                    )
+                    await self._emit(
+                        _OutputBatch(
+                            owner,
+                            (
+                                ToolApprovalRequired(
+                                    type="tool.approval_required",
+                                    session_id=token.session_id,
+                                    turn_id=token.turn_id,
+                                    confirmation_id=event.confirmation_id,
+                                    call_id=event.call_id,
+                                    tool_name=event.tool_name,
+                                    permission=event.permission.value,
+                                ),
+                            ),
+                            terminal=True,
+                        )
+                    )
+                    return
+                elif isinstance(event, AgentToolStarted):
+                    output = ToolStarted(
+                        type="tool.started",
+                        session_id=token.session_id,
+                        turn_id=token.turn_id,
+                        call_id=event.call_id,
+                        tool_name=event.tool_name,
+                    )
+                elif isinstance(event, AgentToolCompleted):
+                    pending.last_tool_summary = event.user_summary
+                    output = ToolCompleted(
+                        type="tool.completed",
+                        session_id=token.session_id,
+                        turn_id=token.turn_id,
+                        call_id=event.call_id,
+                        tool_name=event.tool_name,
+                        user_summary=event.user_summary,
+                    )
+                elif isinstance(event, AgentToolFailed):
+                    pending.last_tool_error = event.error_code
+                    output = ToolFailed(
+                        type="tool.failed",
+                        session_id=token.session_id,
+                        turn_id=token.turn_id,
+                        call_id=event.call_id,
+                        tool_name=event.tool_name,
+                        error_code=event.error_code,
+                    )
+                elif isinstance(event, AgentTurnDone):
+                    await self._complete_agent_turn(pending)
+                    return
+                else:
+                    raise RuntimeError("unsupported agent event")
+                await self._emit(_OutputBatch(owner, (output,)))
+            await self._complete_agent_turn(pending)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self._discard_pending_turn(token.turn_id)
+            await self._emit(
+                _OutputBatch(
+                    owner,
+                    (self._error("agent_failed", "本地 Agent 执行失败，请重试"),),
+                    terminal=True,
+                )
+            )
+
+    async def _complete_agent_turn(self, pending: _PendingAgentTurn) -> None:
+        token = pending.token
+        if token.cancelled.is_set():
+            return
+        if not pending.answer:
+            if pending.last_tool_summary:
+                fallback = pending.last_tool_summary
+            elif pending.last_tool_error == "confirmation_denied":
+                fallback = "已拒绝本次工具操作。"
+            elif pending.last_tool_error:
+                fallback = "工具操作未完成，请检查后重试。"
+            else:
+                fallback = EMPTY_VISIBLE_REPLY
+            pending.answer.append(fallback)
+            await self._emit(
+                _OutputBatch(
+                    ("turn", token.turn_id),
+                    (
+                        AssistantDelta(
+                            type="assistant.delta",
+                            session_id=token.session_id,
+                            turn_id=token.turn_id,
+                            delta=fallback,
+                        ),
+                    ),
+                )
+            )
+        assistant_text = "".join(pending.answer)
+        if self.conversation_store is not None:
+            await self.conversation_store.complete_assistant(
+                token.turn_id, assistant_text
+            )
+        self.history.complete_assistant(token.turn_id, assistant_text)
+        self._active_has_pending_history = False
+        await self._emit(
+            _OutputBatch(
+                ("turn", token.turn_id),
+                (
+                    AssistantDone(
+                        type="assistant.done",
+                        session_id=token.session_id,
+                        turn_id=token.turn_id,
+                    ),
+                ),
+                terminal=True,
+            )
+        )
 
     async def _memory_proposal_events(
         self,
@@ -1092,6 +1328,11 @@ class ConversationOrchestrator:
             self._active_task = None
             self._active_has_pending_history = False
             return None
+        if self.agent_service is not None:
+            self.agent_service.cancel(str(token.session_id), token.turn_id)
+        confirmation_id = self._pending_confirmation_by_turn.pop(token.turn_id, None)
+        if confirmation_id is not None:
+            self._pending_tool_confirmations.pop(confirmation_id, None)
         token.cancelled.set()
         self.state.cancel_active_turn()
         partial_task = self._partial_task if self._partial_token is token else None
@@ -1251,6 +1492,9 @@ class ConversationOrchestrator:
             self._output_changed.notify_all()
 
     def _finish_active(self, token: TurnToken) -> None:
+        confirmation_id = self._pending_confirmation_by_turn.pop(token.turn_id, None)
+        if confirmation_id is not None:
+            self._pending_tool_confirmations.pop(confirmation_id, None)
         self._voice_transcript_request_ids.pop(token.turn_id, None)
         if self._active_token is token:
             self._active_task = None

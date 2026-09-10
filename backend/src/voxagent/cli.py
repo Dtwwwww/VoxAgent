@@ -1,14 +1,16 @@
 import asyncio
 import json
 from dataclasses import asdict
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated
 
 import httpx
 import typer
 import uvicorn
+from langgraph.checkpoint.memory import MemorySaver
 
+from voxagent.agent.service import AgentService
 from voxagent.api.app import _validate_session_token, create_app
 from voxagent.api.data import LocalDataService
 from voxagent.api.knowledge import LocalKnowledgeService
@@ -60,6 +62,10 @@ from voxagent.speech.voice_selection import (
     VoiceSelectionError,
     publish_approved_voice_artifacts,
 )
+from voxagent.tools.app_launcher import WindowsAllowlistedLauncher
+from voxagent.tools.builtin import build_builtin_registry
+from voxagent.tools.confirmation import ConfirmationService
+from voxagent.tools.repository import ToolRepository
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -189,6 +195,21 @@ def _create_production_app(session_token: str):
     memory_service = LocalMemoryService(database_path, embedder, mutation_lock)
     data_service = LocalDataService(database_path, paths.data, mutation_lock)
     backup_manager = DailyBackupManager(paths.data / "backups")
+    tool_repository = ToolRepository(database)
+    tool_registry = build_builtin_registry(
+        database,
+        context_source,
+        WindowsAllowlistedLauncher(),
+    )
+    agent_service = AgentService(
+        model_name=model_id,
+        model=ollama,
+        registry=tool_registry,
+        repository=tool_repository,
+        confirmation=ConfirmationService(tool_repository, tool_registry),
+        checkpointer=MemorySaver(),
+        now_utc=lambda: datetime.now(UTC),
+    )
 
     def orchestrator_factory() -> ConversationOrchestrator:
         final_asr = SenseVoiceAsr.from_model_dir(
@@ -231,6 +252,7 @@ def _create_production_app(session_token: str):
             context_assembler=context_assembler,
             memory_proposer=memory_proposer,
             conversation_store=SqliteConversationStore(database_path, mutation_lock),
+            agent_service=agent_service,
         )
 
     async def shutdown() -> None:
@@ -248,6 +270,7 @@ def _create_production_app(session_token: str):
         memory_service=memory_service,
         persona_service=persona_service,
         data_service=data_service,
+        tool_audit_reader=tool_repository,
     )
     application.state.ollama_http = http
     application.state.plan3_database = database
