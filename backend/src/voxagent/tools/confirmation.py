@@ -119,3 +119,23 @@ class ConfirmationService:
             raise ConfirmationError("confirmation_unavailable")
         return validated_call
 
+    def deny(
+        self,
+        confirmation_id: str,
+        session_id: str,
+        turn_id: int,
+        now_utc: datetime,
+    ) -> None:
+        try:
+            ticket, record = self._repository.get_confirmation_request(confirmation_id)
+        except KeyError as error:
+            raise ConfirmationError("confirmation_unavailable") from error
+        if ticket.arguments_sha256 != record.arguments_sha256:
+            raise ConfirmationError("confirmation_tampered")
+        if not self._repository.deny_confirmation(
+            confirmation_id,
+            session_id,
+            turn_id,
+            now_utc,
+        ):
+            raise ConfirmationError("confirmation_unavailable")

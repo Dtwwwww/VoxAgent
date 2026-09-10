@@ -240,6 +240,30 @@ class ToolRepository:
             decision=None,
         )
 
+    def start_request(
+        self,
+        tool_request_id: int,
+        arguments_sha256: str,
+        now_utc: datetime,
+    ) -> bool:
+        digest = _validate_sha256(arguments_sha256)
+        timestamp = _utc_text(now_utc)
+        with self._write():
+            result = self._connection.execute(
+                """
+                UPDATE tool_requests
+                SET status = 'running'
+                WHERE id = ?
+                  AND arguments_sha256 = ?
+                  AND status = 'pending'
+                """,
+                (tool_request_id, digest),
+            )
+            if result.rowcount != 1:
+                return False
+            self._audit(tool_request_id, "request.started", {}, timestamp)
+        return True
+
     def consume_confirmation(
         self,
         confirmation_id: str,
@@ -288,6 +312,58 @@ class ToolRepository:
             )
             self._audit(tool_request_id, "confirmation.approved", {}, timestamp)
         return True
+
+    def deny_confirmation(
+        self,
+        confirmation_id: str,
+        session_id: str,
+        turn_id: int,
+        now_utc: datetime,
+    ) -> ToolRequestRecord | None:
+        timestamp = _utc_text(now_utc)
+        with self._write():
+            result = self._connection.execute(
+                """
+                UPDATE tool_confirmations
+                SET consumed_at_utc = ?, decision = 'denied'
+                WHERE confirmation_id = ?
+                  AND consumed_at_utc IS NULL
+                  AND decision IS NULL
+                  AND expires_at_utc > ?
+                  AND EXISTS (
+                      SELECT 1 FROM tool_requests
+                      WHERE tool_requests.id = tool_confirmations.tool_request_id
+                        AND tool_requests.session_id = ?
+                        AND tool_requests.turn_id = ?
+                        AND tool_requests.status = 'awaiting_confirmation'
+                        AND tool_requests.arguments_sha256 = tool_confirmations.arguments_sha256
+                  )
+                """,
+                (timestamp, confirmation_id, timestamp, session_id, turn_id),
+            )
+            if result.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                """
+                SELECT tool_request_id
+                FROM tool_confirmations
+                WHERE confirmation_id = ?
+                """,
+                (confirmation_id,),
+            ).fetchone()
+            tool_request_id = int(row["tool_request_id"])
+            self._connection.execute(
+                """
+                UPDATE tool_requests
+                SET status = 'denied', finished_at_utc = ?
+                WHERE id = ?
+                  AND status = 'awaiting_confirmation'
+                """,
+                (timestamp, tool_request_id),
+            )
+            self._audit(tool_request_id, "confirmation.denied", {}, timestamp)
+            self._audit(tool_request_id, "request.denied", {}, timestamp)
+        return self._get_request(tool_request_id)
 
     def get_confirmation_request(
         self,
