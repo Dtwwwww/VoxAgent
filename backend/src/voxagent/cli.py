@@ -10,6 +10,7 @@ import typer
 import uvicorn
 from langgraph.checkpoint.memory import MemorySaver
 
+from voxagent.agent.evaluation import evaluate_agent, load_dataset
 from voxagent.agent.service import AgentService
 from voxagent.api.app import _validate_session_token, create_app
 from voxagent.api.data import LocalDataService
@@ -83,6 +84,42 @@ def show_paths(
     paths = AppPaths.from_root(resolve_data_root(data_root))
     paths.create()
     typer.echo(str(paths.root))
+
+
+@app.command("evaluate-agent")
+def evaluate_agent_command(
+    dataset: Annotated[Path, typer.Option("--dataset", dir_okay=False)],
+    mode: Annotated[str, typer.Option("--mode")] = "fake",
+    model: Annotated[str, typer.Option("--model")] = "qwen3:4b",
+) -> None:
+    if mode not in {"fake", "local"}:
+        raise typer.BadParameter("--mode must be fake or local")
+    try:
+        cases = load_dataset(dataset.resolve())
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise typer.BadParameter(
+            f"invalid Agent dataset: {error}", param_hint="--dataset"
+        ) from error
+
+    async def execute():
+        if mode == "fake":
+            return await evaluate_agent(
+                cases, mode="fake", model_name=model
+            )
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:11434", trust_env=False
+        ) as http:
+            return await evaluate_agent(
+                cases,
+                mode="local",
+                model_name=model,
+                model=OllamaClient(http),
+            )
+
+    report = asyncio.run(execute())
+    typer.echo(report.model_dump_json(indent=2))
+    if report.passed != report.total:
+        raise typer.Exit(code=1)
 
 
 @app.command("preflight")

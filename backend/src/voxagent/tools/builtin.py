@@ -29,15 +29,8 @@ from voxagent.tools.schema import PermissionLevel, ToolDefinition
 NowProvider = Callable[[], datetime]
 
 
-def build_builtin_registry(
-    connection: sqlite3.Connection,
-    knowledge_source: KnowledgeSource,
-    launcher: Launcher,
-    *,
-    now_utc: NowProvider = lambda: datetime.now(UTC),
-) -> ToolRegistry:
-    registry = ToolRegistry()
-    registry.register(
+def builtin_definitions() -> tuple[ToolDefinition, ...]:
+    return (
         ToolDefinition(
             name="knowledge.search",
             description="Search imported local knowledge chunks.",
@@ -46,9 +39,6 @@ def build_builtin_registry(
             timeout_seconds=5,
             provider="native",
         ),
-        build_knowledge_search_executor(knowledge_source),
-    )
-    registry.register(
         ToolDefinition(
             name="files.search_authorized",
             description="Search file names inside one authorized directory.",
@@ -57,9 +47,6 @@ def build_builtin_registry(
             timeout_seconds=5,
             provider="native",
         ),
-        build_file_search_executor(connection),
-    )
-    registry.register(
         ToolDefinition(
             name="reminders.list",
             description="List open reminders.",
@@ -68,9 +55,6 @@ def build_builtin_registry(
             timeout_seconds=3,
             provider="native",
         ),
-        build_reminder_list_executor(connection),
-    )
-    registry.register(
         ToolDefinition(
             name="reminders.create",
             description="Create a local reminder.",
@@ -79,9 +63,6 @@ def build_builtin_registry(
             timeout_seconds=3,
             provider="native",
         ),
-        build_reminder_create_executor(connection, now_utc),
-    )
-    registry.register(
         ToolDefinition(
             name="reminders.complete",
             description="Complete an open reminder.",
@@ -90,9 +71,6 @@ def build_builtin_registry(
             timeout_seconds=3,
             provider="native",
         ),
-        build_reminder_complete_executor(connection, now_utc),
-    )
-    registry.register(
         ToolDefinition(
             name="apps.open_allowlisted",
             description="Open one allowlisted local Windows app.",
@@ -101,7 +79,26 @@ def build_builtin_registry(
             timeout_seconds=3,
             provider="native",
         ),
-        build_app_launcher_executor(launcher),
     )
+
+
+def build_builtin_registry(
+    connection: sqlite3.Connection,
+    knowledge_source: KnowledgeSource,
+    launcher: Launcher,
+    *,
+    now_utc: NowProvider = lambda: datetime.now(UTC),
+) -> ToolRegistry:
+    registry = ToolRegistry()
+    executors = {
+        "knowledge.search": build_knowledge_search_executor(knowledge_source),
+        "files.search_authorized": build_file_search_executor(connection),
+        "reminders.list": build_reminder_list_executor(connection),
+        "reminders.create": build_reminder_create_executor(connection, now_utc),
+        "reminders.complete": build_reminder_complete_executor(connection, now_utc),
+        "apps.open_allowlisted": build_app_launcher_executor(launcher),
+    }
+    for definition in builtin_definitions():
+        registry.register(definition, executors[definition.name])
     registry.freeze()
     return registry
