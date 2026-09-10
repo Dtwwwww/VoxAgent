@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 _UTC_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
@@ -103,6 +103,72 @@ _MIGRATION_003 = (
     """,
 )
 
+_MIGRATION_004 = (
+    """
+    CREATE TABLE authorized_roots (
+        id INTEGER PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        canonical_path TEXT NOT NULL UNIQUE,
+        created_at_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE reminders (
+        id INTEGER PRIMARY KEY,
+        title TEXT NOT NULL,
+        due_at_utc TEXT,
+        status TEXT NOT NULL CHECK (status IN ('open','completed')),
+        created_at_utc TEXT NOT NULL,
+        completed_at_utc TEXT
+    )
+    """,
+    """
+    CREATE TABLE tool_requests (
+        id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        turn_id INTEGER NOT NULL,
+        call_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
+        arguments_sha256 TEXT NOT NULL CHECK (length(arguments_sha256) = 64),
+        permission TEXT NOT NULL CHECK (permission IN ('L0','L1','L2')),
+        status TEXT NOT NULL CHECK (
+            status IN (
+                'pending',
+                'awaiting_confirmation',
+                'running',
+                'succeeded',
+                'failed',
+                'denied',
+                'expired'
+            )
+        ),
+        created_at_utc TEXT NOT NULL,
+        finished_at_utc TEXT,
+        UNIQUE(session_id, turn_id, call_id)
+    )
+    """,
+    """
+    CREATE TABLE tool_confirmations (
+        confirmation_id TEXT PRIMARY KEY,
+        tool_request_id INTEGER NOT NULL REFERENCES tool_requests(id) ON DELETE CASCADE,
+        arguments_sha256 TEXT NOT NULL,
+        expires_at_utc TEXT NOT NULL,
+        consumed_at_utc TEXT,
+        decision TEXT CHECK (decision IN ('approved','denied'))
+    )
+    """,
+    """
+    CREATE TABLE tool_audit (
+        id INTEGER PRIMARY KEY,
+        tool_request_id INTEGER NOT NULL REFERENCES tool_requests(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        detail_json TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL
+    )
+    """,
+)
+
 
 def migrate(connection: sqlite3.Connection) -> int:
     """Atomically migrate a database to the latest supported schema."""
@@ -138,6 +204,13 @@ def migrate(connection: sqlite3.Connection) -> int:
             for statement in _MIGRATION_003:
                 connection.execute(statement)
             current_version = 3
+            connection.execute(
+                "UPDATE schema_version SET version = ?", (current_version,)
+            )
+        if current_version == 3:
+            for statement in _MIGRATION_004:
+                connection.execute(statement)
+            current_version = 4
             connection.execute(
                 "UPDATE schema_version SET version = ?", (current_version,)
             )
