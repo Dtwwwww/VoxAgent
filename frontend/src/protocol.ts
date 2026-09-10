@@ -9,6 +9,8 @@ export type ClientEvent =
   | { type: "voice.preview"; voice_key: string; speed: VoiceSpeed }
   | { type: "voice.preview.cancel" }
   | { type: "turn.cancel" }
+  | { type: "tool.confirm"; confirmation_id: string }
+  | { type: "tool.deny"; confirmation_id: string }
   | { type: "audio.commit" }
   | { type: "session.stop" };
 
@@ -61,6 +63,16 @@ export type ServerEvent =
   | ({ type: "asr.partial"; text: string } & TurnFields)
   | ({ type: "assistant.delta"; delta: string } & TurnFields)
   | ({ type: "assistant.done" } & TurnFields)
+  | ({
+      type: "tool.approval_required";
+      confirmation_id: string;
+      call_id: string;
+      tool_name: string;
+      permission: "L1" | "L2";
+    } & TurnFields)
+  | ({ type: "tool.started"; call_id: string; tool_name: string } & TurnFields)
+  | ({ type: "tool.completed"; call_id: string; tool_name: string; user_summary: string } & TurnFields)
+  | ({ type: "tool.failed"; call_id: string; tool_name: string; error_code: string } & TurnFields)
   | ({ type: "context.sources"; memories: ContextMemorySource[]; knowledge: ContextKnowledgeSource[] } & TurnFields)
   | ({
       type: "memory.proposed";
@@ -191,6 +203,11 @@ export function parseClientEvent(value: unknown): ClientEvent {
       const object = objectWithExactKeys(value, ["type", "voice_key", "speed"]);
       return { type, voice_key: string(object.voice_key, "voice_key"), speed: speed(object.speed) };
     }
+    case "tool.confirm":
+    case "tool.deny": {
+      const object = objectWithExactKeys(value, ["type", "confirmation_id"]);
+      return { type, confirmation_id: uuid(object.confirmation_id) };
+    }
     default:
       throw new TypeError(`unknown client event: ${type}`);
   }
@@ -250,6 +267,53 @@ export function parseServerEvent(value: unknown): ServerEvent {
     case "assistant.done": {
       const object = turnObject(value);
       return { type, session_id: object.session_id as string, turn_id: object.turn_id as number };
+    }
+    case "tool.approval_required": {
+      const object = turnObject(value, ["confirmation_id", "call_id", "tool_name", "permission"]);
+      if (object.permission !== "L1" && object.permission !== "L2") {
+        throw new TypeError("tool permission must be L1 or L2");
+      }
+      return {
+        type,
+        session_id: object.session_id as string,
+        turn_id: object.turn_id as number,
+        confirmation_id: uuid(object.confirmation_id),
+        call_id: string(object.call_id, "call_id"),
+        tool_name: string(object.tool_name, "tool_name"),
+        permission: object.permission,
+      };
+    }
+    case "tool.started": {
+      const object = turnObject(value, ["call_id", "tool_name"]);
+      return {
+        type,
+        session_id: object.session_id as string,
+        turn_id: object.turn_id as number,
+        call_id: string(object.call_id, "call_id"),
+        tool_name: string(object.tool_name, "tool_name"),
+      };
+    }
+    case "tool.completed": {
+      const object = turnObject(value, ["call_id", "tool_name", "user_summary"]);
+      return {
+        type,
+        session_id: object.session_id as string,
+        turn_id: object.turn_id as number,
+        call_id: string(object.call_id, "call_id"),
+        tool_name: string(object.tool_name, "tool_name"),
+        user_summary: string(object.user_summary, "user_summary"),
+      };
+    }
+    case "tool.failed": {
+      const object = turnObject(value, ["call_id", "tool_name", "error_code"]);
+      return {
+        type,
+        session_id: object.session_id as string,
+        turn_id: object.turn_id as number,
+        call_id: string(object.call_id, "call_id"),
+        tool_name: string(object.tool_name, "tool_name"),
+        error_code: string(object.error_code, "error_code"),
+      };
     }
     case "turn.cancelled": {
       const object = turnObject(value, [], ["request_id"]);

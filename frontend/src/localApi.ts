@@ -48,6 +48,22 @@ export interface BackupInfo {
   size_bytes: number;
 }
 
+export interface ToolAuditRecord {
+  id: number;
+  request_id: number;
+  session_id: string;
+  turn_id: number;
+  call_id: string;
+  tool_name: string;
+  event_type: string;
+  detail: {
+    duration_ms?: number;
+    error_code?: string | null;
+    recovered_from?: string;
+  };
+  created_at_utc: string;
+}
+
 export interface LocalApiClient {
   listMemories(): Promise<MemoryRecord[]>;
   createMemory(input: MemoryCreate): Promise<MemoryRecord>;
@@ -59,6 +75,7 @@ export interface LocalApiClient {
   resetAll(): Promise<void>;
   listBackups(): Promise<BackupInfo[]>;
   deleteBackup(filename: string): Promise<void>;
+  listToolAudit(limit?: number, offset?: number): Promise<ToolAuditRecord[]>;
 }
 
 async function checked(response: Response): Promise<Response> {
@@ -117,6 +134,10 @@ export function createLocalApiClient(baseUrl: string, token: string): LocalApiCl
       }));
     },
     listBackups: () => json("/v1/backups", { headers }),
+    listToolAudit: (limit = 50, offset = 0) => json(
+      `/v1/tool-audit?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+      { headers },
+    ),
     async deleteBackup(filename) {
       await checked(await fetch(`${baseUrl}/v1/backups/${encodeURIComponent(filename)}`, {
         method: "DELETE", headers,

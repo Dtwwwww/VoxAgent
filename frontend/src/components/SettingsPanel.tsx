@@ -5,8 +5,9 @@ import type { LocalApiClient } from "../localApi";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { PersonaPanel } from "../persona/PersonaPanel";
 import { Icon } from "./Icon";
+import { ToolAuditPanel } from "./ToolAuditPanel";
 
-type SettingsTab = "persona" | "memory" | "data";
+type SettingsTab = "persona" | "memory" | "data" | "audit";
 
 export function SettingsPanel({
   open,
@@ -38,18 +39,19 @@ export function SettingsPanel({
         <button type="button" className="icon-button" aria-label="关闭设置" onClick={onClose}><Icon name="close" /></button>
       </header>
       <div className="settings-tabs" role="tablist" aria-label="设置分类">
-        {(["persona", "memory", "data"] as const).map((value) => <button
+        {(["persona", "memory", "data", "audit"] as const).map((value) => <button
           type="button"
           role="tab"
           aria-selected={tab === value}
           key={value}
           onClick={() => setTab(value)}
-        >{{ persona: "人格", memory: "记忆", data: "数据" }[value]}</button>)}
+        >{{ persona: "人格", memory: "记忆", data: "数据", audit: "工具审计" }[value]}</button>)}
       </div>
       <div className="settings-panel__body">
         {tab === "persona" && <PersonaPanel client={client} />}
         {tab === "memory" && <MemoryPanel client={client} />}
         {tab === "data" && <DataPanel client={client} onReset={onReset} />}
+        {tab === "audit" && <ToolAuditPanel client={client} />}
       </div>
     </section>
   </div>;

@@ -39,6 +39,7 @@ function api(): LocalApiClient {
     resetAll: vi.fn(),
     listBackups: vi.fn(async () => []),
     deleteBackup: vi.fn(),
+    listToolAudit: vi.fn(async () => []),
   };
 }
 

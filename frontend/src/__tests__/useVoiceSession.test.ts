@@ -265,6 +265,11 @@ describe("the frozen WebSocket protocol", () => {
     for (const event of fixtures.invalid_client) expect(() => parseClientEvent(event)).toThrow();
     for (const event of fixtures.valid_server) expect(() => parseServerEvent(event)).not.toThrow();
     for (const event of fixtures.invalid_server) expect(() => parseServerEvent(event)).toThrow();
+    expect(() => parseClientEvent({
+      type: "tool.confirm",
+      confirmation_id: "00000000-0000-4000-8000-000000000002",
+      arguments: { title: "must not cross the trust boundary" },
+    })).toThrow();
   });
 
   it("rejects decimal JSON tokens for protocol fields frozen as strict integers", () => {
@@ -569,6 +574,66 @@ describe("queued native-rate playback", () => {
 });
 
 describe("useVoiceSession", () => {
+  it("tracks one approval and sends only its id through confirmation transitions", () => {
+    const { hook, socket } = openSession();
+    emit(socket, {
+      type: "tool.approval_required",
+      session_id: SESSION_ID,
+      turn_id: 4,
+      confirmation_id: "00000000-0000-4000-8000-000000000002",
+      call_id: "call-1",
+      tool_name: "reminders.create",
+      permission: "L1",
+    });
+
+    expect(hook.result.current.pendingToolApproval).toEqual({
+      confirmationId: "00000000-0000-4000-8000-000000000002",
+      turnId: 4,
+      callId: "call-1",
+      toolName: "reminders.create",
+      permission: "L1",
+      status: "pending",
+    });
+    act(() => hook.result.current.confirmTool("00000000-0000-4000-8000-000000000002"));
+    expect(socket.jsonMessages().at(-1)).toEqual({
+      type: "tool.confirm",
+      confirmation_id: "00000000-0000-4000-8000-000000000002",
+    });
+    expect(hook.result.current.pendingToolApproval?.status).toBe("submitted");
+
+    emit(socket, {
+      type: "tool.started", session_id: SESSION_ID, turn_id: 4,
+      call_id: "call-1", tool_name: "reminders.create",
+    });
+    expect(hook.result.current.pendingToolApproval).toBeNull();
+    expect(hook.result.current.recentToolActivity.at(-1)?.status).toBe("running");
+    emit(socket, {
+      type: "tool.completed", session_id: SESSION_ID, turn_id: 4,
+      call_id: "call-1", tool_name: "reminders.create", user_summary: "created",
+    });
+    expect(hook.result.current.recentToolActivity.at(-1)).toMatchObject({ status: "completed", summary: "created" });
+
+    emit(socket, {
+      type: "tool.approval_required",
+      session_id: SESSION_ID,
+      turn_id: 5,
+      confirmation_id: "00000000-0000-4000-8000-000000000003",
+      call_id: "call-2",
+      tool_name: "apps.open_allowlisted",
+      permission: "L2",
+    });
+    act(() => hook.result.current.denyTool("00000000-0000-4000-8000-000000000003"));
+    expect(socket.jsonMessages().at(-1)).toEqual({
+      type: "tool.deny",
+      confirmation_id: "00000000-0000-4000-8000-000000000003",
+    });
+    emit(socket, {
+      type: "tool.failed", session_id: SESSION_ID, turn_id: 5,
+      call_id: "call-2", tool_name: "apps.open_allowlisted", error_code: "confirmation_denied",
+    });
+    expect(hook.result.current.recentToolActivity.at(-1)).toMatchObject({ status: "failed", errorCode: "confirmation_denied" });
+  });
+
   it("updates delayed browser voices without starting a call and cleans up its listener", () => {
     const originalSpeechSynthesis = Object.getOwnPropertyDescriptor(window, "speechSynthesis");
     let voices: SpeechSynthesisVoice[] = [];

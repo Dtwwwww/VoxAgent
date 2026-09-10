@@ -19,6 +19,24 @@
   text-rendering: optimizeLegibility;
 }
 
+.tool-approval {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent, #6b5cff) 35%, transparent);
+  border-radius: 14px;
+  background: var(--surface, #fff);
+}
+
+.tool-approval__copy { display: grid; gap: 3px; }
+.tool-approval__copy code { font-size: 12px; opacity: .72; }
+.tool-approval__copy span, .tool-approval__copy p { margin: 0; font-size: 13px; color: var(--muted, #667085); }
+.tool-approval__actions { display: flex; gap: 8px; flex-shrink: 0; }
+.tool-approval__actions button { padding: 8px 12px; border-radius: 9px; }
+.tool-activity { display: flex; justify-content: space-between; margin: 0; padding: 8px 12px; font-size: 13px; }
+
 * {
   box-sizing: border-box;
 }

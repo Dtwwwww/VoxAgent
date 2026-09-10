@@ -25,6 +25,8 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     speakingTurnId: null,
     previewingVoiceKey: null,
     memoryProposals: [],
+    pendingToolApproval: null,
+    recentToolActivity: [],
     realtime: {
       active: false,
       state: "off",
@@ -55,6 +57,8 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     stopVoicePreview: vi.fn(),
     cancelActive: vi.fn(),
     dismissMemoryProposal: vi.fn(),
+    confirmTool: vi.fn(),
+    denyTool: vi.fn(),
     clearLocalData: vi.fn(),
     startRealtimeCall: vi.fn(async () => undefined),
     stopRealtimeCall: vi.fn(async () => undefined),

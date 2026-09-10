@@ -5,6 +5,7 @@ import { Conversation } from "./components/Conversation";
 import { ErrorNotice } from "./components/ErrorNotice";
 import { Header } from "./components/Header";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ToolActivityStatus, ToolApprovalCard } from "./components/ToolApprovalCard";
 import { VoiceStatus } from "./components/VoiceStatus";
 import { VoicePicker } from "./components/VoicePicker";
 import { KnowledgePanel } from "./knowledge/KnowledgePanel";
@@ -84,6 +85,13 @@ export function App({ controller, knowledgeClient, localApiClient }: AppProps) {
         <div className="message__meta"><span className="message__speaker">用户（识别中）</span></div>
         <div className="message__bubble"><p>{interimText}</p></div>
       </article>}
+      {controller.pendingToolApproval && <ToolApprovalCard
+        key={controller.pendingToolApproval.confirmationId}
+        approval={controller.pendingToolApproval}
+        onConfirm={() => controller.confirmTool(controller.pendingToolApproval!.confirmationId)}
+        onDeny={() => controller.denyTool(controller.pendingToolApproval!.confirmationId)}
+      />}
+      {!controller.pendingToolApproval && <ToolActivityStatus activity={controller.recentToolActivity.at(-1)} />}
       <VoiceStatus connectionStatus={controller.connectionStatus} voiceStatus={controller.voiceStatus} realtime={controller.realtime} />
       <Composer controller={controller} />
     </div>

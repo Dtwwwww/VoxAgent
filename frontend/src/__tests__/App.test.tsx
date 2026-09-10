@@ -33,6 +33,8 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     speakingTurnId: null,
     previewingVoiceKey: null,
     memoryProposals: [],
+    pendingToolApproval: null,
+    recentToolActivity: [],
     realtime: { active: false, state: "off", provider: null, interimText: "", inputLevel: 0, fallbackReason: null, notice: null },
     microphones: [],
     selectedMicrophoneId: null,
@@ -52,6 +54,8 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     stopVoicePreview: vi.fn(),
     cancelActive: vi.fn(),
     dismissMemoryProposal: vi.fn(),
+    confirmTool: vi.fn(),
+    denyTool: vi.fn(),
     clearLocalData: vi.fn(),
     startRealtimeCall: vi.fn(async () => undefined),
     stopRealtimeCall: vi.fn(async () => undefined),
@@ -64,6 +68,76 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
 }
 
 describe("App", () => {
+  it("loads sanitized tool audit only on demand and retries failures", async () => {
+    const listToolAudit = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce([{
+        id: 9,
+        request_id: 4,
+        session_id: "session-safe",
+        turn_id: 2,
+        call_id: "call-safe",
+        tool_name: "reminders.create",
+        event_type: "tool.completed",
+        detail: { duration_ms: 12, error_code: null, recovered_from: "retry", arguments: "SECRET" },
+        created_at_utc: "2026-09-11T00:00:00Z",
+      }]);
+    const localApiClient = {
+      getPersona: vi.fn(async () => ({ revision: 0, config: {
+        name: "声灵", user_address: "用户", background: "本地伙伴", traits: "温和",
+        relationship: "陪伴与助手", style: "简洁", initiative: "适度主动",
+        boundaries: "尊重用户", default_reply_length: "两到四句",
+      } })),
+      listToolAudit,
+    } as unknown as LocalApiClient;
+    render(<App controller={controller()} localApiClient={localApiClient} />);
+
+    expect(listToolAudit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(listToolAudit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "工具审计" }));
+    expect(await screen.findByText("加载工具审计失败。")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    expect(await screen.findByText("reminders.create")).toBeVisible();
+    expect(screen.getByText("12 ms")).toBeVisible();
+    expect(screen.getByText("恢复自 retry")).toBeVisible();
+    expect(document.body).not.toHaveTextContent("SECRET");
+    expect(listToolAudit).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a one-shot tool approval without exposing arguments", () => {
+    const session = controller({
+      pendingToolApproval: {
+        confirmationId: "00000000-0000-4000-8000-000000000002",
+        turnId: 4,
+        callId: "call-1",
+        toolName: "reminders.create",
+        permission: "L1",
+        status: "pending",
+      },
+      recentToolActivity: [{
+        turnId: 3,
+        callId: "call-0",
+        toolName: "knowledge.search",
+        status: "completed",
+        summary: "arguments: private path",
+      }],
+    });
+    render(<App controller={session} />);
+
+    const card = screen.getByRole("region", { name: "工具执行确认" });
+    expect(card).toHaveTextContent("创建提醒");
+    expect(card).toHaveTextContent("reminders.create");
+    expect(card).toHaveTextContent("L1");
+    expect(card).toHaveTextContent("仅允许本次执行");
+    expect(card).not.toHaveTextContent("private path");
+    fireEvent.click(within(card).getByRole("button", { name: "允许一次" }));
+    expect(session.confirmTool).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000002");
+    expect(within(card).getByRole("button", { name: "允许一次" })).toBeDisabled();
+    expect(within(card).getByRole("button", { name: "拒绝" })).toBeDisabled();
+  });
+
   it("opens lazy settings tabs and keeps them separate from the voice picker", async () => {
     const localApiClient = {
       getPersona: vi.fn(async () => ({ revision: 0, config: {

@@ -50,6 +50,24 @@ export interface MemoryProposal {
   requiresConfirmation: boolean;
 }
 
+export interface ToolApproval {
+  confirmationId: string;
+  turnId: number;
+  callId: string;
+  toolName: string;
+  permission: "L1" | "L2";
+  status: "pending" | "submitted";
+}
+
+export interface ToolActivity {
+  turnId: number;
+  callId: string;
+  toolName: string;
+  status: "running" | "completed" | "failed";
+  summary?: string;
+  errorCode?: string;
+}
+
 export interface VoiceSessionOptions {
   url: string;
 }
@@ -67,6 +85,8 @@ export interface VoiceSessionController {
   speakingTurnId: number | null;
   previewingVoiceKey: string | null;
   memoryProposals: MemoryProposal[];
+  pendingToolApproval: ToolApproval | null;
+  recentToolActivity: ToolActivity[];
   realtime: RealtimeSnapshot;
   microphones: MicrophoneDevice[];
   selectedMicrophoneId: string | null;
@@ -87,6 +107,8 @@ export interface VoiceSessionController {
   stopVoicePreview(): void;
   cancelActive(): void;
   dismissMemoryProposal(id: string): void;
+  confirmTool(confirmationId: string): void;
+  denyTool(confirmationId: string): void;
   clearLocalData(): void;
   startRealtimeCall(): Promise<void>;
   stopRealtimeCall(): Promise<void>;
@@ -128,6 +150,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const [speakingTurnId, setSpeakingTurnId] = useState<number | null>(null);
   const [previewingVoiceKey, setPreviewingVoiceKey] = useState<string | null>(null);
   const [memoryProposals, setMemoryProposals] = useState<MemoryProposal[]>([]);
+  const [pendingToolApproval, setPendingToolApproval] = useState<ToolApproval | null>(null);
+  const [recentToolActivity, setRecentToolActivity] = useState<ToolActivity[]>([]);
   const [realtime, setRealtime] = useState<RealtimeSnapshot>({ ...OFF_REALTIME_SNAPSHOT });
   const [microphones, setMicrophones] = useState<MicrophoneDevice[]>([]);
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState<string | null>(initialSettings.microphoneDeviceId);
@@ -472,6 +496,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         previewRequestedRef.current = false;
         activePreviewIdRef.current = null;
         expectedPreviewIdRef.current = 0;
+        setPendingToolApproval(null);
+        setRecentToolActivity([]);
         setConnectionStatus("connected");
         setModelId(event.model_id);
         setOffline(event.offline);
@@ -587,6 +613,54 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         }
         setVoiceStatus((current) => current === "thinking" ? "idle" : current);
         break;
+      case "tool.approval_required":
+        setPendingToolApproval({
+          confirmationId: event.confirmation_id,
+          turnId: event.turn_id,
+          callId: event.call_id,
+          toolName: event.tool_name,
+          permission: event.permission,
+          status: "pending",
+        });
+        break;
+      case "tool.started":
+        setPendingToolApproval((current) => current?.callId === event.call_id ? null : current);
+        setRecentToolActivity((current) => [
+          ...current.filter((item) => item.callId !== event.call_id),
+          {
+            turnId: event.turn_id,
+            callId: event.call_id,
+            toolName: event.tool_name,
+            status: "running" as const,
+          },
+        ].slice(-5));
+        break;
+      case "tool.completed":
+        setPendingToolApproval((current) => current?.callId === event.call_id ? null : current);
+        setRecentToolActivity((current) => [
+          ...current.filter((item) => item.callId !== event.call_id),
+          {
+            turnId: event.turn_id,
+            callId: event.call_id,
+            toolName: event.tool_name,
+            status: "completed" as const,
+            summary: event.user_summary,
+          },
+        ].slice(-5));
+        break;
+      case "tool.failed":
+        setPendingToolApproval((current) => current?.callId === event.call_id ? null : current);
+        setRecentToolActivity((current) => [
+          ...current.filter((item) => item.callId !== event.call_id),
+          {
+            turnId: event.turn_id,
+            callId: event.call_id,
+            toolName: event.tool_name,
+            status: "failed" as const,
+            errorCode: event.error_code,
+          },
+        ].slice(-5));
+        break;
       case "memory.proposed": {
         const proposal: MemoryProposal = {
           id: `${event.turn_id}:${event.proposal_index}`,
@@ -603,6 +677,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         break;
       }
       case "turn.cancelled":
+        setPendingToolApproval((current) => current?.turnId === event.turn_id ? null : current);
         if (event.request_id !== undefined) {
           const pendingMatches = pendingBrowserTranscriptRequestRef.current === event.request_id;
           const activeMatches = activeBrowserTranscriptRef.current?.requestId === event.request_id
@@ -742,6 +817,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       socketRef.current = null;
       void stopLocalResources();
       setConnectionStatus("disconnected");
+      setPendingToolApproval(null);
       if (event.code !== 1000) {
         failConnection(event.code);
       }
@@ -1221,12 +1297,29 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     playbackRef.current.stopAll();
     setSpeakingTurnId(null);
     setPreviewingVoiceKey(null);
+    setPendingToolApproval(null);
     send({ type: "turn.cancel" });
   }, [send]);
 
   const dismissMemoryProposal = useCallback((id: string) => {
     setMemoryProposals((current) => current.filter((proposal) => proposal.id !== id));
   }, []);
+
+  const confirmTool = useCallback((confirmationId: string) => {
+    if (pendingToolApproval?.confirmationId !== confirmationId) return;
+    if (!send({ type: "tool.confirm", confirmation_id: confirmationId })) return;
+    setPendingToolApproval((current) => current?.confirmationId === confirmationId
+      ? { ...current, status: "submitted" }
+      : current);
+  }, [pendingToolApproval, send]);
+
+  const denyTool = useCallback((confirmationId: string) => {
+    if (pendingToolApproval?.confirmationId !== confirmationId) return;
+    if (!send({ type: "tool.deny", confirmation_id: confirmationId })) return;
+    setPendingToolApproval((current) => current?.confirmationId === confirmationId
+      ? { ...current, status: "submitted" }
+      : current);
+  }, [pendingToolApproval, send]);
 
   const clearLocalData = useCallback(() => {
     realtimeCallRequestedRef.current = false;
@@ -1237,6 +1330,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     responseSourcesRef.current.clear();
     setMessages([]);
     setMemoryProposals([]);
+    setPendingToolApproval(null);
+    setRecentToolActivity([]);
     setError(null);
     setVoiceStatus("idle");
   }, [cancelActive]);
@@ -1247,6 +1342,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     socketRef.current = null;
     socket?.close();
     await stopLocalResources();
+    setPendingToolApproval(null);
     setConnectionStatus("disconnected");
   }, [stopLocalResources]);
 
@@ -1272,6 +1368,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     speakingTurnId,
     previewingVoiceKey,
     memoryProposals,
+    pendingToolApproval,
+    recentToolActivity,
     realtime,
     microphones,
     selectedMicrophoneId,
@@ -1292,6 +1390,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     stopVoicePreview,
     cancelActive,
     dismissMemoryProposal,
+    confirmTool,
+    denyTool,
     clearLocalData,
     startRealtimeCall,
     stopRealtimeCall,
