@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 from voxagent.conversation.history import (
     SYSTEM_INSTRUCTION,
@@ -142,24 +143,24 @@ class OllamaClient:
                 service_error = item.get("error")
                 if service_error:
                     raise OllamaStreamError(model, str(service_error))
-                message = item.get("message", {})
+                message = item.get("message")
                 if not isinstance(message, dict):
                     raise OllamaProtocolError(
                         f"Ollama model {model} returned a malformed message frame"
                     )
                 content = message.get("content", "")
-                if content:
-                    if not isinstance(content, str):
-                        raise OllamaProtocolError(
-                            f"Ollama model {model} returned non-string content"
-                        )
-                    yield AssistantTextDelta(content)
+                if not isinstance(content, str):
+                    raise OllamaProtocolError(
+                        f"Ollama model {model} returned a malformed message frame"
+                    )
                 tool_calls = message.get("tool_calls", [])
+                if not isinstance(tool_calls, list):
+                    raise OllamaProtocolError(
+                        f"Ollama model {model} returned a malformed message frame"
+                    )
+                if content:
+                    yield AssistantTextDelta(content)
                 if tool_calls:
-                    if not isinstance(tool_calls, list):
-                        raise OllamaProtocolError(
-                            f"Ollama model {model} returned malformed tool calls"
-                        )
                     for raw_call in tool_calls:
                         tool_call_count += 1
                         if tool_call_count > 3:
@@ -265,9 +266,11 @@ def _serialize_messages(messages: Sequence[ModelMessage]) -> list[dict[str, str]
 
 def _message_payload(message: ChatMessage | Mapping[str, str]) -> dict[str, str]:
     if isinstance(message, ChatMessage):
-        return message.as_payload()
-    role: Any = message.get("role")
-    content: Any = message.get("content")
+        role: Any = message.role
+        content: Any = message.content
+    else:
+        role = message.get("role")
+        content = message.get("content")
     if role not in {"system", "user", "assistant"} or not isinstance(content, str):
         raise ValueError("Ollama messages require only a valid role and string content")
     return {"role": role, "content": content}
@@ -299,4 +302,9 @@ def _parse_tool_call(model: str, raw_call: object, fallback_id: str) -> ToolCall
         raise OllamaProtocolError(f"Ollama model {model} returned malformed tool call")
     raw_id = raw_call.get("id")
     call_id = raw_id if isinstance(raw_id, str) and raw_id else fallback_id
-    return ToolCall(call_id=call_id, name=name, arguments=arguments)
+    try:
+        return ToolCall(call_id=call_id, name=name, arguments=arguments)
+    except ValidationError as error:
+        raise OllamaProtocolError(
+            f"Ollama model {model} returned malformed tool call"
+        ) from error

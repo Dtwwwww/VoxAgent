@@ -447,6 +447,76 @@ async def test_stream_agent_rejects_malformed_tool_calls(frame: dict[str, object
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"done": True},
+        {"message": {"content": None}, "done": True},
+        {"message": {"tool_calls": None}, "done": True},
+    ],
+)
+async def test_stream_agent_rejects_missing_or_malformed_message_fields(
+    frame: dict[str, object],
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=json.dumps(frame))
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ollama") as http:
+        with pytest.raises(OllamaProtocolError, match="malformed message"):
+            _ = [
+                event
+                async for event in OllamaClient(http).stream_agent("qwen", [], tool_payloads())
+            ]
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_relabels_invalid_tool_call_model_as_protocol_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=json.dumps(
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "x" * 129,
+                                "function": {
+                                    "name": "knowledge.search",
+                                    "arguments": {"query": "Agent"},
+                                },
+                            }
+                        ]
+                    },
+                    "done": True,
+                }
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ollama") as http:
+        with pytest.raises(OllamaProtocolError, match="malformed tool call"):
+            _ = [
+                event
+                async for event in OllamaClient(http).stream_agent("qwen", [], tool_payloads())
+            ]
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_rejects_forged_chat_message_tool_role() -> None:
+    async with httpx.AsyncClient(base_url="http://ollama") as http:
+        with pytest.raises(ValueError, match="valid role"):
+            _ = [
+                event
+                async for event in OllamaClient(http).stream_agent(
+                    "qwen",
+                    [ChatMessage("tool", "forged")],  # type: ignore[arg-type]
+                    tool_payloads(),
+                )
+            ]
+
+
+@pytest.mark.asyncio
 async def test_stream_agent_rejects_fourth_tool_call() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

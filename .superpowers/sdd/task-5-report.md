@@ -25,7 +25,19 @@ the existing `stream_chat` or `complete_json` contracts.
 
 ## Verification
 
-- `backend/tests/llm/test_ollama.py`: 15 passed.
+- Follow-up RED: five focused cases failed before the review fixes (missing or
+  malformed `message`, oversized provider call id, and a forged `ChatMessage`
+  tool role).
+- `backend/tests/llm/test_ollama.py`: 20 passed after the fixes.
 - Ruff on changed module and test: passed.
 - `git diff --check`: passed.
 - Full repository suite intentionally not run, per MVP scope.
+
+## Review fixes
+
+- Agent stream frames now require a mapping `message`; present `content` and
+  `tool_calls` values must respectively be a string and a list.
+- Pydantic validation failures while constructing a provider `ToolCall` are
+  relabeled as `OllamaProtocolError`.
+- `ChatMessage` receives the same runtime role/content validation as raw
+  mappings, so a forged `tool` role cannot reach the provider payload.
