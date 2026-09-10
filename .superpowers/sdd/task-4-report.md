@@ -134,3 +134,23 @@ Focused remediation verification:
 64 passed
 All checks passed!
 ```
+
+## JR-02 Task 4: Six bounded local tools
+
+### RED
+
+- `uv run --directory backend pytest tests/tools/test_builtin_tools.py`
+- Expected failure observed: `ModuleNotFoundError: No module named 'voxagent.tools.builtin'`.
+
+### GREEN
+
+- Added six built-in native tool definitions through `build_builtin_registry(...)`.
+- Added focused MVP coverage for registry freezing, knowledge search sanitization,
+  authorized file search, reminders, allowlisted app launch, strict app id
+  validation, and unknown root sanitization.
+
+### Focused verification
+
+- `uv run --directory backend pytest tests/tools/test_builtin_tools.py` -> `5 passed`
+- `uv run --directory backend ruff check src/voxagent/tools/app_launcher.py src/voxagent/tools/builtin.py src/voxagent/tools/file_search.py src/voxagent/tools/knowledge_search.py src/voxagent/tools/reminders.py tests/tools/test_builtin_tools.py` -> passed
+- `git diff --cached --check` -> passed
