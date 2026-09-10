@@ -77,10 +77,14 @@ class AgentWorkflow:
         }
 
     async def call_model(self, state: AgentState) -> dict[str, Any]:
-        if state.get("node_visit_count", 0) >= 8:
+        if state.get("node_visit_count", 0) >= 7:
             return {
-                "next_action": "respond",
-                "outbox": [_failed("", "", "node_visit_limit_exceeded")],
+                "node_visit_count": 8,
+                "next_action": "end",
+                "outbox": [
+                    _failed("", "", "node_visit_limit_exceeded"),
+                    {"kind": "done"},
+                ],
             }
         visits = _next_visit(state)
         calls: list[dict[str, Any]] = []
@@ -104,6 +108,13 @@ class AgentWorkflow:
                 "next_action": "respond",
                 "outbox": [_failed("", "", "tool_call_limit_exceeded")],
             }
+        if calls and visits >= 7:
+            return {
+                "node_visit_count": visits,
+                "pending_calls": [],
+                "next_action": "respond",
+                "outbox": [*outbox, _failed("", "", "node_visit_limit_exceeded")],
+            }
         return {
             "node_visit_count": visits,
             "pending_calls": calls,
@@ -113,6 +124,13 @@ class AgentWorkflow:
 
     async def authorize(self, state: AgentState) -> dict[str, Any]:
         visits = _next_visit(state)
+        if visits >= 7:
+            return {
+                "node_visit_count": visits,
+                "pending_calls": [],
+                "next_action": "respond",
+                "outbox": [_failed("", "", "node_visit_limit_exceeded")],
+            }
         pending = list(state.get("pending_calls", []))
         if not pending:
             return {"node_visit_count": visits, "next_action": "call_model", "outbox": []}
@@ -290,26 +308,33 @@ class AgentWorkflow:
                 },
             ]
         )
+        next_action = "authorize" if state.get("pending_calls") else "call_model"
+        if visits >= 7:
+            next_action = "respond"
+            if state.get("pending_calls"):
+                outbox.append(_failed("", "", "node_visit_limit_exceeded"))
         return {
             "node_visit_count": visits,
             "messages": messages,
+            "pending_calls": [] if visits >= 7 else state.get("pending_calls", []),
             "current_call": None,
             "tool_request_id": None,
             "confirmation_id": None,
             "permission": None,
-            "next_action": "authorize" if state.get("pending_calls") else "call_model",
+            "next_action": next_action,
             "outbox": outbox,
         }
 
     async def respond(self, state: AgentState) -> dict[str, Any]:
+        visits = _next_visit(state)
         return {
-            "node_visit_count": min(8, _next_visit(state)),
-            "next_action": "persist",
+            "node_visit_count": visits,
+            "next_action": "end" if visits >= 8 else "persist",
             "outbox": [{"kind": "done"}],
         }
 
     async def persist(self, state: AgentState) -> dict[str, Any]:
-        return {"node_visit_count": min(8, _next_visit(state)), "outbox": []}
+        return {"node_visit_count": _next_visit(state), "outbox": []}
 
     def _cancelled(self, state: AgentState) -> bool:
         return self.is_cancelled(state["session_id"], state["turn_id"])
@@ -333,7 +358,7 @@ def build_graph(workflow: AgentWorkflow, checkpointer: object):
     builder.add_conditional_edges(
         "call_model",
         lambda state: state["next_action"],
-        {"authorize": "authorize", "respond": "respond"},
+        {"authorize": "authorize", "respond": "respond", "end": END},
     )
     builder.add_conditional_edges(
         "authorize",
@@ -359,7 +384,11 @@ def build_graph(workflow: AgentWorkflow, checkpointer: object):
             "respond": "respond",
         },
     )
-    builder.add_edge("respond", "persist")
+    builder.add_conditional_edges(
+        "respond",
+        lambda state: state["next_action"],
+        {"persist": "persist", "end": END},
+    )
     builder.add_edge("persist", END)
     return builder.compile(checkpointer=checkpointer)
 

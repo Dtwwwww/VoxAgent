@@ -265,6 +265,10 @@ async def test_confirmation_executes_once_and_replay_is_unavailable(
     assert replay == [ToolFailed("call-1", "demo.action", "confirmation_unavailable")]
     assert counters == {"demo.action": 1}
     assert '"echo":"ok"' in model.messages[1][-1].content
+    state = await service.graph.aget_state(
+        {"configurable": {"thread_id": "session-a:1"}}
+    )
+    assert state.values["node_visit_count"] == 8
 
 
 @pytest.mark.asyncio
@@ -422,7 +426,11 @@ async def test_cancel_during_model_stream_and_node_limit_prevent_later_execution
         isinstance(event, ToolFailed) and event.error_code == "node_visit_limit_exceeded"
         for event in limited_events
     )
-    assert limited_counters == {"demo.action": 2}
+    assert limited_counters == {"demo.action": 1}
+    limited_state = await limited_service.graph.aget_state(
+        {"configurable": {"thread_id": "session-limit:1"}}
+    )
+    assert limited_state.values["node_visit_count"] == 8
 
 
 @pytest.mark.asyncio
