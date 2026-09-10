@@ -10,10 +10,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Protocol
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
+from starlette import status
 from starlette.middleware.cors import CORSMiddleware
 
+from voxagent.api.auth import require_bearer
 from voxagent.api.data import DataService, register_data_routes
 from voxagent.api.knowledge import KnowledgeService, register_knowledge_routes
 from voxagent.api.memory import MemoryService, register_memory_routes
@@ -28,6 +30,7 @@ from voxagent.conversation.events import (
     VoicePreviewChunk,
     VoicesAvailable,
 )
+from voxagent.tools.repository import ToolAuditRecord
 
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 
@@ -65,6 +68,10 @@ class Orchestrator(Protocol):
 
     async def cancel_active(self) -> _Output | None: ...
 
+    def resolve_tool_confirmation(
+        self, confirmation_id: str, approved: bool
+    ) -> AsyncIterator[_Output]: ...
+
     def commit_audio(self) -> AsyncIterator[_Output]: ...
 
     async def stop(self) -> None: ...
@@ -77,6 +84,10 @@ class Orchestrator(Protocol):
 OrchestratorFactory = Callable[[], Orchestrator]
 _Output = object | bytes
 _MICROPHONE_QUEUE_CAPACITY = 32
+
+
+class ToolAuditReader(Protocol):
+    def list_audit(self, limit: int = 50, offset: int = 0) -> tuple[ToolAuditRecord, ...]: ...
 
 
 def _validate_session_token(token: str) -> str:
@@ -181,6 +192,27 @@ def _public_voices(orchestrator: Orchestrator) -> VoicesAvailable:
         for profile in orchestrator.voice_catalog.public_profiles()
     ]
     return VoicesAvailable(type="voices.available", voices=voices)
+
+
+def _public_tool_audit_record(record: ToolAuditRecord) -> dict[str, object]:
+    safe_detail = {
+        key: value
+        for key, value in record.detail.items()
+        if key in {"duration_ms", "error_code", "recovered_from"}
+    }
+    return {
+        "id": record.id,
+        "request_id": record.tool_request_id,
+        "session_id": record.session_id,
+        "turn_id": record.turn_id,
+        "call_id": record.call_id,
+        "tool_name": record.tool_name,
+        "event_type": record.event_type,
+        "detail": safe_detail,
+        "created_at_utc": record.created_at_utc.isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z"),
+    }
 
 
 async def _forward_outputs(
@@ -362,6 +394,20 @@ async def _dispatch_event(
         cancelled = await orchestrator.cancel_active()
         if cancelled is not None:
             await writer.send(cancelled)
+    elif event_type == "tool.confirm":
+        await _forward_outputs(
+            orchestrator.resolve_tool_confirmation(
+                str(event.confirmation_id), approved=True
+            ),
+            writer,
+        )
+    elif event_type == "tool.deny":
+        await _forward_outputs(
+            orchestrator.resolve_tool_confirmation(
+                str(event.confirmation_id), approved=False
+            ),
+            writer,
+        )
     elif event_type == "audio.commit":
         await _forward_outputs(orchestrator.commit_audio(), writer)
     elif event_type == "session.stop":
@@ -381,6 +427,7 @@ def create_app(
     memory_service: MemoryService | None = None,
     persona_service: PersonaService | None = None,
     data_service: DataService | None = None,
+    tool_audit_reader: ToolAuditReader | None = None,
 ) -> FastAPI:
     expected_token = _validate_session_token(session_token)
     expected_token_bytes = expected_token.encode("ascii")
@@ -437,6 +484,24 @@ def create_app(
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
         return {"status": "ok", "offline": True}
+
+    if tool_audit_reader is not None:
+
+        @app.get("/v1/tool-audit")
+        async def list_tool_audit(
+            limit: int = Query(default=50, ge=1, le=100),
+            offset: int = Query(default=0, ge=0),
+            authorization: str | None = Header(default=None),
+        ) -> tuple[dict[str, object], ...]:
+            require_bearer(authorization, expected_token_bytes)
+            try:
+                records = tool_audit_reader.list_audit(limit=limit, offset=offset)
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=str(error),
+                ) from error
+            return tuple(_public_tool_audit_record(record) for record in records)
 
     @app.websocket("/v1/voice")
     async def voice_socket(socket: WebSocket) -> None:
@@ -534,6 +599,8 @@ def create_app(
                     "voice.transcript.submit",
                     "assistant.speak",
                     "voice.preview",
+                    "tool.confirm",
+                    "tool.deny",
                 }:
                     producer = asyncio.create_task(
                         _dispatch_event(event, orchestrator, writer),

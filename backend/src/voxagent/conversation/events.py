@@ -80,6 +80,16 @@ class TurnCancel(ClientMessage):
     type: Literal["turn.cancel"]
 
 
+class ToolConfirm(ClientMessage):
+    type: Literal["tool.confirm"]
+    confirmation_id: UUID
+
+
+class ToolDeny(ClientMessage):
+    type: Literal["tool.deny"]
+    confirmation_id: UUID
+
+
 class AudioCommit(ClientMessage):
     type: Literal["audio.commit"]
 
@@ -97,6 +107,8 @@ type ClientEvent = Annotated[
     | VoicePreview
     | VoicePreviewCancel
     | TurnCancel
+    | ToolConfirm
+    | ToolDeny
     | AudioCommit
     | SessionStop,
     Field(discriminator="type"),
@@ -206,6 +218,34 @@ class AssistantDone(TurnServerMessage):
     type: Literal["assistant.done"]
 
 
+class ToolApprovalRequired(TurnServerMessage):
+    type: Literal["tool.approval_required"]
+    confirmation_id: UUID
+    call_id: str
+    tool_name: str
+    permission: Literal["L1", "L2"]
+
+
+class ToolStarted(TurnServerMessage):
+    type: Literal["tool.started"]
+    call_id: str
+    tool_name: str
+
+
+class ToolCompleted(TurnServerMessage):
+    type: Literal["tool.completed"]
+    call_id: str
+    tool_name: str
+    user_summary: str
+
+
+class ToolFailed(TurnServerMessage):
+    type: Literal["tool.failed"]
+    call_id: str
+    tool_name: str
+    error_code: str
+
+
 class MemorySource(Message):
     id: StrictInt = Field(ge=1)
     content: str
@@ -290,6 +330,10 @@ type ServerEvent = Annotated[
     | AsrPartial
     | AssistantDelta
     | AssistantDone
+    | ToolApprovalRequired
+    | ToolStarted
+    | ToolCompleted
+    | ToolFailed
     | ContextSources
     | MemoryProposed
     | TtsChunk

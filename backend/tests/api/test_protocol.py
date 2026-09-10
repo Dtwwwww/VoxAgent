@@ -22,7 +22,11 @@ def test_protocol_fixtures_match_contract():
     assert client_messages[1].text == "hello"
     assert client_messages[2].type == "voice.transcript.submit"
     assert client_messages[2].text == "你好，声灵"
-    assert len(server_messages) == 16
+    assert len(server_messages) == 20
+    assert {message.type for message in client_messages[-4:-2]} == {"tool.confirm", "tool.deny"}
+    assert {message.type for message in server_messages} >= {
+        "tool.approval_required", "tool.started", "tool.completed", "tool.failed"
+    }
     assert next(
         message.text for message in server_messages if message.type == "asr.partial"
     ) == "你好"
@@ -173,3 +177,22 @@ def test_input_audio_contract_rejects_empty_and_partial_wire_objects():
         }
         with pytest.raises(ValidationError):
             parse_server_message(payload)
+
+
+def test_tool_confirmation_events_are_id_only_and_strict():
+    confirmation_id = "00000000-0000-4000-8000-000000000002"
+    for event_type in ("tool.confirm", "tool.deny"):
+        event = parse_client_message({"type": event_type, "confirmation_id": confirmation_id})
+        assert str(event.confirmation_id) == confirmation_id
+        with pytest.raises(ValidationError):
+            parse_client_message(
+                {"type": event_type, "confirmation_id": confirmation_id, "approved": True}
+            )
+        with pytest.raises(ValidationError):
+            parse_client_message(
+                {
+                    "type": event_type,
+                    "confirmation_id": confirmation_id,
+                    "arguments": {"path": "D:/tampered"},
+                }
+            )
