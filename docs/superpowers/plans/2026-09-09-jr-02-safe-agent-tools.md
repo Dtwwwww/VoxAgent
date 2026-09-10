@@ -8,6 +8,12 @@
 
 **Tech Stack:** Python 3.12、LangGraph 1.2、langgraph-checkpoint-sqlite 3.1、Pydantic 2、FastAPI、SQLite、Ollama/Qwen3、React 19、TypeScript 7、pytest、Vitest
 
+## MVP 收口状态（2026-09-11）
+
+JR-02 的可演示 MVP 已实现并通过统一验证：严格 Tool Schema、冻结注册表、SQLite 请求/票据/审计、L0/L1/L2、120 秒单次确认、防重放、授权路径策略、3 次工具/8 节点上限、Qwen3 Tool Calling、LangGraph 暂停恢复、六个本地工具、WebSocket 工具事件、前端确认卡和脱敏审计页均已落地。
+
+为优先完成最小可行版本，本轮将原 60 条评测压缩为 12 条确定性 fake 冒烟集；真实 Ollama 模式保留 CLI 入口，但真实模型稳定性、60 条正式数据集和策略覆盖率专项报告延后到 JR-06。该调整不削减 L1/L2 零未授权执行、票据绑定、防重放、路径逃逸和循环上限等安全门槛。
+
 ## Global Constraints
 
 - 必须先通过 JR-01 Completion Gate。
