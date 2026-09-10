@@ -93,6 +93,22 @@ def test_request_confirmation_consume_happy_path(connection: sqlite3.Connection)
     ]
 
 
+def test_get_confirmation_request_returns_persisted_ticket_and_request(
+    connection: sqlite3.Connection,
+) -> None:
+    repository = ToolRepository(connection)
+    request_id = make_request(repository)
+    ticket = make_confirmation(repository, request_id)
+
+    stored_ticket, request = repository.get_confirmation_request(ticket.confirmation_id)
+
+    assert stored_ticket == ticket
+    assert request.id == request_id
+    assert request.arguments == {"limit": 3, "query": "声灵"}
+    assert request.arguments_sha256 == HASH
+    assert request.permission == PermissionLevel.L1
+
+
 @pytest.mark.parametrize(
     ("mutate", "consume_hash", "session_id", "turn_id", "now_utc"),
     [

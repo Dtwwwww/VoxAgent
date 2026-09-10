@@ -94,6 +94,13 @@ def _parse_utc(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
+def _required_utc(value: str) -> datetime:
+    parsed = _parse_utc(value)
+    if parsed is None:
+        raise ValueError("stored UTC datetime is missing")
+    return parsed
+
+
 def _json_text(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
@@ -281,6 +288,41 @@ class ToolRepository:
             self._audit(tool_request_id, "confirmation.approved", {}, timestamp)
         return True
 
+    def get_confirmation_request(
+        self,
+        confirmation_id: str,
+    ) -> tuple[ConfirmationTicket, ToolRequestRecord]:
+        row = self._connection.execute(
+            """
+            SELECT
+                tool_confirmations.confirmation_id,
+                tool_confirmations.tool_request_id,
+                tool_confirmations.arguments_sha256 AS confirmation_arguments_sha256,
+                tool_confirmations.expires_at_utc,
+                tool_confirmations.consumed_at_utc,
+                tool_confirmations.decision,
+                tool_requests.*
+            FROM tool_confirmations
+            JOIN tool_requests ON tool_requests.id = tool_confirmations.tool_request_id
+            WHERE tool_confirmations.confirmation_id = ?
+            """,
+            (confirmation_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(confirmation_id)
+
+        created_at = self._confirmation_created_at(int(row["tool_request_id"]))
+        ticket = ConfirmationTicket(
+            confirmation_id=row["confirmation_id"],
+            tool_request_id=int(row["tool_request_id"]),
+            arguments_sha256=row["confirmation_arguments_sha256"],
+            created_at_utc=created_at,
+            expires_at_utc=_required_utc(row["expires_at_utc"]),
+            consumed_at_utc=_parse_utc(row["consumed_at_utc"]),
+            decision=row["decision"],
+        )
+        return ticket, self._request_record(row)
+
     def finish_request(
         self,
         tool_request_id: int,
@@ -372,6 +414,22 @@ class ToolRepository:
         if row is None:
             raise KeyError(tool_request_id)
         return self._request_record(row)
+
+    def _confirmation_created_at(self, tool_request_id: int) -> datetime:
+        row = self._connection.execute(
+            """
+            SELECT created_at_utc
+            FROM tool_audit
+            WHERE tool_request_id = ?
+              AND event_type = 'confirmation.requested'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (tool_request_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(tool_request_id)
+        return _required_utc(row["created_at_utc"])
 
     def _audit(
         self,
