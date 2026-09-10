@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from time import perf_counter
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 from voxagent.tools.schema import ToolCall, ToolResult
 
@@ -22,6 +22,16 @@ class ReminderCreateArgs(BaseModel):
 
     title: str = Field(min_length=1, max_length=200)
     due_at_utc: AwareDatetime | None = None
+
+    @field_validator("due_at_utc", mode="before")
+    @classmethod
+    def parse_wire_datetime(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("due_at_utc must be an ISO-8601 datetime") from error
 
 
 class ReminderCompleteArgs(BaseModel):

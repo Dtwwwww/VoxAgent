@@ -138,6 +138,13 @@ class FakeAgentService:
         self.cancel_calls.append((session_id, turn_id))
 
 
+class PlainAgentService(FakeAgentService):
+    async def start_turn(self, session_id, turn_id, messages):
+        del session_id, turn_id, messages
+        yield AgentTextDelta("普通语音回答。")
+        yield AgentTurnDone()
+
+
 class FakePartialAsr:
     def __init__(self) -> None:
         self.reset_calls = 0
@@ -1671,6 +1678,23 @@ async def test_agent_turn_pauses_for_one_time_confirmation_and_resumes():
         )
     ]
     assert replay[0].code == "confirmation_unavailable"
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_plain_agent_voice_reply_keeps_automatic_tts():
+    orchestrator, _, _ = make_orchestrator(agent_service=PlainAgentService())
+
+    outputs = [item async for item in orchestrator.submit_text("创建提醒", True)]
+
+    assert [getattr(item, "type", "binary") for item in outputs] == [
+        "assistant.delta",
+        "tts.started",
+        "tts.chunk",
+        "binary",
+        "tts.done",
+        "assistant.done",
+    ]
     await orchestrator.stop()
 
 

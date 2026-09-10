@@ -5,10 +5,11 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated
 
+import aiosqlite
 import httpx
 import typer
 import uvicorn
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from voxagent.agent.evaluation import evaluate_agent, load_dataset
 from voxagent.agent.service import AgentService
@@ -238,17 +239,12 @@ def _create_production_app(session_token: str):
         context_source,
         WindowsAllowlistedLauncher(),
     )
-    agent_service = AgentService(
-        model_name=model_id,
-        model=ollama,
-        registry=tool_registry,
-        repository=tool_repository,
-        confirmation=ConfirmationService(tool_repository, tool_registry),
-        checkpointer=MemorySaver(),
-        now_utc=lambda: datetime.now(UTC),
-    )
+    agent_service: AgentService | None = None
+    checkpoint_connection: aiosqlite.Connection | None = None
 
     def orchestrator_factory() -> ConversationOrchestrator:
+        if agent_service is None:
+            raise RuntimeError("Agent checkpoint runtime has not started")
         final_asr = SenseVoiceAsr.from_model_dir(
             _speech_model_directory(root, "sensevoice-int8")
         )
@@ -292,8 +288,27 @@ def _create_production_app(session_token: str):
             agent_service=agent_service,
         )
 
+    async def startup() -> None:
+        nonlocal agent_service, checkpoint_connection
+        checkpoint_connection = await aiosqlite.connect(
+            paths.data / "agent-checkpoints.db"
+        )
+        checkpoint_saver = AsyncSqliteSaver(checkpoint_connection)
+        await checkpoint_saver.setup()
+        agent_service = AgentService(
+            model_name=model_id,
+            model=ollama,
+            registry=tool_registry,
+            repository=tool_repository,
+            confirmation=ConfirmationService(tool_repository, tool_registry),
+            checkpointer=checkpoint_saver,
+            now_utc=lambda: datetime.now(UTC),
+        )
+
     async def shutdown() -> None:
         await http.aclose()
+        if checkpoint_connection is not None:
+            await checkpoint_connection.close()
         try:
             backup_manager.create(database, date.today())
         finally:
@@ -302,6 +317,7 @@ def _create_production_app(session_token: str):
     application = create_app(
         orchestrator_factory,
         session_token,
+        on_startup=startup,
         on_shutdown=shutdown,
         knowledge_service=knowledge_service,
         memory_service=memory_service,

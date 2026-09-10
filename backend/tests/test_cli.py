@@ -640,6 +640,7 @@ def test_production_app_wires_local_knowledge_and_retrieval_context(monkeypatch,
     assert captured["data_service"] is data_service
     assert captured["token"] == SESSION_TOKEN
     assert len({id(gate) for gate in gates[:4]}) == 1
+    asyncio.run(captured["on_startup"]())
     captured["factory"]()
     assert [call["engine"] for call in tts_calls] == ["kokoro"]
     asyncio.run(captured["on_shutdown"]())

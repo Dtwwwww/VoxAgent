@@ -193,7 +193,7 @@ async def test_reminders_create_list_complete_and_reject_duplicate_completion() 
             "call-1",
             {
                 "title": "准备 Agent 演示",
-                "due_at_utc": datetime(2026, 9, 11, 1, 30, tzinfo=UTC),
+                "due_at_utc": "2026-09-11T01:30:00Z",
             },
         )
     )

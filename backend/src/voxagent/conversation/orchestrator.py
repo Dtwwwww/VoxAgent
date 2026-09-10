@@ -84,6 +84,7 @@ class _OutputBatch:
 class _PendingAgentTurn:
     token: TurnToken
     answer: list[str]
+    speak_response: bool
     last_tool_summary: str | None = None
     last_tool_error: str | None = None
 
@@ -673,7 +674,7 @@ class ConversationOrchestrator:
 
     async def _reply_worker(self, token: TurnToken, speak_response: bool) -> None:
         if self.agent_service is not None:
-            await self._agent_reply_worker(token)
+            await self._agent_reply_worker(token, speak_response)
             return
         owner = ("turn", token.turn_id)
         chunker = SentenceChunker()
@@ -838,9 +839,13 @@ class ConversationOrchestrator:
                 )
             )
 
-    async def _agent_reply_worker(self, token: TurnToken) -> None:
+    async def _agent_reply_worker(
+        self, token: TurnToken, speak_response: bool
+    ) -> None:
         assert self.agent_service is not None
-        pending = _PendingAgentTurn(token=token, answer=[])
+        pending = _PendingAgentTurn(
+            token=token, answer=[], speak_response=speak_response
+        )
         events = self.agent_service.start_turn(
             str(token.session_id), token.turn_id, self.history.messages_for_model()
         )
@@ -850,6 +855,7 @@ class ConversationOrchestrator:
         self, pending: _PendingAgentTurn, confirmation_id: str, approved: bool
     ) -> None:
         assert self.agent_service is not None
+        pending.speak_response = False
         token = pending.token
         events = self.agent_service.resume_confirmation(
             confirmation_id,
@@ -976,6 +982,24 @@ class ConversationOrchestrator:
                 )
             )
         assistant_text = "".join(pending.answer)
+        if pending.speak_response:
+            _sequence, failed, started = await self._synthesize_reply_sentence(
+                token, assistant_text, 0, False, False
+            )
+            if started and not failed:
+                await self._emit(
+                    _OutputBatch(
+                        ("turn", token.turn_id),
+                        (
+                            TtsDone(
+                                type="tts.done",
+                                session_id=token.session_id,
+                                turn_id=token.turn_id,
+                                request_id=0,
+                            ),
+                        ),
+                    )
+                )
         if self.conversation_store is not None:
             await self.conversation_store.complete_assistant(
                 token.turn_id, assistant_text

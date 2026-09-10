@@ -422,6 +422,7 @@ def create_app(
     orchestrator_factory: OrchestratorFactory,
     session_token: str,
     *,
+    on_startup: Callable[[], Awaitable[None]] | None = None,
     on_shutdown: Callable[[], Awaitable[None]] | None = None,
     knowledge_service: KnowledgeService | None = None,
     memory_service: MemoryService | None = None,
@@ -435,6 +436,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
+            if on_startup is not None:
+                await on_startup()
             yield
         finally:
             if on_shutdown is not None:
