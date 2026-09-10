@@ -105,9 +105,15 @@ async def test_registry_executes_a_validated_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_registry_converts_executor_exception_without_leaking_path() -> None:
+@pytest.mark.parametrize(
+    "private_path",
+    [r"C:\private\secret.txt", "/home/private/secret.txt"],
+)
+async def test_registry_converts_executor_exception_without_leaking_path(
+    private_path: str,
+) -> None:
     async def failing_executor(call: ToolCall) -> ToolResult:
-        raise RuntimeError(r"failed at C:\private\secret.txt")
+        raise RuntimeError(f"failed at {private_path}")
 
     registry = ToolRegistry()
     definition = make_definition()
@@ -142,3 +148,19 @@ async def test_registry_times_out_executor() -> None:
 
     assert result.status == "failed"
     assert result.error_code == "tool_execution_failed"
+
+
+@pytest.mark.asyncio
+async def test_registry_propagates_executor_cancellation() -> None:
+    async def cancelled_executor(call: ToolCall) -> ToolResult:
+        raise asyncio.CancelledError
+
+    registry = ToolRegistry()
+    definition = make_definition()
+    registry.register(definition, cancelled_executor)
+    registry.freeze()
+
+    with pytest.raises(asyncio.CancelledError):
+        await registry.execute(
+            ToolCall.from_untrusted(definition, "call-1", {"query": "声灵"})
+        )
