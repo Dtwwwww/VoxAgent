@@ -25,6 +25,22 @@ TerminalToolRequestStatus = Literal["succeeded", "failed", "denied", "expired"]
 
 _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "denied", "expired"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_FINISH_DETAIL_KEYS = frozenset({"duration_ms", "error_code", "recovered_from"})
+_MAX_DURATION_MS = 300_000
+_RECOVERED_FROM_VALUES = frozenset({"awaiting_confirmation", "running"})
+_SENSITIVE_DETAIL_TERMS = frozenset(
+    {
+        "api_key",
+        "password",
+        "path",
+        "prompt",
+        "secret",
+        "stack",
+        "token",
+        "traceback",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +109,34 @@ def _validate_sha256(value: str) -> str:
     if not _SHA256_RE.fullmatch(value):
         raise ValueError("arguments_sha256 must be a 64-character lowercase hex sha256")
     return value
+
+
+def _validate_finish_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
+    if detail is None:
+        return {}
+    unknown_keys = set(detail) - _FINISH_DETAIL_KEYS
+    if unknown_keys:
+        raise ValueError("detail contains unsupported audit fields")
+
+    safe_detail: dict[str, Any] = {}
+    if "duration_ms" in detail:
+        duration_ms = detail["duration_ms"]
+        if type(duration_ms) is not int or not 0 <= duration_ms <= _MAX_DURATION_MS:
+            raise ValueError("detail.duration_ms must be a bounded non-negative integer")
+        safe_detail["duration_ms"] = duration_ms
+    if "error_code" in detail:
+        error_code = detail["error_code"]
+        if not isinstance(error_code, str) or not _ERROR_CODE_RE.fullmatch(error_code):
+            raise ValueError("detail.error_code must be a stable machine code")
+        if any(term in error_code for term in _SENSITIVE_DETAIL_TERMS):
+            raise ValueError("detail.error_code must not contain sensitive terms")
+        safe_detail["error_code"] = error_code
+    if "recovered_from" in detail:
+        recovered_from = detail["recovered_from"]
+        if recovered_from not in _RECOVERED_FROM_VALUES:
+            raise ValueError("detail.recovered_from must be a known runtime state")
+        safe_detail["recovered_from"] = recovered_from
+    return safe_detail
 
 
 class ToolRepository:
@@ -247,6 +291,7 @@ class ToolRepository:
     ) -> bool:
         if status not in _TERMINAL_STATUSES:
             raise ValueError("status must be a terminal request status")
+        safe_detail = _validate_finish_detail(detail)
         timestamp = _utc_text(now_utc)
         with self._write():
             result = self._connection.execute(
@@ -260,7 +305,7 @@ class ToolRepository:
             )
             if result.rowcount != 1:
                 return False
-            self._audit(tool_request_id, f"request.{status}", detail or {}, timestamp)
+            self._audit(tool_request_id, f"request.{status}", safe_detail, timestamp)
         return True
 
     def list_audit(self, limit: int = 50, offset: int = 0) -> tuple[ToolAuditRecord, ...]:
@@ -302,7 +347,8 @@ class ToolRepository:
             ).fetchall()
             for row in rows:
                 request_id = int(row["id"])
-                status = "expired" if row["status"] == "awaiting_confirmation" else "failed"
+                recovered_from = row["status"]
+                status = "expired" if recovered_from == "awaiting_confirmation" else "failed"
                 self._connection.execute(
                     """
                     UPDATE tool_requests
@@ -311,7 +357,12 @@ class ToolRepository:
                     """,
                     (status, timestamp, request_id),
                 )
-                self._audit(request_id, f"request.{status}", {}, timestamp)
+                self._audit(
+                    request_id,
+                    f"request.{status}",
+                    {"recovered_from": recovered_from},
+                    timestamp,
+                )
         return len(rows)
 
     def _get_request(self, tool_request_id: int) -> ToolRequestRecord:

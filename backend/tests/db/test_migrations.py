@@ -189,3 +189,96 @@ def test_required_indexes_exist(database: sqlite3.Connection) -> None:
         "idx_messages_conversation_turn_role",
         "idx_schema_version_singleton",
     } <= indexes
+
+
+def test_tool_schema_constraints_are_enforced(database: sqlite3.Connection) -> None:
+    migrate(database)
+    now = "2026-09-10T12:00:00.000Z"
+
+    with pytest.raises(sqlite3.IntegrityError):
+        database.execute(
+            """
+            INSERT INTO tool_requests(
+                session_id, turn_id, call_id, tool_name, arguments_json,
+                arguments_sha256, permission, status, created_at_utc
+            )
+            VALUES ('session-1', 1, 'call-1', 'knowledge.search', '{}',
+                    ?, 'L1', 'pending', ?)
+            """,
+            ("a" * 63, now),
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        database.execute(
+            """
+            INSERT INTO tool_requests(
+                session_id, turn_id, call_id, tool_name, arguments_json,
+                arguments_sha256, permission, status, created_at_utc
+            )
+            VALUES ('session-1', 1, 'call-1', 'knowledge.search', '{}',
+                    ?, 'L3', 'pending', ?)
+            """,
+            ("a" * 64, now),
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        database.execute(
+            """
+            INSERT INTO tool_requests(
+                session_id, turn_id, call_id, tool_name, arguments_json,
+                arguments_sha256, permission, status, created_at_utc
+            )
+            VALUES ('session-1', 1, 'call-1', 'knowledge.search', '{}',
+                    ?, 'L1', 'paused', ?)
+            """,
+            ("a" * 64, now),
+        )
+
+
+def test_authorized_roots_are_unique(database: sqlite3.Connection) -> None:
+    migrate(database)
+    database.execute(
+        """
+        INSERT INTO authorized_roots(display_name, canonical_path, created_at_utc)
+        VALUES ('Workspace', 'D:/Agent_protect/VoxAgent', '2026-09-10T12:00:00.000Z')
+        """
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        database.execute(
+            """
+            INSERT INTO authorized_roots(display_name, canonical_path, created_at_utc)
+            VALUES (
+                'Duplicate',
+                'D:/Agent_protect/VoxAgent',
+                '2026-09-10T12:00:01.000Z'
+            )
+            """
+        )
+
+
+def test_tool_confirmations_cascade_with_request(database: sqlite3.Connection) -> None:
+    migrate(database)
+    request_id = database.execute(
+        """
+        INSERT INTO tool_requests(
+            session_id, turn_id, call_id, tool_name, arguments_json,
+            arguments_sha256, permission, status, created_at_utc
+        )
+        VALUES ('session-1', 1, 'call-1', 'knowledge.search', '{}',
+                ?, 'L1', 'awaiting_confirmation', '2026-09-10T12:00:00.000Z')
+        RETURNING id
+        """,
+        ("a" * 64,),
+    ).fetchone()[0]
+    database.execute(
+        """
+        INSERT INTO tool_confirmations(
+            confirmation_id, tool_request_id, arguments_sha256, expires_at_utc
+        )
+        VALUES ('confirmation-1', ?, ?, '2026-09-10T12:02:00.000Z')
+        """,
+        (request_id, "a" * 64),
+    )
+
+    database.execute("DELETE FROM tool_requests WHERE id = ?", (request_id,))
+
+    assert database.execute("SELECT COUNT(*) FROM tool_confirmations").fetchone()[0] == 0

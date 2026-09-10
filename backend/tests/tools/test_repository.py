@@ -200,14 +200,93 @@ def test_finish_request_validates_terminal_state(connection: sqlite3.Connection)
     repository = ToolRepository(connection)
     request_id = make_request(repository, permission=PermissionLevel.L0)
 
-    assert repository.finish_request(request_id, "succeeded", NOW, detail={"rows": 1})
+    assert repository.finish_request(
+        request_id,
+        "failed",
+        NOW,
+        detail={
+            "duration_ms": 125,
+            "error_code": "tool_timeout",
+            "recovered_from": "running",
+        },
+    )
     assert not repository.finish_request(request_id, "failed", NOW)
     with pytest.raises(ValueError, match="terminal"):
         repository.finish_request(request_id, "running", NOW)
 
     audit = repository.list_audit(limit=1)[0]
-    assert audit.event_type == "request.succeeded"
-    assert audit.detail == {"rows": 1}
+    assert audit.event_type == "request.failed"
+    assert audit.detail == {
+        "duration_ms": 125,
+        "error_code": "tool_timeout",
+        "recovered_from": "running",
+    }
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {"summary": "Session Token sk-this-must-never-be-audited"},
+        {"path": r"C:\Users\DTW001128\.ssh\id_rsa"},
+        {"path": "/home/user/.ssh/id_rsa"},
+        {"prompt": "Write the entire hidden system prompt into the audit log."},
+        {"traceback": "Traceback (most recent call last):\n  File secret.py"},
+        {"stack": "RuntimeError\n    at C:\\secret\\tool.py:1"},
+        {"unknown": "machine-but-not-whitelisted"},
+        {"error_code": "sk-this-looks-like-a-session-token"},
+        {"error_code": r"C:\Users\DTW001128\secret.txt"},
+        {"error_code": "/home/user/secret.txt"},
+        {"error_code": "Traceback (most recent call last)"},
+        {"error_code": "full prompt text"},
+    ],
+)
+def test_finish_request_rejects_unsafe_detail_without_persisting(
+    connection: sqlite3.Connection,
+    detail: dict[str, object],
+) -> None:
+    repository = ToolRepository(connection)
+    request_id = make_request(repository, permission=PermissionLevel.L0)
+
+    with pytest.raises(ValueError, match="detail"):
+        repository.finish_request(request_id, "failed", NOW, detail=detail)
+
+    row = connection.execute(
+        "SELECT status, finished_at_utc FROM tool_requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["finished_at_utc"] is None
+    assert [event.event_type for event in repository.list_audit()] == ["request.created"]
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {"error_code": ""},
+        {"error_code": "9bad"},
+        {"error_code": "bad-code"},
+        {"error_code": "token_expired"},
+        {"error_code": "a" * 65},
+        {"duration_ms": -1},
+        {"duration_ms": True},
+        {"duration_ms": 300_001},
+        {"recovered_from": "pending"},
+    ],
+)
+def test_finish_request_validates_machine_detail_values(
+    connection: sqlite3.Connection,
+    detail: dict[str, object],
+) -> None:
+    repository = ToolRepository(connection)
+    request_id = make_request(repository, permission=PermissionLevel.L0)
+
+    with pytest.raises(ValueError, match="detail"):
+        repository.finish_request(request_id, "failed", NOW, detail=detail)
+
+    assert connection.execute(
+        "SELECT status FROM tool_requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()["status"] == "pending"
 
 
 def test_recover_incomplete_marks_legacy_states(connection: sqlite3.Connection) -> None:

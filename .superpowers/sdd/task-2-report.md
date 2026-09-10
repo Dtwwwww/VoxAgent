@@ -50,3 +50,51 @@ Implemented tool request, confirmation ticket, and tool audit persistence for sc
 
 - `finish_request(detail=...)` persists caller-provided detail as JSON; callers must avoid passing secrets, full prompts, paths, or stack traces.
 - A `tests/tools/__init__.py` package marker was added to avoid pytest module-name collision with the existing `tests/memory/test_repository.py` during full-suite collection.
+
+## Review Fix Follow-Up
+
+### Status
+
+Implemented repository-bound audit detail whitelisting for `finish_request()` and added migration constraint coverage requested by review.
+
+### RED Evidence
+
+- Command: `backend/.venv/Scripts/python.exe -m pytest tests/db/test_migrations.py tests/tools/test_repository.py -v`
+- Result: `21 failed, 25 passed in 4.00s`.
+- Expected failures: unsafe `finish_request(detail=...)` payloads containing token-like strings, Windows/POSIX absolute paths, prompt text, traceback/stack text, unknown keys, and invalid machine fields did not raise `ValueError` before the fix.
+
+### GREEN Evidence
+
+- Command: `backend/.venv/Scripts/python.exe -m pytest tests/db/test_migrations.py tests/tools/test_repository.py -v`
+- Result: `46 passed in 2.67s`.
+
+### Verification
+
+- Ruff: `backend/.venv/Scripts/python.exe -m ruff check src/voxagent/tools/repository.py tests/db/test_migrations.py tests/tools/test_repository.py`
+  - Result: `All checks passed!`.
+- Diff whitespace: `git diff --check`
+  - Result: exit 0; only Git CRLF conversion warnings for existing Windows line-ending behavior.
+- Full backend suite: `backend/.venv/Scripts/python.exe -m pytest`
+  - Result: `491 passed, 1 skipped in 90.64s (0:01:30)`.
+
+### Files
+
+- Modified: `backend/src/voxagent/tools/repository.py`
+- Modified: `backend/tests/db/test_migrations.py`
+- Modified: `backend/tests/tools/test_repository.py`
+- Modified: `.superpowers/sdd/task-2-report.md`
+
+### Self-Review
+
+- `finish_request()` now validates detail before opening the write transaction.
+- Only `duration_ms`, `error_code`, and `recovered_from` are accepted from public finish detail.
+- `duration_ms` must be an integer, not bool, in `0..300000`.
+- `error_code` must be a short lowercase machine code and cannot contain sensitive terms such as token, secret, path, prompt, traceback, or stack.
+- `recovered_from` is limited to `awaiting_confirmation|running`.
+- Unsafe detail rejection leaves request status, finish time, and audit rows unchanged.
+- Internal recovery audit now emits stable `recovered_from` enum detail.
+- Migration tests now cover hash length, permission/status CHECK constraints, canonical path uniqueness, and confirmation cascade.
+
+### Concerns
+
+- The prior concern about arbitrary `finish_request(detail=...)` persistence is resolved at the repository boundary.
