@@ -154,6 +154,49 @@ def test_consume_confirmation_rejects_invalid_ticket_state_without_side_effects(
     assert audit_count == 2
 
 
+def test_consume_confirmation_rejects_request_hash_tampering_atomically(
+    connection: sqlite3.Connection,
+) -> None:
+    repository = ToolRepository(connection)
+    request_id = make_request(repository)
+    ticket = make_confirmation(repository, request_id)
+    connection.execute(
+        "UPDATE tool_requests SET arguments_sha256 = ? WHERE id = ?",
+        (OTHER_HASH, request_id),
+    )
+
+    assert (
+        repository.consume_confirmation(
+            ticket.confirmation_id,
+            HASH,
+            "session-1",
+            7,
+            NOW,
+        )
+        is False
+    )
+
+    request_row = connection.execute(
+        "SELECT status FROM tool_requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()
+    ticket_row = connection.execute(
+        """
+        SELECT consumed_at_utc, decision
+        FROM tool_confirmations
+        WHERE confirmation_id = ?
+        """,
+        (ticket.confirmation_id,),
+    ).fetchone()
+    approved_count = connection.execute(
+        "SELECT COUNT(*) FROM tool_audit WHERE event_type = 'confirmation.approved'"
+    ).fetchone()[0]
+    assert request_row["status"] == "awaiting_confirmation"
+    assert ticket_row["consumed_at_utc"] is None
+    assert ticket_row["decision"] is None
+    assert approved_count == 0
+
+
 def test_consume_confirmation_only_succeeds_once(connection: sqlite3.Connection) -> None:
     repository = ToolRepository(connection)
     request_id = make_request(repository)

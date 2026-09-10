@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 from pathlib import Path
@@ -91,7 +92,12 @@ def test_rejects_symlink_escape(tmp_path: Path) -> None:
     try:
         link.symlink_to(outside)
     except OSError as error:
-        pytest.skip(f"cannot create symlink in this environment: {error}")
+        if getattr(error, "winerror", None) == 1314 or error.errno in {
+            errno.EPERM,
+            errno.EACCES,
+        }:
+            pytest.skip(f"cannot create symlink in this environment: {error}")
+        raise
 
     assert_denied("linked.txt", (root,))
 
@@ -114,4 +120,3 @@ def test_rejects_windows_junction_escape(tmp_path: Path) -> None:
         pytest.skip(f"cannot create Windows junction in this environment: {result.stderr}")
 
     assert_denied(r"jump\secret.txt", (root,))
-

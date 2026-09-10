@@ -102,3 +102,47 @@ Result:
 ## Concerns
 
 - The symlink escape test is skipped on this machine because the current Windows account lacks symlink creation privilege (`WinError 1314`). Junction escape is not skipped and passes.
+
+## Review Fix: Atomic Confirmation Consume
+
+Review requirement:
+
+- `ToolRepository.consume_confirmation()` must bind the ticket hash and request hash inside the same conditional `UPDATE`.
+- Symlink test skips must be limited to known permission failures.
+
+RED command:
+
+```powershell
+.venv/Scripts/python.exe -m pytest tests/tools/test_repository.py::test_consume_confirmation_rejects_request_hash_tampering_atomically -v
+```
+
+RED result:
+
+- Exit code: 1
+- Expected failure: after changing `tool_requests.arguments_sha256` to another valid SHA-256, `consume_confirmation()` incorrectly returned `True`.
+
+GREEN changes:
+
+- Added `tool_requests.arguments_sha256 = ?` to the `EXISTS` clause in the atomic confirmation consume update, passing the same validated digest.
+- Added repository coverage that verifies tampered request hash returns `False`, request remains `awaiting_confirmation`, ticket remains unconsumed, and no `confirmation.approved` audit is written.
+- Tightened symlink test skip handling to only known permission failures: Windows `WinError 1314`, `EPERM`, or `EACCES`.
+
+Focused verification:
+
+```powershell
+.venv/Scripts/python.exe -m pytest tests/tools/test_repository.py::test_consume_confirmation_rejects_request_hash_tampering_atomically -v
+.venv/Scripts/python.exe -m pytest tests/tools/test_repository.py tests/tools/test_confirmation.py tests/tools/test_path_policy.py tests/tools/test_policy.py -v
+.venv/Scripts/python.exe -m ruff check src/voxagent/tools/repository.py tests/tools/test_repository.py tests/tools/test_path_policy.py tests/tools/test_confirmation.py tests/tools/test_policy.py
+git diff --check
+```
+
+Focused results:
+
+- New atomic consume test: `1 passed in 0.17s`
+- Required focused suite: `70 passed, 1 skipped in 2.19s`
+- Ruff: `All checks passed!`
+- `git diff --check`: exit code 0, with only line-ending warnings for touched tracked files
+
+Full backend regression:
+
+- Started but intentionally interrupted after the user requested faster MVP validation and allowed skipping another full backend run.

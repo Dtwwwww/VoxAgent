@@ -266,9 +266,10 @@ class ToolRepository:
                         AND tool_requests.session_id = ?
                         AND tool_requests.turn_id = ?
                         AND tool_requests.status = 'awaiting_confirmation'
+                        AND tool_requests.arguments_sha256 = ?
                   )
                 """,
-                (timestamp, confirmation_id, digest, timestamp, session_id, turn_id),
+                (timestamp, confirmation_id, digest, timestamp, session_id, turn_id, digest),
             )
             if result.rowcount != 1:
                 return False
