@@ -37,6 +37,7 @@ class AgentService:
         checkpointer: object,
         now_utc: Callable[[], datetime],
     ) -> None:
+        self._cancelled: set[tuple[str, int]] = set()
         workflow = AgentWorkflow(
             model_name=model_name,
             model=model,
@@ -44,12 +45,18 @@ class AgentService:
             repository=repository,
             confirmation=confirmation,
             now_utc=now_utc,
+            is_cancelled=lambda session_id, turn_id: (
+                (
+                    session_id,
+                    turn_id,
+                )
+                in self._cancelled
+            ),
         )
         self.graph = build_graph(workflow, checkpointer)
         self._repository = repository
         self._confirmation = confirmation
         self._now_utc = now_utc
-        self._cancelled: set[tuple[str, int]] = set()
 
     async def start_turn(
         self,
@@ -96,7 +103,7 @@ class AgentService:
             return
         try:
             if approved:
-                self._confirmation.approve(
+                approved_call = self._confirmation.approve(
                     confirmation_id,
                     session_id,
                     turn_id,
@@ -112,7 +119,13 @@ class AgentService:
         except ConfirmationError as error:
             yield ToolFailed(record.call_id, record.tool_name, error.code)
             return
-        command = Command(resume={"approved": approved})
+        command = Command(
+            resume={
+                "approved": approved,
+                "call": (approved_call.model_dump(mode="json") if approved else None),
+                "tool_request_id": record.id,
+            }
+        )
         async for event in self._run(command, session_id, turn_id):
             yield event
 
@@ -132,7 +145,15 @@ class AgentService:
             "configurable": {"thread_id": f"{session_id}:{turn_id}"},
             "recursion_limit": 24,
         }
-        async for update in self.graph.astream(graph_input, config, stream_mode="updates"):
+        async for mode, update in self.graph.astream(
+            graph_input,
+            config,
+            stream_mode=["custom", "updates"],
+        ):
+            if mode == "custom":
+                if isinstance(update, Mapping):
+                    yield _event(update)
+                continue
             if not isinstance(update, dict):
                 continue
             for value in update.values():

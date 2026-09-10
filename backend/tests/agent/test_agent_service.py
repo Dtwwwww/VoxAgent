@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
@@ -64,9 +65,15 @@ def make_registry(
     counters: dict[str, int],
     *,
     permission: PermissionLevel = PermissionLevel.L0,
+    execution_started: asyncio.Event | None = None,
+    execution_release: asyncio.Event | None = None,
 ) -> ToolRegistry:
     async def execute(call: ToolCall) -> ToolResult:
         counters[call.name] = counters.get(call.name, 0) + 1
+        if execution_started is not None:
+            execution_started.set()
+        if execution_release is not None:
+            await execution_release.wait()
         return ToolResult(
             call_id=call.call_id,
             tool_name=call.name,
@@ -109,8 +116,15 @@ def make_service(
     *,
     permission: PermissionLevel = PermissionLevel.L0,
     checkpointer: object | None = None,
+    execution_started: asyncio.Event | None = None,
+    execution_release: asyncio.Event | None = None,
 ) -> AgentService:
-    registry = make_registry(counters, permission=permission)
+    registry = make_registry(
+        counters,
+        permission=permission,
+        execution_started=execution_started,
+        execution_release=execution_release,
+    )
     repository = ToolRepository(connection)
     return AgentService(
         model_name="qwen3:4b",
@@ -173,6 +187,36 @@ async def test_l0_executes_once_audits_and_continues_with_untrusted_result(
 
 
 @pytest.mark.asyncio
+async def test_tool_started_streams_before_blocked_execution_completes(
+    connection: sqlite3.Connection,
+) -> None:
+    call = ToolCall(call_id="call-1", name="demo.action", arguments={"value": "ok"})
+    model = ScriptedModel(
+        [
+            [AssistantToolCall(call), AssistantStreamDone()],
+            [AssistantTextDelta("完成"), AssistantStreamDone()],
+        ]
+    )
+    execution_started = asyncio.Event()
+    execution_release = asyncio.Event()
+    service = make_service(
+        connection,
+        model,
+        {},
+        execution_started=execution_started,
+        execution_release=execution_release,
+    )
+    iterator = service.start_turn("session-a", 1, [{"role": "user", "content": "run"}])
+
+    first = await anext(iterator)
+
+    assert first == ToolStarted("call-1", "demo.action")
+    await asyncio.wait_for(execution_started.wait(), timeout=1)
+    execution_release.set()
+    assert isinstance((await collect(iterator))[0], ToolCompleted)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("permission", [PermissionLevel.L1, PermissionLevel.L2])
 async def test_confirmation_executes_once_and_replay_is_unavailable(
     connection: sqlite3.Connection,
@@ -194,6 +238,16 @@ async def test_confirmation_executes_once_and_replay_is_unavailable(
     approval = initial[0]
     assert isinstance(approval, ToolApprovalRequired)
     assert counters == {}
+    await service.graph.aupdate_state(
+        {"configurable": {"thread_id": "session-a:1"}},
+        {
+            "current_call": {
+                "call_id": "call-1",
+                "name": "demo.action",
+                "arguments": {"value": "checkpoint-tamper"},
+            }
+        },
+    )
 
     resumed = await collect(
         service.resume_confirmation(approval.confirmation_id, "session-a", 1, approved=True)
@@ -210,6 +264,7 @@ async def test_confirmation_executes_once_and_replay_is_unavailable(
     ]
     assert replay == [ToolFailed("call-1", "demo.action", "confirmation_unavailable")]
     assert counters == {"demo.action": 1}
+    assert '"echo":"ok"' in model.messages[1][-1].content
 
 
 @pytest.mark.asyncio
@@ -310,6 +365,64 @@ async def test_guard_failures_never_execute(
     assert isinstance(result[0], ToolFailed)
     assert result[0].error_code == code
     assert counters == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_model_stream_and_node_limit_prevent_later_execution(
+    connection: sqlite3.Connection,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    call = ToolCall(call_id="x", name="demo.action", arguments={"value": "ok"})
+
+    class DelayedModel(ScriptedModel):
+        async def stream_agent(self, model, messages, tools):
+            entered.set()
+            await release.wait()
+            async for event in super().stream_agent(model, messages, tools):
+                yield event
+
+    cancelled_model = DelayedModel([[AssistantToolCall(call), AssistantStreamDone()]])
+    cancelled_counters: dict[str, int] = {}
+    cancelled_service = make_service(connection, cancelled_model, cancelled_counters)
+    pending = asyncio.create_task(
+        collect(
+            cancelled_service.start_turn("session-cancel", 1, [{"role": "user", "content": "run"}])
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    cancelled_service.cancel("session-cancel", 1)
+    release.set()
+
+    cancelled_events = await pending
+
+    assert isinstance(cancelled_events[0], ToolFailed)
+    assert cancelled_events[0].error_code == "turn_cancelled"
+    assert cancelled_counters == {}
+
+    calls = [
+        ToolCall(call_id=f"limit-{index}", name="demo.action", arguments={"value": "ok"})
+        for index in range(3)
+    ]
+    limited_model = ScriptedModel(
+        [
+            [AssistantToolCall(calls[0]), AssistantStreamDone()],
+            [AssistantToolCall(calls[1]), AssistantStreamDone()],
+            [AssistantToolCall(calls[2]), AssistantStreamDone()],
+        ]
+    )
+    limited_counters: dict[str, int] = {}
+    limited_service = make_service(connection, limited_model, limited_counters)
+
+    limited_events = await collect(
+        limited_service.start_turn("session-limit", 1, [{"role": "user", "content": "run"}])
+    )
+
+    assert any(
+        isinstance(event, ToolFailed) and event.error_code == "node_visit_limit_exceeded"
+        for event in limited_events
+    )
+    assert limited_counters == {"demo.action": 2}
 
 
 @pytest.mark.asyncio

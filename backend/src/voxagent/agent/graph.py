@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from langgraph.config import get_stream_writer
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 from langgraph.types import interrupt
@@ -48,6 +49,7 @@ class AgentWorkflow:
         repository: ToolRepository,
         confirmation: ConfirmationService,
         now_utc: Callable[[], datetime],
+        is_cancelled: Callable[[str, int], bool],
     ) -> None:
         self.model_name = model_name
         self.model = model
@@ -55,10 +57,11 @@ class AgentWorkflow:
         self.repository = repository
         self.confirmation = confirmation
         self.now_utc = now_utc
+        self.is_cancelled = is_cancelled
 
     async def route(self, state: AgentState) -> dict[str, Any]:
         visits = _next_visit(state)
-        if state.get("cancelled", False):
+        if state.get("cancelled", False) or self._cancelled(state):
             return {
                 "node_visit_count": visits,
                 "next_action": "respond",
@@ -74,6 +77,11 @@ class AgentWorkflow:
         }
 
     async def call_model(self, state: AgentState) -> dict[str, Any]:
+        if state.get("node_visit_count", 0) >= 8:
+            return {
+                "next_action": "respond",
+                "outbox": [_failed("", "", "node_visit_limit_exceeded")],
+            }
         visits = _next_visit(state)
         calls: list[dict[str, Any]] = []
         outbox: list[dict[str, Any]] = []
@@ -128,8 +136,8 @@ class AgentWorkflow:
             turn_id=state["turn_id"],
             authorized_roots=tuple(Path(item) for item in state.get("authorized_roots", [])),
             tool_call_count=state.get("tool_call_count", 0),
-            node_visit_count=visits - 1,
-            cancelled=state.get("cancelled", False),
+            node_visit_count=visits,
+            cancelled=state.get("cancelled", False) or self._cancelled(state),
         )
         decision = ToolPolicy.authorize(definition, call, context)
         if decision.action == "deny":
@@ -206,8 +214,11 @@ class AgentWorkflow:
         resumed = interrupt({"confirmation_id": state["confirmation_id"]})
         approved = isinstance(resumed, dict) and resumed.get("approved") is True
         if approved:
+            approved_call = ToolCall.model_validate(resumed.get("call"))
             return {
                 "node_visit_count": _next_visit(state),
+                "current_call": approved_call.model_dump(mode="json"),
+                "tool_request_id": int(resumed["tool_request_id"]),
                 "next_action": "execute_tool",
                 "outbox": [],
             }
@@ -219,8 +230,23 @@ class AgentWorkflow:
         }
 
     async def execute_tool(self, state: AgentState) -> dict[str, Any]:
-        visits = _next_visit(state)
         call = ToolCall.model_validate(state["current_call"])
+        if state.get("node_visit_count", 0) >= 8 or self._cancelled(state):
+            request_id = state.get("tool_request_id")
+            code = "turn_cancelled" if self._cancelled(state) else "node_visit_limit_exceeded"
+            if request_id is not None:
+                self.repository.finish_request(
+                    request_id,
+                    "failed",
+                    self.now_utc(),
+                    detail={"error_code": code},
+                )
+            return {
+                "next_action": "respond",
+                "outbox": [_failed(call.call_id, call.name, code)],
+            }
+        visits = _next_visit(state)
+        get_stream_writer()({"kind": "started", "call_id": call.call_id, "tool_name": call.name})
         result = await self.registry.execute(call)
         request_id = state.get("tool_request_id")
         if request_id is not None:
@@ -233,7 +259,7 @@ class AgentWorkflow:
                 self.now_utc(),
                 detail=detail,
             )
-        outbox = [{"kind": "started", "call_id": call.call_id, "tool_name": call.name}]
+        outbox: list[dict[str, Any]] = []
         if result.status == "succeeded":
             outbox.append(
                 {
@@ -277,13 +303,16 @@ class AgentWorkflow:
 
     async def respond(self, state: AgentState) -> dict[str, Any]:
         return {
-            "node_visit_count": _next_visit(state),
+            "node_visit_count": min(8, _next_visit(state)),
             "next_action": "persist",
             "outbox": [{"kind": "done"}],
         }
 
     async def persist(self, state: AgentState) -> dict[str, Any]:
-        return {"node_visit_count": _next_visit(state), "outbox": []}
+        return {"node_visit_count": min(8, _next_visit(state)), "outbox": []}
+
+    def _cancelled(self, state: AgentState) -> bool:
+        return self.is_cancelled(state["session_id"], state["turn_id"])
 
 
 def build_graph(workflow: AgentWorkflow, checkpointer: object):
@@ -324,7 +353,11 @@ def build_graph(workflow: AgentWorkflow, checkpointer: object):
     builder.add_conditional_edges(
         "execute_tool",
         lambda state: state["next_action"],
-        {"authorize": "authorize", "call_model": "call_model"},
+        {
+            "authorize": "authorize",
+            "call_model": "call_model",
+            "respond": "respond",
+        },
     )
     builder.add_edge("respond", "persist")
     builder.add_edge("persist", END)
@@ -377,7 +410,7 @@ def _bounded_tool_content(payload: dict[str, Any]) -> str:
         content = json.dumps(
             {
                 "status": payload.get("status", "failed"),
-                "user_summary": payload.get("user_summary", "工具结果过长。"),
+                "user_summary": "工具结果过长。",
                 "truncated": True,
             },
             ensure_ascii=False,
