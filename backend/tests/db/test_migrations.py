@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from voxagent.config import AppPaths
+from voxagent.db import migrations
 from voxagent.db.connection import open_database
 from voxagent.db.migrations import migrate
 
@@ -22,9 +23,9 @@ def database(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> sqlite3.Connect
 def test_new_database_migrates_to_latest_version_idempotently(
     database: sqlite3.Connection,
 ) -> None:
-    assert migrate(database) == 4
-    assert migrate(database) == 4
-    assert database.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+    assert migrate(database) == 5
+    assert migrate(database) == 5
+    assert database.execute("SELECT version FROM schema_version").fetchone()[0] == 5
 
     tables = {
         row[0]
@@ -46,6 +47,7 @@ def test_new_database_migrates_to_latest_version_idempotently(
         "tool_requests",
         "tool_confirmations",
         "tool_audit",
+        "mcp_capability_nonces",
     } <= tables
 
     memory_columns = {
@@ -188,6 +190,7 @@ def test_required_indexes_exist(database: sqlite3.Connection) -> None:
         "idx_document_chunks_parent_ordinal",
         "idx_messages_conversation_turn_role",
         "idx_schema_version_singleton",
+        "idx_mcp_capability_expiry",
     } <= indexes
 
 
@@ -282,3 +285,58 @@ def test_tool_confirmations_cascade_with_request(database: sqlite3.Connection) -
     database.execute("DELETE FROM tool_requests WHERE id = ?", (request_id,))
 
     assert database.execute("SELECT COUNT(*) FROM tool_confirmations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("old_version", [0, 3, 4])
+def test_upgrade_to_v5_has_unique_nonce_and_preserves_data(
+    database: sqlite3.Connection, old_version: int
+) -> None:
+    if old_version:
+        database.execute("CREATE TABLE schema_version(version INTEGER NOT NULL)")
+        database.execute("INSERT INTO schema_version VALUES (?)", (old_version,))
+        for version in range(1, old_version + 1):
+            for statement in getattr(migrations, f"_MIGRATION_{version:03d}"):
+                database.execute(statement)
+        database.execute("INSERT INTO conversations(title) VALUES ('keep me')")
+
+    statements: list[str] = []
+    database.set_trace_callback(statements.append)
+    assert migrate(database) == 5
+    database.set_trace_callback(None)
+    assert statements[0] == "BEGIN IMMEDIATE"
+    assert statements[-1] == "COMMIT"
+    assert migrate(database) == 5
+    if old_version:
+        assert database.execute("SELECT title FROM conversations").fetchone()[0] == "keep me"
+    columns = {row[1]: row for row in database.execute("PRAGMA table_info(mcp_capability_nonces)")}
+    assert set(columns) == {"nonce", "tool_request_id", "expires_at_utc", "consumed_at_utc"}
+    assert columns["nonce"][5] == 1
+    for name in ("tool_request_id", "expires_at_utc", "consumed_at_utc"):
+        assert columns[name][3] == 1
+    database.execute(
+        """INSERT INTO tool_requests(
+            id, session_id, turn_id, call_id, tool_name, arguments_json,
+            arguments_sha256, permission, status, created_at_utc
+        ) VALUES (1, 's', 1, 'c', 'reminder.create', '{}', ?, 'L1', 'running', ?)
+        """,
+        ("a" * 64, "2026-09-11T00:00:00Z"),
+    )
+    insert = "INSERT INTO mcp_capability_nonces VALUES (?, ?, ?, ?)"
+    values = ("unique-nonce", 1, "2026-09-11T00:00:30Z", "2026-09-11T00:00:00Z")
+    database.execute(insert, values)
+    with pytest.raises(sqlite3.IntegrityError):
+        database.execute(insert, values)
+    with pytest.raises(sqlite3.IntegrityError):
+        database.execute(insert, ("other-nonce", 999, values[2], values[3]))
+    database.execute("DELETE FROM tool_requests WHERE id = 1")
+    assert database.execute("SELECT COUNT(*) FROM mcp_capability_nonces").fetchone()[0] == 0
+
+
+def test_v5_migration_failure_rolls_back_version_and_schema(database: sqlite3.Connection) -> None:
+    database.execute("CREATE TABLE schema_version(version INTEGER NOT NULL)")
+    database.execute("INSERT INTO schema_version VALUES (4)")
+    database.execute("CREATE TABLE mcp_capability_nonces(nonce TEXT)")
+    with pytest.raises(sqlite3.OperationalError):
+        migrate(database)
+    assert database.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+    assert not database.in_transaction

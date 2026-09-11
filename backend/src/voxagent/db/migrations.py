@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 
 _UTC_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
@@ -170,6 +170,22 @@ _MIGRATION_004 = (
 )
 
 
+_MIGRATION_005 = (
+    """
+    CREATE TABLE mcp_capability_nonces (
+        nonce TEXT PRIMARY KEY,
+        tool_request_id INTEGER NOT NULL REFERENCES tool_requests(id) ON DELETE CASCADE,
+        expires_at_utc TEXT NOT NULL,
+        consumed_at_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX idx_mcp_capability_expiry
+    ON mcp_capability_nonces(expires_at_utc)
+    """,
+)
+
+
 def migrate(connection: sqlite3.Connection) -> int:
     """Atomically migrate a database to the latest supported schema."""
     connection.execute("BEGIN IMMEDIATE")
@@ -211,6 +227,13 @@ def migrate(connection: sqlite3.Connection) -> int:
             for statement in _MIGRATION_004:
                 connection.execute(statement)
             current_version = 4
+            connection.execute(
+                "UPDATE schema_version SET version = ?", (current_version,)
+            )
+        if current_version == 4:
+            for statement in _MIGRATION_005:
+                connection.execute(statement)
+            current_version = 5
             connection.execute(
                 "UPDATE schema_version SET version = ?", (current_version,)
             )
