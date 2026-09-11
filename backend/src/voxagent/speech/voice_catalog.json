@@ -1,0 +1,24 @@
+{
+  "voices": [
+    {
+      "voice_key": "default_voice",
+      "display_name": "声灵离线音色",
+      "description": "中文清楚；适合实时通话与日常朗读",
+      "gender": "neutral",
+      "engine": "kokoro",
+      "native_voice_id": 3,
+      "is_default": true,
+      "previewable": true
+    },
+    {
+      "voice_key": "breezy_tw_female",
+      "display_name": "台湾腔女声",
+      "description": "台湾普通话女声；高质量朗读（需配置 BreezyVoice），生成较慢",
+      "gender": "female",
+      "engine": "breezyvoice",
+      "native_voice_id": 0,
+      "is_default": false,
+      "previewable": false
+    }
+  ]
+}

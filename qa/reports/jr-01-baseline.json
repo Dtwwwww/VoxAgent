@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "plan": "JR-01",
+  "git_commit": "1f6d7659773533a2951f617298beeb35381a8f25",
+  "verification_command": "scripts/verify.ps1 -Scope All",
+  "verification_scope": "git archive of git_commit with repository-local dependency junctions",
+  "verification_exit_code": 0,
+  "backend": {
+    "existing_test_floor": 435,
+    "collected": 437,
+    "passed": 436,
+    "skipped": 1,
+    "status": "passed"
+  },
+  "frontend": {
+    "plan_floor_including_pre_existing_untracked_token_tests": 241,
+    "tracked_pre_jr01": 239,
+    "tracked_after_jr01": 240,
+    "workspace_after_jr01": 242,
+    "pre_existing_untracked_tests": [
+      "frontend/src/__tests__/token.test.ts"
+    ],
+    "status": "passed"
+  },
+  "ruff": "passed",
+  "typescript": "passed",
+  "vite_build": "passed",
+  "repository_hygiene": "passed",
+  "manual_claims": "not_run",
+  "warnings": [
+    "Starlette test client emitted one upstream deprecation warning for the installed httpx compatibility layer."
+  ]
+}

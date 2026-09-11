@@ -1,0 +1,309 @@
+export interface BrowserSpeechCallbacks {
+  onInterim(text: string): void;
+  onFinal(text: string): void;
+  onSpeechStart(): void;
+  onSpeechEnd(): void;
+  onRecognitionEnd(): void;
+  onError(error: BrowserSpeechFailure): void;
+}
+
+export interface BrowserVoice {
+  key: string;
+  name: string;
+  lang: string;
+  localService: boolean;
+}
+
+export interface BrowserSpeechFailure {
+  code:
+    | "unsupported"
+    | "track_not_supported"
+    | "network"
+    | "language-not-supported"
+    | "service-not-allowed"
+    | "not-allowed"
+    | "device-not-found"
+    | "recognition_error";
+  recoverable: boolean;
+  message?: string;
+}
+
+export type BrowserSpeechOwner = symbol;
+
+const STABLE_RECOGNITION_ERROR_CODES = new Set<BrowserSpeechFailure["code"]>([
+  "network",
+  "language-not-supported",
+  "service-not-allowed",
+  "not-allowed",
+]);
+
+function stableRecognitionErrorCode(code: string): BrowserSpeechFailure["code"] {
+  return STABLE_RECOGNITION_ERROR_CODES.has(code as BrowserSpeechFailure["code"])
+    ? code as BrowserSpeechFailure["code"]
+    : "recognition_error";
+}
+
+function recognitionStartFailure(error: unknown): BrowserSpeechFailure {
+  const record = typeof error === "object" && error !== null
+    ? error as { name?: unknown; message?: unknown }
+    : null;
+  const name = typeof record?.name === "string" ? record.name : "";
+  const message = typeof record?.message === "string" ? record.message : String(error);
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return { code: "not-allowed", recoverable: false, message };
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return { code: "device-not-found", recoverable: false, message };
+  }
+  return { code: "track_not_supported", recoverable: true };
+}
+
+const CHINESE_VOICE_NAME = /Chinese|中文|Xiaoxiao|Yunxi|Huihui|Yaoyao/i;
+
+function defaultScope(): Window | undefined {
+  return typeof window === "undefined" ? undefined : window;
+}
+
+function recognitionConstructor(scope: Window): SpeechRecognitionConstructor | undefined {
+  return scope.SpeechRecognition ?? scope.webkitSpeechRecognition;
+}
+
+export class BrowserSpeechProvider {
+  private recognition: SpeechRecognition | null = null;
+  private recognitionVersion = 0;
+  private readonly processedFinalIndexes = new Set<number>();
+  private speechVersion = 0;
+  private readonly defaultSpeechOwner = Symbol("browser-speech-default");
+  private readonly cancelledSpeechOwners = new Set<BrowserSpeechOwner>();
+  private readonly pendingSpeechOwners = new Map<BrowserSpeechOwner, number>();
+  private readonly activeUtterances = new Map<SpeechSynthesisUtterance, {
+    owner: BrowserSpeechOwner;
+    reject(reason: DOMException): void;
+  }>();
+
+  constructor(private readonly scope: Window = defaultScope() as Window) {}
+
+  static isSupported(scope: Window | undefined = defaultScope()): boolean {
+    return Boolean(scope && recognitionConstructor(scope) && scope.speechSynthesis && scope.SpeechSynthesisUtterance);
+  }
+
+  async start(
+    track: MediaStreamTrack,
+    callbacks: BrowserSpeechCallbacks,
+    allowDefaultInputFallback: boolean,
+  ): Promise<void> {
+    if (!BrowserSpeechProvider.isSupported(this.scope)) {
+      callbacks.onError({ code: "unsupported", recoverable: false });
+      return;
+    }
+
+    this.stopRecognition();
+    this.processedFinalIndexes.clear();
+    const Recognition = recognitionConstructor(this.scope);
+    if (!Recognition) {
+      callbacks.onError({ code: "unsupported", recoverable: false });
+      return;
+    }
+
+    const recognition = new Recognition();
+    const version = ++this.recognitionVersion;
+    this.recognition = recognition;
+    recognition.lang = "zh-CN";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.onresult = (event) => {
+      if (version !== this.recognitionVersion) return;
+      const finalText: string[] = [];
+      const interimText: string[] = [];
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = (result[0]?.transcript ?? "").trim();
+        if (transcript.length === 0) continue;
+        if (result.isFinal) {
+          if (this.processedFinalIndexes.has(index)) continue;
+          this.processedFinalIndexes.add(index);
+          finalText.push(transcript);
+        }
+        else interimText.push(transcript);
+      }
+      if (interimText.length > 0) callbacks.onInterim(interimText.join(""));
+      if (finalText.length > 0) callbacks.onFinal(finalText.join(""));
+    };
+    recognition.onspeechstart = () => {
+      if (version === this.recognitionVersion) callbacks.onSpeechStart();
+    };
+    recognition.onspeechend = () => {
+      if (version === this.recognitionVersion) callbacks.onSpeechEnd();
+    };
+    recognition.onend = () => {
+      if (version === this.recognitionVersion) callbacks.onRecognitionEnd();
+    };
+    recognition.onerror = (event) => {
+      if (version !== this.recognitionVersion) return;
+      callbacks.onError({
+        code: stableRecognitionErrorCode(event.error),
+        recoverable: event.error !== "not-allowed"
+          && event.error !== "service-not-allowed"
+          && event.error !== "audio-capture",
+        message: event.message || event.error,
+      });
+    };
+
+    try {
+      recognition.start(track);
+    } catch (error) {
+      if (!(error instanceof TypeError)) {
+        callbacks.onError(recognitionStartFailure(error));
+        return;
+      }
+      if (!allowDefaultInputFallback) {
+        callbacks.onError({ code: "track_not_supported", recoverable: true });
+        return;
+      }
+      try {
+        recognition.start();
+      } catch (fallbackError) {
+        callbacks.onError(recognitionStartFailure(fallbackError));
+      }
+    }
+  }
+
+  stopRecognition(): void {
+    this.recognitionVersion += 1;
+    const recognition = this.recognition;
+    this.recognition = null;
+    if (!recognition) return;
+    recognition.onresult = null;
+    recognition.onspeechstart = null;
+    recognition.onspeechend = null;
+    recognition.onend = null;
+    recognition.onerror = null;
+    try {
+      recognition.stop();
+    } catch {
+      // Some implementations throw when recognition has not started.
+    }
+  }
+
+  voices(): BrowserVoice[] {
+    if (!this.scope?.speechSynthesis) return [];
+    return this.scope.speechSynthesis.getVoices()
+      .filter((voice) => voice.lang.toLowerCase().startsWith("zh") || CHINESE_VOICE_NAME.test(voice.name))
+      .map((voice) => ({
+        key: voice.voiceURI || `${voice.name}:${voice.lang}`,
+        name: voice.name,
+        lang: voice.lang,
+        localService: voice.localService,
+      }));
+  }
+
+  subscribeVoices(listener: (voices: BrowserVoice[]) => void): () => void {
+    const synthesis = this.scope?.speechSynthesis;
+    if (!synthesis) return () => undefined;
+    const handleVoicesChanged = () => listener(this.voices());
+    synthesis.addEventListener("voiceschanged", handleVoicesChanged);
+    return () => synthesis.removeEventListener("voiceschanged", handleVoicesChanged);
+  }
+
+  async speak(
+    text: string,
+    voiceKey: string | null,
+    rate: number,
+    owner: BrowserSpeechOwner = this.defaultSpeechOwner,
+  ): Promise<void> {
+    if (!this.scope?.speechSynthesis || !this.scope.SpeechSynthesisUtterance) {
+      throw new Error("Speech synthesis is not supported");
+    }
+    if (this.pendingSpeechOwners.size > 0 || this.activeUtterances.size > 0) {
+      this.cancelSpeech();
+    }
+    this.pendingSpeechOwners.set(owner, (this.pendingSpeechOwners.get(owner) ?? 0) + 1);
+    const version = this.speechVersion;
+    try {
+      const voices = await this.voicesAfterLoadingWindow();
+      if (version !== this.speechVersion || this.cancelledSpeechOwners.delete(owner)) {
+        throw new DOMException("Speech synthesis was cancelled", "AbortError");
+      }
+      const chineseVoices = voices.filter((voice) => this.isChineseVoice(voice));
+      const selectedVoice = voiceKey === null
+        ? chineseVoices[0]
+        : chineseVoices.find((voice) => (voice.voiceURI || `${voice.name}:${voice.lang}`) === voiceKey);
+      if (!selectedVoice) {
+        throw new Error(voiceKey === null
+          ? "No Chinese speech synthesis voice is available"
+          : "The requested Chinese speech synthesis voice is unavailable");
+      }
+      const utterance = new this.scope.SpeechSynthesisUtterance(text);
+      utterance.lang = "zh-CN";
+      utterance.rate = rate;
+      utterance.voice = selectedVoice;
+      await new Promise<void>((resolve, reject) => {
+        this.activeUtterances.set(utterance, { owner, reject });
+        const finish = (complete: () => void) => {
+          if (version !== this.speechVersion || !this.activeUtterances.has(utterance)) return;
+          this.activeUtterances.delete(utterance);
+          utterance.onend = null;
+          utterance.onerror = null;
+          complete();
+        };
+        utterance.onend = () => finish(resolve);
+        utterance.onerror = (event) => finish(() => reject(new Error(event.error || "Speech synthesis failed")));
+        this.scope.speechSynthesis.speak(utterance);
+      });
+    } finally {
+      const remaining = (this.pendingSpeechOwners.get(owner) ?? 1) - 1;
+      if (remaining > 0) this.pendingSpeechOwners.set(owner, remaining);
+      else {
+        this.pendingSpeechOwners.delete(owner);
+        this.cancelledSpeechOwners.delete(owner);
+      }
+    }
+  }
+
+  cancelSpeech(owner?: BrowserSpeechOwner): void {
+    if (owner !== undefined) {
+      const hasPendingSpeech = (this.pendingSpeechOwners.get(owner) ?? 0) > 0;
+      const hasActiveSpeech = [...this.activeUtterances.values()].some((active) => active.owner === owner);
+      if (!hasPendingSpeech && !hasActiveSpeech) return;
+      this.cancelledSpeechOwners.add(owner);
+      if (!hasActiveSpeech) return;
+    }
+    this.speechVersion += 1;
+    for (const [utterance, active] of this.activeUtterances) {
+      utterance.onend = null;
+      utterance.onerror = null;
+      active.reject(new DOMException("Speech synthesis was cancelled", "AbortError"));
+    }
+    this.activeUtterances.clear();
+    this.scope?.speechSynthesis?.cancel();
+  }
+
+  close(): void {
+    this.stopRecognition();
+    this.cancelSpeech();
+  }
+
+  private isChineseVoice(voice: SpeechSynthesisVoice): boolean {
+    return voice.lang.toLowerCase().startsWith("zh") || CHINESE_VOICE_NAME.test(voice.name);
+  }
+
+  private voicesAfterLoadingWindow(): Promise<SpeechSynthesisVoice[]> {
+    const synthesis = this.scope.speechSynthesis;
+    const immediate = synthesis.getVoices();
+    if (immediate.length > 0) return Promise.resolve(immediate);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        synthesis.removeEventListener("voiceschanged", onVoicesChanged);
+        resolve(synthesis.getVoices());
+      };
+      const onVoicesChanged = () => finish();
+      const timer = setTimeout(finish, 250);
+      synthesis.addEventListener("voiceschanged", onVoicesChanged);
+    });
+  }
+}

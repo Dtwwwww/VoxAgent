@@ -10,6 +10,17 @@
     "RequiredFiles": ["model.int8.onnx", "tokens.txt"]
   },
   {
+    "Name": "streaming-paraformer-bilingual-zh-en",
+    "Archive": "sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
+    "Url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
+    "Directory": "sherpa-onnx-streaming-paraformer-bilingual-zh-en",
+    "Version": "2024-03-10",
+    "Source": "k2-fsa/sherpa-onnx release asr-models",
+    "ArchiveBytes": 1047319737,
+    "ArchiveSha256": "5462a1fce42693deae572af1e8c4687124b12aa85fe61ff4d3168bb5280e205f",
+    "RequiredFiles": ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"]
+  },
+  {
     "Name": "kokoro-int8-zh-en",
     "Archive": "kokoro-int8-multi-lang-v1_1.tar.bz2",
     "Url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
@@ -28,5 +39,16 @@
     "Source": "k2-fsa/sherpa-onnx release tts-models",
     "ArchiveSha256": "e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
     "RequiredFiles": ["model.onnx", "tokens.txt", "lexicon.txt"]
+  },
+  {
+    "Name": "silero-vad",
+    "Format": "file",
+    "Archive": "silero_vad.onnx",
+    "Url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+    "Directory": "silero-vad",
+    "Version": "silero_vad.onnx",
+    "Source": "k2-fsa/sherpa-onnx release asr-models (MIT)",
+    "ArchiveSha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+    "RequiredFiles": ["silero_vad.onnx"]
   }
 ]

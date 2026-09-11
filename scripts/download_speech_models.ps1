@@ -6,6 +6,9 @@ param(
     [string]$ModelManifestPath,
 
     [Parameter(Mandatory = $false)]
+    [string[]]$ModelName,
+
+    [Parameter(Mandatory = $false)]
     [switch]$SkipPreflightForTests,
 
     [Parameter(Mandatory = $false)]
@@ -42,7 +45,6 @@ else {
 }
 
 $runtimeBootstrap = Join-Path $PSScriptRoot 'voxagent_runtime.ps1'
-& $runtimeBootstrap -DataRoot $DataRoot -Quiet -SkipPreflightForTests:$SkipPreflightForTests
 
 function Get-ArchiveSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -140,10 +142,30 @@ function Test-CompletedModel {
     }
     try {
         $marker = Get-Content -Raw -LiteralPath $markerPath | ConvertFrom-Json
-        return (
+        $markerMatches = (
             ([string]$marker.version -eq [string]$Model.Version) -and
             ([string]$marker.archive_sha256 -eq ([string]$Model.ArchiveSha256).ToLowerInvariant())
         )
+        if (-not $markerMatches) {
+            return $false
+        }
+        $modelFormat = if ([string]::IsNullOrWhiteSpace([string]$Model.Format)) {
+            'archive'
+        }
+        else {
+            [string]$Model.Format
+        }
+        if ($modelFormat -eq 'file') {
+            $assetPath = Resolve-ManifestPath `
+                -Root $Target `
+                -RelativePath ([string]$Model.Archive) `
+                -Label 'completed file asset'
+            return (
+                (Test-Path -LiteralPath $assetPath -PathType Leaf) -and
+                ((Get-ArchiveSha256 -Path $assetPath) -eq ([string]$Model.ArchiveSha256).ToLowerInvariant())
+            )
+        }
+        return $true
     }
     catch {
         return $false
@@ -220,7 +242,40 @@ function Assert-SafeArchive {
     }
 }
 
-$models = @(Get-Content -Raw -LiteralPath $ModelManifestPath | ConvertFrom-Json)
+$manifestModels = Get-Content -Raw -LiteralPath $ModelManifestPath | ConvertFrom-Json
+$allModels = [System.Collections.Generic.List[object]]::new()
+foreach ($manifestModel in $manifestModels) {
+    $allModels.Add($manifestModel)
+}
+if ($PSBoundParameters.ContainsKey('ModelName')) {
+    if (@($ModelName).Count -eq 0) {
+        throw 'ModelName must not be empty.'
+    }
+    $models = [System.Collections.Generic.List[object]]::new()
+    foreach ($requestedModelName in $ModelName) {
+        if ([string]::IsNullOrWhiteSpace($requestedModelName)) {
+            throw 'ModelName must not be blank.'
+        }
+        $matchedModel = $null
+        foreach ($candidateModel in $allModels) {
+            if (([string]$candidateModel.Name) -ceq ([string]$requestedModelName)) {
+                if ($matchedModel) {
+                    throw "Model manifest contains duplicate name: $requestedModelName"
+                }
+                $matchedModel = $candidateModel
+            }
+        }
+        if ($null -eq $matchedModel) {
+            throw "Unknown model name: $requestedModelName"
+        }
+        $models.Add($matchedModel)
+    }
+}
+else {
+    $models = $allModels
+}
+
+& $runtimeBootstrap -DataRoot $DataRoot -Quiet -SkipPreflightForTests:$SkipPreflightForTests
 
 $modelRoot = [IO.Path]::GetFullPath((Join-Path $DataRoot 'models\speech'))
 $stagingRoot = Assert-ContainedPath `
@@ -234,8 +289,29 @@ foreach ($model in $models) {
     Assert-SafeLeafName -Value ([string]$model.Name) -Label 'Name'
     Assert-SafeLeafName -Value ([string]$model.Archive) -Label 'Archive'
     Assert-SafeLeafName -Value ([string]$model.Directory) -Label 'Directory'
+    $modelFormat = if ([string]::IsNullOrWhiteSpace([string]$model.Format)) {
+        'archive'
+    }
+    else {
+        [string]$model.Format
+    }
+    if ($modelFormat -notin @('archive', 'file')) {
+        throw "Invalid Format for $($model.Name): $modelFormat"
+    }
     if (-not ([string]$model.ArchiveSha256 -match '^[0-9a-fA-F]{64}$')) {
         throw "Invalid ArchiveSha256 for $($model.Name)"
+    }
+    $expectedArchiveBytes = $null
+    if ($model.PSObject.Properties.Name -contains 'ArchiveBytes') {
+        try {
+            $expectedArchiveBytes = [Int64]$model.ArchiveBytes
+        }
+        catch {
+            throw "Invalid ArchiveBytes for $($model.Name)"
+        }
+        if ($expectedArchiveBytes -lt 1) {
+            throw "Invalid ArchiveBytes for $($model.Name)"
+        }
     }
     if (@($model.RequiredFiles).Count -eq 0) {
         throw "RequiredFiles must not be empty for $($model.Name)"
@@ -277,9 +353,20 @@ foreach ($model in $models) {
         ((Get-ArchiveSha256 -Path $archive) -ne $expectedHash)) {
         Move-ToQuarantine -Root $modelRoot -Path $archive -Reason 'checksum'
     }
+    if ((Test-Path -LiteralPath $archive -PathType Leaf) -and
+        ($null -ne $expectedArchiveBytes) -and
+        ((Get-Item -LiteralPath $archive).Length -ne $expectedArchiveBytes)) {
+        Move-ToQuarantine -Root $modelRoot -Path $archive -Reason 'size'
+    }
 
     if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
         Copy-ArchiveSource -Source ([string]$model.Url) -Destination $partialArchive
+        if (($null -ne $expectedArchiveBytes) -and
+            ((Get-Item -LiteralPath $partialArchive).Length -ne $expectedArchiveBytes)) {
+            $actualArchiveBytes = (Get-Item -LiteralPath $partialArchive).Length
+            Move-ToQuarantine -Root $modelRoot -Path $partialArchive -Reason 'size'
+            throw "Archive size mismatch for $($model.Name): expected $expectedArchiveBytes, got $actualArchiveBytes"
+        }
         $downloadedHash = Get-ArchiveSha256 -Path $partialArchive
         if ($downloadedHash -ne $expectedHash) {
             Move-ToQuarantine -Root $modelRoot -Path $partialArchive -Reason 'download'
@@ -297,17 +384,27 @@ foreach ($model in $models) {
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     $published = $false
     try {
-        Assert-SafeArchive -ArchivePath $archive -ExtractionRoot $staging
-        & tar.exe -xjf $archive -C $staging
-        if ($LASTEXITCODE -ne 0) {
-            throw "tar.exe exited with code $LASTEXITCODE"
-        }
         $extractedTarget = Resolve-ManifestPath `
             -Root $staging `
             -RelativePath ([string]$model.Directory) `
-            -Label 'extracted model'
-        if (-not (Test-Path -LiteralPath $extractedTarget -PathType Container)) {
-            throw "archive did not contain $($model.Directory)"
+            -Label 'staged model'
+        if ($modelFormat -eq 'archive') {
+            Assert-SafeArchive -ArchivePath $archive -ExtractionRoot $staging
+            & tar.exe -xjf $archive -C $staging
+            if ($LASTEXITCODE -ne 0) {
+                throw "tar.exe exited with code $LASTEXITCODE"
+            }
+            if (-not (Test-Path -LiteralPath $extractedTarget -PathType Container)) {
+                throw "archive did not contain $($model.Directory)"
+            }
+        }
+        else {
+            New-Item -ItemType Directory -Force -Path $extractedTarget | Out-Null
+            $stagedAsset = Resolve-ManifestPath `
+                -Root $extractedTarget `
+                -RelativePath ([string]$model.Archive) `
+                -Label 'staged file asset'
+            Copy-Item -LiteralPath $archive -Destination $stagedAsset
         }
         if (-not (Test-RequiredFiles -Root $extractedTarget -RequiredFiles $model.RequiredFiles)) {
             throw 'one or more required files are missing'

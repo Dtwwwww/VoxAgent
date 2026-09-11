@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "fixture": "benchmarks/fixtures/mandarin-command.wav",
+  "fixture_sha256": "0c087907bfdd8296acd9c5c5d34e28e8081955448dfc7c6bb46fa33647415221",
+  "model_id": "sensevoice-int8",
+  "partial_model_id": "streaming-paraformer-bilingual-zh-en",
+  "run_count": 5,
+  "audio_duration_seconds": 15.0,
+  "transcript": "你好，森林，请检查本地模型，并告诉我今天的日期。",
+  "latency_seconds": {
+    "final_asr_median": 0.89,
+    "final_asr_p95": 1.095,
+    "partial_update_median": 0.086,
+    "partial_update_p95": 0.127
+  },
+  "real_time_factor": {
+    "median": 0.059,
+    "p95": 0.073
+  },
+  "peak_process_rss_bytes": 1038774272
+}

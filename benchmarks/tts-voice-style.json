@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "selection_method": "measured_intelligibility_gate",
+  "roundtrip_evidence_path": "benchmarks/tts-roundtrip-20260905.json",
+  "selected_engine": "kokoro",
+  "selection_reason": "Kokoro voice 3 passed the Mandarin roundtrip intelligibility gate; Melo voice 0 returned only 'The is.' despite lower latency.",
+  "resolved_native_voice_id": 3,
+  "public_voice": {
+    "voice_key": "default_voice",
+    "display_name": "声灵离线音色",
+    "description": "中文清楚；完全离线时生成较慢",
+    "gender": "neutral",
+    "is_default": true,
+    "previewable": true
+  }
+}

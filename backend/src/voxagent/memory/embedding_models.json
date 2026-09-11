@@ -1,0 +1,28 @@
+{
+  "Name": "bge-small-zh-v1.5",
+  "Directory": "bge-small-zh-v1.5",
+  "Dimension": 512,
+  "Source": "onnx-community/bge-small-zh-v1.5-ONNX",
+  "Revision": "18e2da99700c49ed48c0a0e3683da39348fbbb36",
+  "License": "MIT",
+  "Files": [
+    {
+      "Name": "tokenizer.json",
+      "Url": "https://huggingface.co/onnx-community/bge-small-zh-v1.5-ONNX/resolve/18e2da99700c49ed48c0a0e3683da39348fbbb36/tokenizer.json?download=true",
+      "Sha256": "3d09c84ebd10306706a79a8276b3ab736a40d8ec03251c7639f4e52c3a1a4f8e",
+      "Bytes": 362603
+    },
+    {
+      "Name": "model_quantized.onnx",
+      "Url": "https://huggingface.co/onnx-community/bge-small-zh-v1.5-ONNX/resolve/18e2da99700c49ed48c0a0e3683da39348fbbb36/onnx/model_quantized.onnx?download=true",
+      "Sha256": "99a6e522710c00220c89f8c52e0cc5aa09d4cbb1c34c0e932eab3a9dfdc65df3",
+      "Bytes": 168002
+    },
+    {
+      "Name": "model_quantized.onnx_data",
+      "Url": "https://huggingface.co/onnx-community/bge-small-zh-v1.5-ONNX/resolve/18e2da99700c49ed48c0a0e3683da39348fbbb36/onnx/model_quantized.onnx_data?download=true",
+      "Sha256": "952623481ca8beea884e3d3c9ecaf8a3c7bf1d0c21de29e970cd31af9d37a90b",
+      "Bytes": 23774208
+    }
+  ]
+}

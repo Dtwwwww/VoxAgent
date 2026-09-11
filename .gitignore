@@ -5,3 +5,15 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .pytest-tmp/
+backend/.pytest-*/
+benchmarks/voice-review/
+benchmarks/voice-review-*/
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.token_tmp
+.pnpm-store/
+.tmp-pytest-*/
+*.db-wal
+*.db-shm
+qa/reports/local-*.json

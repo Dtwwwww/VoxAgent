@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "engine": "kokoro",
+  "native_voice_id": 58,
+  "run_count": 5,
+  "texts": [
+    {
+      "text": "你好，我是声灵，很高兴陪你聊聊天。",
+      "first_audio_latency_seconds": {
+        "p50": 7.512,
+        "p95": 7.65
+      },
+      "generated_duration_seconds": {
+        "p50": 3.709,
+        "p95": 3.712
+      },
+      "synthesis_real_time_factor": {
+        "p50": 2.025,
+        "p95": 2.064
+      }
+    },
+    {
+      "text": "下午三点提醒我喝水，然后打开记事本。",
+      "first_audio_latency_seconds": {
+        "p50": 7.566,
+        "p95": 8.264
+      },
+      "generated_duration_seconds": {
+        "p50": 4.105,
+        "p95": 4.115
+      },
+      "synthesis_real_time_factor": {
+        "p50": 1.901,
+        "p95": 2.008
+      }
+    },
+    {
+      "text": "今天的 meeting 改到晚上八点，请不要忘记。",
+      "first_audio_latency_seconds": {
+        "p50": 8.69,
+        "p95": 9.092
+      },
+      "generated_duration_seconds": {
+        "p50": 4.41,
+        "p95": 4.412
+      },
+      "synthesis_real_time_factor": {
+        "p50": 1.97,
+        "p95": 2.061
+      }
+    }
+  ],
+  "peak_process_rss_bytes": 432295936
+}
