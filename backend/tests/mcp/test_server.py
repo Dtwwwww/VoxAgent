@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
 import json
@@ -10,8 +11,9 @@ import sys
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import psutil
 import pytest
-from mcp import Client
+from mcp import Client, StdioServerParameters
 from mcp.server import MCPServer
 
 from voxagent.db.migrations import migrate
@@ -134,6 +136,7 @@ async def test_invalid_capability_never_reaches_write_executor(runtime, failure)
     async with Client(runtime.server, raise_exceptions=True) as client:
         result = await client.call_tool("reminders.create", call_arguments)
     assert payload(result)["error_code"] == "mcp_capability_rejected"
+    assert result.is_error is True
     assert runtime.write_calls == []
     assert not any("INSERT INTO reminders" in statement for statement in writes)
     assert runtime.connection.execute("SELECT COUNT(*) FROM reminders").fetchone()[0] == 0
@@ -156,7 +159,9 @@ async def test_valid_writes_execute_once_and_finish_original_audit(runtime):
             "reminders.complete", {**complete_args, "_voxagent_capability": complete_token}
         )
     assert payload(created)["status"] == payload(completed)["status"] == "succeeded"
+    assert created.is_error is completed.is_error is False
     assert payload(replayed)["error_code"] == "mcp_capability_rejected"
+    assert replayed.is_error is True
     assert runtime.write_calls == ["reminders.create"]
     assert runtime.connection.execute("SELECT COUNT(*) FROM reminders").fetchone()[0] == 1
     events = runtime.connection.execute(
@@ -178,6 +183,7 @@ async def test_business_failure_has_stable_code_and_original_request_audit(runti
             "reminders.complete", {**arguments, "_voxagent_capability": token}
         )
     assert payload(result)["error_code"] == "reminder_not_open"
+    assert result.is_error is True
     assert runtime.connection.execute(
         "SELECT status FROM tool_requests WHERE id = ?", (request_id,)
     ).fetchone()[0] == "failed"
@@ -210,6 +216,54 @@ async def test_unexpected_business_exception_is_sanitized(runtime):
     assert payload(result)["error_code"] == "tool_execution_failed"
     wire = result.model_dump_json()
     assert all(value not in wire for value in ["private", "secret", "Traceback"])
+
+
+@pytest.mark.asyncio
+async def test_sdk_output_serialization_error_is_structured_and_sanitized(runtime):
+    runtime.source.search_knowledge = lambda query, limit: [{
+        "content": object(), "display_name": r"C:\private\voxagent.db api_key=secret",
+    }]
+    async with Client(runtime.server, raise_exceptions=True) as client:
+        result = await client.call_tool("knowledge.search", {"query": "agent"})
+    assert result.is_error is True
+    assert payload(result)["error_code"] == "tool_execution_failed"
+    wire = result.model_dump_json()
+    assert all(value not in wire for value in ["private", "secret", "Traceback"])
+
+
+@pytest.mark.asyncio
+async def test_stdio_empty_data_root_serves_tools_without_loading_embedding(tmp_path):
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "voxagent.mcp.server"],
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(sys.path),
+            "VOXAGENT_DATA_ROOT": str(tmp_path),
+            "VOXAGENT_MCP_CAPABILITY_KEY": KEY.hex(),
+        },
+    )
+    processes = []
+    async with asyncio.timeout(20):
+        async with Client(parameters, raise_exceptions=True) as client:
+            tools = await client.list_tools()
+            listed = await client.call_tool("reminders.list", {})
+            processes = [
+                process for process in psutil.Process().children(recursive=True)
+                if "voxagent.mcp.server" in process.cmdline()
+            ]
+            # A missing model is a search failure, not a server startup failure.
+            search = await client.call_tool("knowledge.search", {"query": "agent"})
+            still_available = await client.call_tool("reminders.list", {})
+    assert {tool.name for tool in tools.tools} == {
+        "knowledge.search", "reminders.list", "reminders.create", "reminders.complete",
+    }
+    assert listed.is_error is still_available.is_error is False
+    assert payload(listed)["data"] == payload(still_available)["data"] == {"reminders": []}
+    assert payload(search)["error_code"] == "tool_execution_failed"
+    assert search.is_error is True
+    assert processes and all(not process.is_running() for process in processes)
+    assert not (tmp_path / "models").exists()
 
 
 @pytest.mark.parametrize("missing", ["VOXAGENT_DATA_ROOT", "VOXAGENT_MCP_CAPABILITY_KEY"])
@@ -248,11 +302,9 @@ def test_main_builds_dependencies_runs_default_stdio_and_closes_database(
 ):
     server_module, _ = modules
     from voxagent.db import connection as connection_module
-    from voxagent.memory.embedder import BgeSmallZhEmbedder
 
     monkeypatch.setenv("VOXAGENT_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("VOXAGENT_MCP_CAPABILITY_KEY", KEY.hex())
-    monkeypatch.setattr(BgeSmallZhEmbedder, "from_path", lambda path: object())
     seen = []
     connections = []
     real_open = connection_module.open_database

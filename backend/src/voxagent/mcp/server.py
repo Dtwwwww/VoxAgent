@@ -11,7 +11,13 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field, ValidationError
 
 from voxagent.mcp.capability import CapabilityVerifier
-from voxagent.mcp.server_tools import ARGUMENT_MODELS, WRITE_TOOLS, ToolServices, failure
+from voxagent.mcp.server_tools import (
+    ARGUMENT_MODELS,
+    WRITE_TOOLS,
+    LazyKnowledgeSource,
+    ToolServices,
+    failure,
+)
 from voxagent.tools.schema import ToolResult
 
 
@@ -44,8 +50,16 @@ async def _safe_arguments(ctx: ServerRequestContext, call_next: CallNext) -> Han
     except ValidationError:
         # SDK validation errors include the input; reject before that formatter runs.
         return _wire_failure(name, "invalid_arguments")
-    result = await call_next(ctx)
-    if isinstance(result, CallToolResult) and result.is_error:
+    try:
+        # The SDK middleware continuation returns a wire dictionary, not its model.
+        result = CallToolResult.model_validate(await call_next(ctx))
+        structured = ToolResult.model_validate(result.structured_content)
+    except Exception:
+        # Includes SDK output conversion failures, which carry only error text.
+        return _wire_failure(name, "tool_execution_failed")
+    if structured.status != "succeeded":
+        return result.model_copy(update={"is_error": True})
+    if result.is_error:
         return _wire_failure(name, "tool_execution_failed")
     return result
 
@@ -99,10 +113,8 @@ def main() -> int:
         return 2
 
     from voxagent.config import AppPaths
-    from voxagent.conversation.context import SqliteContextSource
     from voxagent.db.connection import open_database
     from voxagent.db.migrations import migrate
-    from voxagent.memory.embedder import BgeSmallZhEmbedder
 
     connection = None
     try:
@@ -110,8 +122,9 @@ def main() -> int:
         connection = open_database(paths.data / "voxagent.db")
         migrate(connection)
         verifier = CapabilityVerifier.from_environment(connection, os.environ)
-        embedder = BgeSmallZhEmbedder.from_path(paths.models / "embeddings" / "bge-small-zh-v1.5")
-        source = SqliteContextSource(paths.data / "voxagent.db", embedder)
+        source = LazyKnowledgeSource(
+            paths.data / "voxagent.db", paths.models / "embeddings" / "bge-small-zh-v1.5"
+        )
         server = build_mcp_server(ToolServices(connection, source), verifier)
         server.run()
         return 0

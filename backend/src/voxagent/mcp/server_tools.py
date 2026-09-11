@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -50,6 +51,22 @@ def failure(name: str, code: str, *, call_id: str = "") -> ToolResult:
         error_code=code,
         duration_ms=0,
     )
+
+
+class LazyKnowledgeSource:
+    def __init__(self, database_path: Path, model_path: Path) -> None:
+        self._database_path = database_path
+        self._model_path = model_path
+        self._source: KnowledgeSource | None = None
+
+    def search_knowledge(self, query: str, limit: int) -> list[object]:
+        if self._source is None:
+            from voxagent.conversation.context import SqliteContextSource
+            from voxagent.memory.embedder import BgeSmallZhEmbedder
+
+            embedder = BgeSmallZhEmbedder.from_path(self._model_path)
+            self._source = SqliteContextSource(self._database_path, embedder)
+        return list(self._source.search_knowledge(query, limit))
 
 
 @dataclass(frozen=True)
