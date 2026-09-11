@@ -150,7 +150,7 @@ class McpLocalClient:
                         or error.code not in _TRANSIENT
                     ):
                         raise
-                    await self._stop()
+                    await self._stop(recovering=True)
             raise AssertionError("unreachable")
 
     async def close(self) -> None:
@@ -158,7 +158,7 @@ class McpLocalClient:
             self._closed = True
             await self._stop()
 
-    async def _stop(self) -> None:
+    async def _stop(self, *, recovering: bool = False) -> None:
         shutdown_error = None
         if self._owner is not None:
             if not self._owner.done():
@@ -171,7 +171,9 @@ class McpLocalClient:
         self._tools = ()
         self._error = None
         self._queue = asyncio.Queue()
-        if shutdown_error is not None:
+        # The owner has exited and state is cleared before a recovery can proceed.
+        # Explicit close still reports every shutdown error to its caller.
+        if shutdown_error is not None and not (recovering and shutdown_error.code in _TRANSIENT):
             raise shutdown_error
 
     async def _run(self) -> None:

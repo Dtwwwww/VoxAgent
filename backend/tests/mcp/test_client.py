@@ -182,11 +182,21 @@ async def test_exactly_ten_pages_are_allowed(module, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_shutdown_failure_surfaces_and_repeated_close_is_safe(module, tmp_path):
-    fake = InProcessClient(exit_failure=RuntimeError("private shutdown detail"))
+@pytest.mark.parametrize(
+    "exit_failure,code",
+    [
+        (RuntimeError("private shutdown detail"), "mcp_server_error"),
+        (MCPError(CONNECTION_CLOSED, "closed"), "mcp_connection_closed"),
+        (MCPError(REQUEST_TIMEOUT, "timeout"), "mcp_timeout"),
+    ],
+)
+async def test_shutdown_failure_surfaces_and_repeated_close_is_safe(
+    module, tmp_path, exit_failure, code
+):
+    fake = InProcessClient(exit_failure=exit_failure)
     client = local(module, tmp_path, Factory(fake))
     await client.start()
-    with pytest.raises(module.McpClientError, match="mcp_server_error"):
+    with pytest.raises(module.McpClientError, match=code):
         await client.close()
     await client.close()
     assert fake.entries == fake.exits == 1
@@ -257,6 +267,40 @@ async def test_l0_rebuilds_once_on_only_transient_errors(module, tmp_path, failu
     assert len(factory.parameters) == 2
     assert second.entries == second.exits == 1
     assert first.exits == (0 if startup else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [CONNECTION_CLOSED, REQUEST_TIMEOUT])
+async def test_l0_rebuild_continues_after_transient_shutdown_error(module, tmp_path, exit_code):
+    first = InProcessClient(
+        failure=MCPError(REQUEST_TIMEOUT, "call timed out"),
+        exit_failure=MCPError(exit_code, "old connection shutdown failed"),
+    )
+    second = InProcessClient()
+    factory = Factory(first, second)
+    client = local(module, tmp_path, factory)
+    try:
+        assert await client.call("reminders.list", {}) == {"ok": True}
+        assert len(factory.parameters) == 2
+        assert first.exits == 1
+        assert len(first.calls) == len(second.calls) == 1
+    finally:
+        await client.close()
+    assert second.exits == 1
+
+
+@pytest.mark.asyncio
+async def test_l0_recovery_propagates_nontransient_shutdown_error(module, tmp_path):
+    first = InProcessClient(
+        failure=MCPError(REQUEST_TIMEOUT, "call timed out"),
+        exit_failure=MCPError(INTERNAL_ERROR, "shutdown failed"),
+    )
+    factory = Factory(first, InProcessClient())
+    client = local(module, tmp_path, factory)
+    with pytest.raises(module.McpClientError, match="mcp_server_error"):
+        await client.call("reminders.list", {})
+    await client.close()
+    assert len(factory.parameters) == first.exits == 1
 
 
 @pytest.mark.asyncio
