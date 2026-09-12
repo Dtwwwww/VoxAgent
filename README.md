@@ -1,6 +1,6 @@
 # VoxAgent（声灵）
 
-本地优先的 Windows 流式语音 AI 应用。当前已完成实时语音、长期记忆、本地知识检索和安全单 Agent 工具 MVP；MCP 和 Hybrid RAG 按求职增强路线实施。
+本地优先的 Windows 流式语音 AI 应用。当前已完成实时语音、长期记忆、本地知识检索、安全单 Agent 工具 MVP 和本地 stdio MCP 互操作；Hybrid RAG 按求职增强路线实施。
 
 面向初级大模型应用 / Agent 工程师作品集：不仅展示对话界面，也保留模型选型、资源测量、严格协议、失败回退和自动化验证证据。
 
@@ -12,6 +12,7 @@
 - SQLite 保存会话、单一人格和需确认的长期记忆；敏感记忆由后端策略拦截，并保留来源轮次。
 - 可导入 TXT、Markdown、文本 PDF 与 DOCX，使用本地 BGE embedding 做向量检索，并在回答下展示命中的记忆和知识片段。
 - Qwen3 原生 Tool Calling 接入有界 LangGraph；六个冻结注册工具按 L0/L1/L2 分级，写操作和应用启动必须单次确认，并保留脱敏审计。
+- 工具运行时可选择 `native` 或 `mcp`：四个知识/提醒工具可通过固定本地 stdio MCP 子进程执行，文件搜索和应用启动仍留在宿主；一次性 capability 绑定请求、工具和参数并防重放。
 - 支持本地数据导出、完整清空、每日备份、模型身份校验和 CPU / RAM / VRAM / 延迟基准。
 
 实现证据与边界见 [当前能力清单](docs/portfolio/current-capabilities.md)，三分钟演示流程见 [演示脚本](docs/portfolio/demo-script.md)。
@@ -24,7 +25,10 @@ flowchart LR
     API --> ORCH[ConversationOrchestrator<br/>流式会话与确认恢复]
     ORCH --> AGENT[LangGraph<br/>8 节点 / 3 工具调用上限]
     AGENT --> LLM[Ollama / Qwen3 4B Tool Calling]
-    AGENT --> TOOLS[冻结 Tool Registry<br/>L0 / L1 / L2 + 审计]
+    AGENT --> REGISTRY[冻结 Tool Registry<br/>L0 / L1 / L2 + 审计]
+    REGISTRY --> NATIVE[宿主原生工具<br/>文件搜索 / 应用启动]
+    REGISTRY --> MCPCLIENT[MCP Client<br/>固定本地 stdio]
+    MCPCLIENT --> MCPSERVER[MCP Server<br/>知识 / 提醒]
     ORCH --> DATA[SQLite<br/>人格 / 记忆 / 文档分段]
     ORCH --> RAG[BGE 本地向量检索]
     UI --> BROWSER[可选浏览器语音]
@@ -55,13 +59,23 @@ flowchart LR
 先在 PowerShell 生成一次性 Token；只在本次终端和 URL 中使用：
 
 ```powershell
-$sessionToken = [Convert]::ToBase64String(
-    [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
-).TrimEnd('=').Replace('+','-').Replace('/','_')
+$tokenBytes = New-Object byte[] 32
+$tokenRng = [Security.Cryptography.RandomNumberGenerator]::Create()
+try { $tokenRng.GetBytes($tokenBytes) } finally { $tokenRng.Dispose() }
+$sessionToken = [Convert]::ToBase64String($tokenBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
 $sessionToken
 ```
 
-确认 Ollama 已在 `127.0.0.1:11434` 使用 `D:\VoxAgentData\models\ollama` 启动。然后在仓库根目录分别打开两个 PowerShell 窗口。
+在第一个 PowerShell 窗口启动项目自带的便携版 Ollama；它不在系统 PATH 中：
+
+```powershell
+$env:OLLAMA_MODELS = 'D:\VoxAgentData\models\ollama'
+$env:OLLAMA_NO_CLOUD = '1'
+$env:OLLAMA_HOST = '127.0.0.1:11434'
+& 'D:\VoxAgentData\runtime\ollama\ollama.exe' serve
+```
+
+看到 `Listening on 127.0.0.1:11434` 后，再在仓库根目录打开另外两个 PowerShell 窗口。
 
 后端：
 
@@ -69,7 +83,7 @@ $sessionToken
 $sessionToken = '粘贴刚才生成的 Token'
 $env:VOXAGENT_DATA_ROOT = 'D:\VoxAgentData'
 Set-Location .\backend
-& .\.venv\Scripts\voxagent.exe serve --session-token $sessionToken --port 8765
+& .\.venv\Scripts\python.exe -m voxagent.cli serve --session-token $sessionToken --port 8765
 ```
 
 前端：
@@ -80,6 +94,8 @@ Set-Location .\frontend
 ```
 
 浏览器访问 `http://127.0.0.1:5173/?token=粘贴同一个Token`。首次使用知识库前，还需在仓库根目录运行 `& .\scripts\download_embedding_model.ps1 -DataRoot 'D:\VoxAgentData'`。
+
+要让 Agent 的知识/提醒工具改走 MCP，在后端命令中增加 `--tool-provider mcp`。MCP 子进程由宿主以固定命令启动，不需要额外开端口；启动或工具发现失败时后端会直接失败，不会静默降级。
 
 ## 一键验证
 
@@ -100,6 +116,14 @@ uv run --extra dev voxagent evaluate-agent --dataset ..\benchmarks\agent-mvp-dat
 
 真实 Ollama 试跑可将 `--mode` 改为 `local` 并用 `--model` 指定本机 Qwen3；它只评估首轮工具选择，不自动批准或执行工具。
 
+MCP 的无模型确定性演示：
+
+```powershell
+& .\scripts\demo-mcp.ps1
+```
+
+脚本使用临时数据目录启动真实 stdio Server/Client，发现四个工具，执行 L0 查询，证明未授权 L2 被拒绝，再批准一次写入并证明 capability 无法重放。成功时输出 `MCP demo passed`。
+
 ## 隐私和安全边界
 
 - 后端、Ollama 与前端开发服务只监听 `127.0.0.1`；API 与 WebSocket 共用一次性 Session Token。
@@ -113,7 +137,7 @@ uv run --extra dev voxagent evaluate-agent --dataset ..\benchmarks\agent-mvp-dat
 
 - JR-02 当前是单 Agent MVP，不是多 Agent 平台；固定评测为 12 条 fake 冒烟集，60 条正式 Agent 集与真实模型稳定性验收仍待 JR-06。
 - 工具确认后的恢复回答暂不自动朗读；授权目录目前依赖 SQLite 配置，尚无前端目录管理器。
-- 当前没有 MCP Server / Client，不能把原生工具注册表描述成 MCP 互操作能力。
+- MCP 当前只支持本地 stdio；知识和提醒四个工具可走 MCP，文件搜索和应用启动为缩小权限边界仍由宿主原生执行，不开放 HTTP/SSE 或第三方任意 Server 配置。
 - 当前知识检索是本地向量检索，不是 BM25 + Vector + RRF + Reranker 的 Hybrid RAG，也没有固定金标 RAG 评测集。
 - 文本型 PDF 可解析，扫描 PDF 不做 OCR；单文件上限 20 MB。
 - Kokoro 本地 CPU 合成首段延迟约 3.9 秒；浏览器在线语音的可用性和隐私取决于浏览器与操作系统平台。
@@ -125,7 +149,7 @@ uv run --extra dev voxagent evaluate-agent --dataset ..\benchmarks\agent-mvp-dat
 
 1. **JR-01 基线整备：** 全绿测试、一键验证、仓库卫生和作品集说明。
 2. **JR-02 安全 Agent 工具 MVP（已完成）：** 有界状态图、原生 Tool Calling、六个工具、权限确认、防重放、前端确认卡和审计；正式评测扩充留到 JR-06。
-3. **JR-03 MCP：** 本地 stdio Server / Client、统一 provider 和攻击矩阵。
+3. **JR-03 MCP（已完成）：** 本地 stdio Server / Client、统一 provider、一次性 capability 和安全边界演示。
 4. **JR-04 Hybrid RAG：** FTS5 + Vector + RRF + ONNX Reranker 与金标评测。
 5. **JR-05 可观测与交付：** 脱敏日志、Metrics、CI、Docker Demo 和运维文档。
 6. **JR-06 硬件验收：** 真实插话、30 分钟稳定性和最终求职发布证据。

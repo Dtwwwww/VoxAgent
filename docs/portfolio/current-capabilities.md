@@ -1,9 +1,9 @@
 # VoxAgent 当前能力与证据边界
 
-**基线：** JR-02 安全 Agent MVP（2026-09-11）
+**基线：** JR-03 本地 MCP 互操作（2026-09-12）
 **目标岗位：** 初级大模型应用工程师 / Agent 应用工程师 / 语音 AI 应用工程师
 
-本文只描述当前仓库可运行、可测试或已有实测报告的能力。路线图中的 MCP、Hybrid RAG、可观测性和交付增强不计入当前能力。
+本文只描述当前仓库可运行、可测试或已有实测报告的能力。路线图中的 Hybrid RAG、可观测性和交付增强不计入当前能力。
 
 ## 能力矩阵
 
@@ -11,7 +11,8 @@
 | --- | --- | --- | --- |
 | Python 服务 | FastAPI HTTP / WebSocket、本机回环监听、启动期 Session Token、严格请求与事件模型 | `backend/src/voxagent/api/`、`contracts/protocol-fixtures.json`、后端 API / e2e 测试 | 不是公网多租户服务；没有 OAuth、RBAC 或远程部署 |
 | 流式对话 | Ollama 流式生成、文字/语音统一消息流、轮次和请求 ID 关联、取消与旧事件隔离 | `backend/src/voxagent/conversation/`、`frontend/src/useVoiceSession.ts` | 工具确认恢复后的回答暂不自动 TTS |
-| 安全 Agent | Qwen3 Tool Calling、LangGraph 单 Agent、冻结式六工具注册表、3 次工具/8 节点上限、L0/L1/L2、单次确认、防重放和脱敏审计 | `backend/src/voxagent/agent/`、`backend/src/voxagent/tools/`、`frontend/src/components/ToolApprovalCard.tsx` | 不是多 Agent；无 MCP；真实 Ollama 稳定性与 60 条正式评测尚未验收 |
+| 安全 Agent | Qwen3 Tool Calling、LangGraph 单 Agent、冻结式六工具注册表、3 次工具/8 节点上限、L0/L1/L2、单次确认、防重放和脱敏审计 | `backend/src/voxagent/agent/`、`backend/src/voxagent/tools/`、`frontend/src/components/ToolApprovalCard.tsx` | 不是多 Agent；真实 Ollama 稳定性与 60 条正式评测尚未验收 |
+| MCP 互操作 | MCP Python SDK 2.2、本地 stdio Server/Client、统一 provider、固定子进程配置、30 秒一次性 capability、结果大小与超时边界 | `backend/src/voxagent/mcp/`、`backend/tests/mcp/`、`scripts/demo-mcp.ps1` | 只开放知识/提醒四个受控工具；不支持任意第三方 Server、HTTP、SSE 或公网传输 |
 | 实时语音 | 本地 VAD、流式/最终 ASR、短句 TTS、插话、模式切换、浏览器语音失败后本地回退 | `backend/src/voxagent/speech/`、`frontend/src/realtime/`、`benchmarks/voice-loop-acceptance.json` | 默认仅本地；物理麦克风与扬声器体验仍需人工验收 |
 | 长期记忆 | 建议后确认、手动增删改、来源轮次、敏感内容拦截、本地 embedding 检索 | `backend/src/voxagent/memory/`、`frontend/src/memory/` | 不是跨用户记忆服务；策略不能替代完整 DLP |
 | 本地知识 | TXT / Markdown / 文本 PDF / DOCX 解析、分段、BGE 向量、去重、事务导入、引用展示 | `backend/src/voxagent/knowledge/`、`frontend/src/knowledge/` | 无 OCR；当前不是 BM25 + Vector + Reranker |
@@ -29,11 +30,12 @@
 6. 导入失败或取消不留下半份知识索引，完整清空需要明确确认短语。
 7. L1/L2 工具未确认时执行次数为零；确认票据绑定会话、轮次和 SHA-256 参数摘要，120 秒过期且不可重放。
 8. 前端确认只回传 `confirmation_id`，不接收、不显示也不能修改工具参数；审计界面只渲染允许公开的机器字段。
+9. MCP 写 capability 由宿主在确认后注入，绑定 request、工具和规范参数哈希，30 秒过期且只消费一次；模型看不到该字段。
 
 ## 当前不应宣称的能力
 
 - 不应写“已完成生产级 Agent 平台”：当前是可演示的单 Agent MVP，12 条 fake 冒烟评测不能替代 60 条真实模型评测与稳定性验收。
-- 不应写“已支持 MCP”：当前没有 MCP Server / Client 或 provider 适配层。
+- 不应写“已支持任意 MCP 平台”：当前是固定本地 stdio Server/Client，只暴露四个受控工具，不接受模型或用户改写子进程命令。
 - 不应写“已实现 Hybrid RAG”：当前为本地向量检索，没有 FTS5、RRF、Reranker 和固定金标评测。
 - 不应写“生产级可观测与部署”：当前没有结构化追踪、Prometheus、CI/CD、容器化演示和生产 SLO。
 - 不应写“所有真机语音验收已通过”：自动回环已通过，但真实说话、听感和批量插话仍待人工。
@@ -51,6 +53,12 @@
 ```powershell
 Set-Location .\backend
 uv run --extra dev voxagent evaluate-agent --dataset ..\benchmarks\agent-mvp-dataset.json --mode fake
+```
+
+无模型 MCP 安全边界演示：
+
+```powershell
+& .\scripts\demo-mcp.ps1
 ```
 
 应用启动与数据操作分别见：

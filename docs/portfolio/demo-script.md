@@ -31,9 +31,19 @@
 3. 打开“设置 → 工具审计”，展示 request、confirmation、started/succeeded 等事件；只展示耗时、错误码和恢复状态，不展示参数、绝对路径或 Token。
 4. 说明 Tool Registry 启动后冻结，每轮最多 3 次工具调用和 8 次图节点；项目没有 Shell、PowerShell、删除文件或安装软件工具。
 
+## JR-03 MCP 无模型加演（约 30 秒）
+
+在仓库根目录运行：
+
+```powershell
+& .\scripts\demo-mcp.ps1
+```
+
+依次讲解脚本输出：MCP Client 通过固定本地 stdio 子进程发现四个工具；L0 提醒查询成功；无 capability 的 L2 创建被拒绝；宿主确认后只允许写入一次；重放同一 capability 再次被拒绝；最后审计中出现 `request.succeeded`。该演示使用临时数据目录，不依赖 Ollama、GPU、麦克风，也不修改 `D:\VoxAgentData`。
+
 ## 收尾话术
 
-“这版证明了我能把 FastAPI、WebSocket、本地模型、RAG、记忆、实时语音和带权限确认的单 Agent 做成可验证闭环。当前没有把原生工具注册表冒充成 MCP，也没有把 12 条 fake 冒烟评测冒充成真实模型稳定性结论；下一步会补 MCP、Hybrid RAG、正式评测、可观测和交付证据。”
+“这版证明了我能把 FastAPI、WebSocket、本地模型、RAG、记忆、实时语音和带权限确认的单 Agent 做成可验证闭环，也能用本地 stdio MCP 复用同一权限与审计边界。当前没有把四个受控 MCP 工具夸大成任意第三方 Server 平台，也没有把 12 条 fake 冒烟评测冒充成真实模型稳定性结论；下一步会补 Hybrid RAG、正式评测、可观测和交付证据。”
 
 ## 演示后的证据
 
