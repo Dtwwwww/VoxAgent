@@ -17,10 +17,11 @@ from mcp.types import (
     ListToolsResult,
     TextContent,
 )
+from pydantic import ValidationError
 
 from voxagent.mcp.capability import CapabilityIssuer
 from voxagent.mcp.models import McpDiscoveredTool, McpProviderConfig
-from voxagent.tools.schema import PermissionLevel
+from voxagent.tools.schema import PermissionLevel, ToolResult
 
 _PERMISSIONS = {
     "knowledge.search": PermissionLevel.L0,
@@ -29,6 +30,14 @@ _PERMISSIONS = {
     "reminders.complete": PermissionLevel.L2,
 }
 _TRANSIENT = frozenset({"mcp_startup_failed", "mcp_connection_closed", "mcp_timeout"})
+_ERROR_MESSAGES = {
+    "mcp_capability_rejected": "Capability rejected.",
+    "invalid_arguments": "Invalid tool arguments.",
+    "reminder_not_open": "Reminder is not open.",
+    "tool_execution_failed": "Tool execution failed.",
+    "unknown_tool": "Unknown tool.",
+}
+_MAX_DURATION_MS = 300_000
 
 
 class McpClientError(RuntimeError):
@@ -37,6 +46,28 @@ class McpClientError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class McpToolError(McpClientError):
+    """A validated business failure with only safe fields for the provider."""
+
+    def __init__(self, result: ToolResult) -> None:
+        self.result = result
+        code = result.error_code
+        super().__init__(code if code in _ERROR_MESSAGES else "mcp_tool_error")
+
+
+def _validate_json(value: object) -> None:
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError
+            _validate_json(item)
+    elif type(value) is list:
+        for item in value:
+            _validate_json(item)
+    elif type(value) not in (str, int, float, bool, type(None)):
+        raise ValueError
 
 
 class _Session(Protocol):
@@ -231,21 +262,45 @@ class McpLocalClient:
         raise McpClientError("mcp_discovery_limit")
 
     def _parse(self, result: CallToolResult) -> dict[str, object]:
-        if result.is_error is not False:
+        if result.is_error is not False and result.is_error is not True:
             raise McpClientError("mcp_tool_error")
         if any(not isinstance(block, TextContent) for block in result.content):
             raise McpClientError("mcp_result_content")
         if not isinstance(result.structured_content, dict):
             raise McpClientError("mcp_result_object")
         try:
+            _validate_json(result.structured_content)
             encoded = json.dumps(
                 result.structured_content,
                 ensure_ascii=False,
                 separators=(",", ":"),
                 allow_nan=False,
             ).encode("utf-8")
+            if len(encoded) > self._config.maximum_result_bytes:
+                raise McpClientError("mcp_result_too_large")
+            value = json.loads(encoded)
         except (TypeError, ValueError, UnicodeError, RecursionError):
             raise McpClientError("mcp_result_object") from None
-        if len(encoded) > self._config.maximum_result_bytes:
-            raise McpClientError("mcp_result_too_large")
-        return result.structured_content
+        if result.is_error:
+            try:
+                failure = ToolResult.model_validate(value, strict=True)
+            except ValidationError:
+                raise McpClientError("mcp_tool_error") from None
+            if (
+                failure.error_code not in _ERROR_MESSAGES
+                or failure.tool_name not in {*_PERMISSIONS, "unknown"}
+                or failure.status == "succeeded"
+                or failure.duration_ms > _MAX_DURATION_MS
+            ):
+                raise McpClientError("mcp_tool_error")
+            raise McpToolError(
+                ToolResult(
+                    call_id="",
+                    tool_name=failure.tool_name,
+                    status=failure.status,
+                    user_summary=_ERROR_MESSAGES[failure.error_code],
+                    error_code=failure.error_code,
+                    duration_ms=failure.duration_ms,
+                )
+            )
+        return value

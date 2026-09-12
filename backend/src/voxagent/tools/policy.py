@@ -29,6 +29,7 @@ class PolicyContext:
 class AuthorizationDecision:
     action: PolicyAction
     code: str
+    tool_request_id: int | None = None
 
 
 class ToolPolicy:
@@ -62,4 +63,3 @@ class ToolPolicy:
 
 def _deny(code: str) -> AuthorizationDecision:
     return AuthorizationDecision("deny", code)
-

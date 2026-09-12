@@ -441,13 +441,14 @@ def test_finalize_voice_review_rejects_invalid_input_without_partial_artifacts(t
 
 
 def test_serve_uses_localhost_message_limit_and_no_access_log(monkeypatch):
+    monkeypatch.delenv("VOXAGENT_TOOL_PROVIDER", raising=False)
     application = object()
-    created: list[str] = []
+    created: list[tuple[str, str]] = []
     run_calls: list[tuple[object, dict[str, object]]] = []
     monkeypatch.setattr(
         cli,
         "_create_production_app",
-        lambda token: created.append(token) or application,
+        lambda token, tool_provider: created.append((token, tool_provider)) or application,
     )
     monkeypatch.setattr(
         cli.uvicorn,
@@ -461,7 +462,7 @@ def test_serve_uses_localhost_message_limit_and_no_access_log(monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert created == [SESSION_TOKEN]
+    assert created == [(SESSION_TOKEN, "native")]
     assert run_calls == [
         (
             application,
@@ -478,7 +479,7 @@ def test_serve_uses_localhost_message_limit_and_no_access_log(monkeypatch):
 def test_serve_fails_clearly_when_blind_scored_voice_catalog_is_absent(monkeypatch):
     started: list[object] = []
 
-    def missing_catalog(_token):
+    def missing_catalog(_token, tool_provider):
         raise VoiceCatalogError(
             "Production voice catalog requires scored blind voice review"
         )
@@ -504,6 +505,64 @@ def test_production_app_rejects_bad_token_before_loading_private_assets(monkeypa
 
     with pytest.raises(ValueError, match="32-byte URL-safe"):
         cli._create_production_app("short")
+
+    assert catalog_loads == []
+
+
+@pytest.mark.parametrize(
+    ("environment", "arguments", "expected"),
+    [
+        (None, ["--tool-provider", "mcp"], "mcp"),
+        ("mcp", [], "mcp"),
+        ("mcp", ["--tool-provider", "native"], "native"),
+        ("invalid", ["--tool-provider", "native"], "native"),
+    ],
+)
+def test_serve_selects_tool_provider(monkeypatch, environment, arguments, expected):
+    if environment is None:
+        monkeypatch.delenv("VOXAGENT_TOOL_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("VOXAGENT_TOOL_PROVIDER", environment)
+    providers = []
+    monkeypatch.setattr(
+        cli, "_create_production_app", lambda token, tool_provider: providers.append(tool_provider)
+    )
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *args, **kwargs: None)
+
+    result = CliRunner().invoke(
+        cli.app, ["serve", "--session-token", SESSION_TOKEN, *arguments]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert providers == [expected]
+
+
+@pytest.mark.parametrize("arguments", [[], ["--tool-provider", "unknown"]])
+def test_serve_rejects_invalid_provider_before_creating_application(monkeypatch, arguments):
+    monkeypatch.setenv("VOXAGENT_TOOL_PROVIDER", "unknown")
+    applications = []
+    monkeypatch.setattr(
+        cli, "_create_production_app", lambda *args, **kwargs: applications.append(object())
+    )
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *args, **kwargs: None)
+
+    result = CliRunner().invoke(
+        cli.app, ["serve", "--session-token", SESSION_TOKEN, *arguments]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "native" in result.output and "mcp" in result.output
+    assert applications == []
+
+
+@pytest.mark.parametrize("provider", [None, "unknown", ""])
+def test_production_app_rejects_bad_provider_before_loading_private_assets(monkeypatch, provider):
+    monkeypatch.setenv("VOXAGENT_TOOL_PROVIDER", "unknown")
+    catalog_loads = []
+    monkeypatch.setattr(cli, "load_production_catalog", lambda: catalog_loads.append(object()))
+
+    with pytest.raises(ValueError, match="native.*mcp"):
+        cli._create_production_app(SESSION_TOKEN, tool_provider=provider)
 
     assert catalog_loads == []
 

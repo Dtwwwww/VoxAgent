@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import datetime
@@ -24,7 +25,7 @@ from voxagent.llm.ollama import (
     TrustedToolResultMessage,
 )
 from voxagent.tools.confirmation import ConfirmationError, ConfirmationService, arguments_sha256
-from voxagent.tools.policy import PolicyContext, ToolPolicy
+from voxagent.tools.policy import AuthorizationDecision, PolicyContext, ToolPolicy
 from voxagent.tools.registry import ToolRegistry, UnknownToolError
 from voxagent.tools.repository import ToolRepository
 from voxagent.tools.schema import ToolCall
@@ -265,8 +266,22 @@ class AgentWorkflow:
             }
         visits = _next_visit(state)
         get_stream_writer()({"kind": "started", "call_id": call.call_id, "tool_name": call.name})
-        result = await self.registry.execute(call)
         request_id = state.get("tool_request_id")
+        # The graph carries the exact request started by policy/confirmation.
+        # Providers recheck this ID and approval before issuing a capability.
+        authorization = AuthorizationDecision(
+            "execute",
+            "confirmation_approved" if state.get("confirmation_id") else "tool_execute",
+            request_id,
+        )
+        try:
+            result = await self.registry.execute(call, authorization)
+        except asyncio.CancelledError:
+            if request_id is not None:
+                self.repository.finish_request(
+                    request_id, "failed", self.now_utc(), detail={"error_code": "turn_cancelled"}
+                )
+            raise
         if request_id is not None:
             detail: dict[str, Any] = {"duration_ms": result.duration_ms}
             if result.error_code is not None:

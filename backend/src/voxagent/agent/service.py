@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,8 @@ class AgentService:
         now_utc: Callable[[], datetime],
     ) -> None:
         self._cancelled: set[tuple[str, int]] = set()
+        self._stopping = False
+        self._active_runs: set[asyncio.Task[None]] = set()
         workflow = AgentWorkflow(
             model_name=model_name,
             model=model,
@@ -65,6 +68,10 @@ class AgentService:
         messages: Sequence[ModelMessage],
         authorized_roots: Sequence[Path] | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        if self._stopping:
+            yield ToolFailed("", "", "agent_shutting_down")
+            yield TurnDone()
+            return
         key = (session_id, turn_id)
         roots = (
             tuple(authorized_roots)
@@ -98,6 +105,9 @@ class AgentService:
         *,
         approved: bool,
     ) -> AsyncIterator[AgentEvent]:
+        if self._stopping:
+            yield ToolFailed("", "", "agent_shutting_down")
+            return
         try:
             _ticket, record = self._repository.get_confirmation_request(confirmation_id)
         except KeyError:
@@ -137,10 +147,55 @@ class AgentService:
     def cancel(self, session_id: str, turn_id: int) -> None:
         self._cancelled.add((session_id, turn_id))
 
+    async def shutdown(self, timeout_seconds: float = 3.0) -> None:
+        self._stopping = True
+        active = tuple(self._active_runs)
+        if active:
+            try:
+                await asyncio.wait(active, timeout=min(3.0, max(0.0, timeout_seconds)))
+            finally:
+                for task in active:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*active, return_exceptions=True)
+
     def _now(self) -> datetime:
         return self._now_utc()
 
     async def _run(
+        self,
+        graph_input: dict[str, Any] | Command,
+        session_id: str,
+        turn_id: int,
+    ) -> AsyncIterator[AgentEvent]:
+        # Own the graph task independently of event consumers: a consumer can
+        # pause between events or move between tasks while shutdown must still
+        # drain/cancel the graph before closing its database and MCP client.
+        queue: asyncio.Queue[AgentEvent | BaseException | None] = asyncio.Queue()
+
+        async def pump() -> None:
+            try:
+                async for event in self._stream(graph_input, session_id, turn_id):
+                    queue.put_nowait(event)
+            except BaseException as error:
+                queue.put_nowait(error)
+            finally:
+                queue.put_nowait(None)
+
+        task = asyncio.create_task(pump(), name=f"voxagent-turn-{turn_id}")
+        self._active_runs.add(task)
+        task.add_done_callback(self._active_runs.discard)
+        try:
+            while (item := await queue.get()) is not None:
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _stream(
         self,
         graph_input: dict[str, Any] | Command,
         session_id: str,

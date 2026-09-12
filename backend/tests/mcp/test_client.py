@@ -22,7 +22,7 @@ from mcp.types import (
 )
 
 from voxagent.mcp.capability import CapabilityIssuer
-from voxagent.tools.schema import PermissionLevel
+from voxagent.tools.schema import PermissionLevel, ToolResult
 
 NAMES = ("knowledge.search", "reminders.list", "reminders.create", "reminders.complete")
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -246,6 +246,164 @@ async def test_compact_utf8_result_size_boundary(module, tmp_path):
     with pytest.raises(module.McpClientError, match="result"):
         await client.call("reminders.list", {})
     await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    [
+        ("not", "json"),
+        {1: "not a string key"},
+        {None: "not a string key"},
+        {False: "not a string key"},
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        b"not json",
+        {"not", "json"},
+    ],
+)
+async def test_results_require_recursive_json_values(module, tmp_path, value):
+    response = result().model_copy(update={"structured_content": {"nested": [value]}})
+    fake = InProcessClient(response=response)
+    client = local(module, tmp_path, Factory(fake))
+    try:
+        with pytest.raises(module.McpClientError, match="^mcp_result_object$"):
+            await client.call("reminders.list", {})
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_success_result_is_a_detached_json_roundtrip(module, tmp_path):
+    response = result(data={"nested": [{"values": [None, True, False, 1, 1.5, "汉字"]}]})
+    fake = InProcessClient(response=response)
+    client = local(module, tmp_path, Factory(fake))
+    try:
+        parsed = await client.call("reminders.list", {})
+        assert parsed == response.structured_content
+        assert parsed is not response.structured_content
+        parsed["nested"][0]["values"].append("local mutation")
+        assert "local mutation" not in response.structured_content["nested"][0]["values"]
+    finally:
+        await client.close()
+
+
+def business_error(**updates):
+    return {
+        "call_id": "remote-private-call-id",
+        "tool_name": "reminders.complete",
+        "status": "failed",
+        "data": {"credential": "private-child-credential"},
+        "user_summary": "private-server-summary",
+        "error_code": "reminder_not_open",
+        "duration_ms": 17,
+        **updates,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code,status,summary",
+    [
+        ("mcp_capability_rejected", "denied", "Capability rejected."),
+        ("invalid_arguments", "failed", "Invalid tool arguments."),
+        ("reminder_not_open", "failed", "Reminder is not open."),
+        ("tool_execution_failed", "failed", "Tool execution failed."),
+        ("unknown_tool", "failed", "Unknown tool."),
+    ],
+)
+async def test_business_errors_propagate_only_sanitized_tool_result(
+    module, tmp_path, code, status, summary
+):
+    fake = InProcessClient(
+        response=result(data=business_error(error_code=code, status=status), is_error=True)
+    )
+    factory = Factory(fake)
+    client = local(module, tmp_path, factory)
+    try:
+        with pytest.raises(module.McpClientError) as raised:
+            await client.call("reminders.complete", {})
+        safe_result = getattr(raised.value, "result", None)
+        assert isinstance(safe_result, ToolResult)
+        assert isinstance(raised.value, module.McpToolError)
+        assert raised.value.code == code
+        assert str(raised.value) == code
+        assert safe_result.model_dump() == {
+            "call_id": "",
+            "tool_name": "reminders.complete",
+            "status": status,
+            "data": {},
+            "user_summary": summary,
+            "error_code": code,
+            "duration_ms": 17,
+        }
+        assert len(factory.parameters) == len(fake.calls) == 1
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"tool_name": "private-unrecognized-tool"},
+        {"status": "succeeded"},
+        {"status": "pending"},
+        {"error_code": "private-child-credential"},
+        {"error_code": None},
+        {"duration_ms": -1},
+        {"duration_ms": 300_001},
+        {"duration_ms": True},
+        {"duration_ms": "17"},
+        {"data": []},
+        {"call_id": []},
+        {"user_summary": []},
+        {"extra": "private-child-credential"},
+    ],
+)
+async def test_untrusted_business_error_envelopes_stay_generic(module, tmp_path, updates):
+    fake = InProcessClient(response=result(data=business_error(**updates), is_error=True))
+    client = local(module, tmp_path, Factory(fake))
+    try:
+        with pytest.raises(module.McpClientError) as raised:
+            await client.call("reminders.complete", {})
+        assert type(raised.value) is module.McpClientError
+        assert str(raised.value) == "mcp_tool_error"
+        assert not hasattr(raised.value, "result")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "updates,code",
+    [
+        (
+            {"content": [{"type": "future", "text": "private-child-credential"}]},
+            "mcp_result_content",
+        ),
+        ({"structured_content": None}, "mcp_result_object"),
+        ({"structured_content": business_error(data={"bad": (1, 2)})}, "mcp_result_object"),
+        ({"structured_content": business_error(data={"bad": {1: "value"}})}, "mcp_result_object"),
+        ({"structured_content": business_error(data={"bad": float("inf")})}, "mcp_result_object"),
+        (
+            {"structured_content": business_error(data={"large": "汉" * 30_000})},
+            "mcp_result_too_large",
+        ),
+    ],
+)
+async def test_business_errors_pass_content_json_and_size_checks(module, tmp_path, updates, code):
+    response = result(data=business_error(), is_error=True).model_copy(update=updates)
+    fake = InProcessClient(response=response)
+    client = local(module, tmp_path, Factory(fake))
+    try:
+        with pytest.raises(module.McpClientError) as raised:
+            await client.call("reminders.complete", {})
+        assert type(raised.value) is module.McpClientError
+        assert str(raised.value) == code
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

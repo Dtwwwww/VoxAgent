@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from time import perf_counter
 from types import MappingProxyType
+from typing import Protocol, cast
 
+from voxagent.tools.policy import AuthorizationDecision
 from voxagent.tools.schema import ToolCall, ToolDefinition, ToolExecutor, ToolResult
 
 
@@ -23,7 +26,16 @@ class UnknownToolError(ToolRegistryError):
     """Raised when a requested tool is not in the frozen registry."""
 
 
-ToolRegistration = tuple[ToolDefinition, ToolExecutor]
+AuthorizedToolExecutor = Callable[[ToolCall, AuthorizationDecision | None], Awaitable[ToolResult]]
+ToolRegistration = tuple[ToolDefinition, ToolExecutor | AuthorizedToolExecutor]
+
+
+class AuthorizedToolProvider(Protocol):
+    def definitions(self) -> tuple[ToolDefinition, ...]: ...
+
+    async def execute(
+        self, call: ToolCall, authorization: AuthorizationDecision | None
+    ) -> ToolResult: ...
 
 
 class ToolRegistry:
@@ -31,12 +43,18 @@ class ToolRegistry:
         self._registrations: dict[str, ToolRegistration] = {}
         self._frozen_registrations: MappingProxyType[str, ToolRegistration] | None = None
 
-    def register(self, definition: ToolDefinition, executor: ToolExecutor) -> None:
+    def register(
+        self, definition: ToolDefinition, executor: ToolExecutor | AuthorizedToolExecutor
+    ) -> None:
         if self._frozen_registrations is not None:
             raise FrozenToolRegistryError("tool registry is frozen")
         if definition.name in self._registrations:
             raise DuplicateToolError(f"tool is already registered: {definition.name}")
         self._registrations[definition.name] = (definition, executor)
+
+    def register_provider(self, provider: AuthorizedToolProvider) -> None:
+        for definition in provider.definitions():
+            self.register(definition, provider.execute)
 
     def freeze(self) -> None:
         if self._frozen_registrations is None:
@@ -58,7 +76,9 @@ class ToolRegistry:
             for name in sorted(self._frozen_registrations)
         )
 
-    async def execute(self, call: ToolCall) -> ToolResult:
+    async def execute(
+        self, call: ToolCall, authorization: AuthorizationDecision | None = None
+    ) -> ToolResult:
         definition, executor = self.get(call.name)
         validated_call = ToolCall.from_untrusted(
             definition,
@@ -68,7 +88,17 @@ class ToolRegistry:
         started = perf_counter()
         try:
             async with asyncio.timeout(definition.timeout_seconds):
-                return await executor(validated_call)
+                if definition.provider == "mcp":
+                    return await cast(AuthorizedToolExecutor, executor)(
+                        validated_call, authorization
+                    )
+                # Approval, persistence and MCP all bind JSON values. Restore native
+                # executor types only at this final boundary (not on the signed call).
+                parsed = definition.arguments_model.model_validate(
+                    validated_call.arguments, strict=True
+                )
+                native_call = validated_call.model_copy(update={"arguments": parsed.model_dump()})
+                return await cast(ToolExecutor, executor)(native_call)
         except Exception:
             duration_ms = max(0, round((perf_counter() - started) * 1000))
             return ToolResult(

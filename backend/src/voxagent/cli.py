@@ -46,6 +46,10 @@ from voxagent.diagnostics.speech_benchmark import (
     validate_fixture_checksum,
 )
 from voxagent.llm.ollama import OllamaClient
+from voxagent.mcp.capability import CapabilityIssuer
+from voxagent.mcp.client import McpLocalClient
+from voxagent.mcp.models import tool_provider_from_environment
+from voxagent.mcp.provider import McpToolProvider, build_mcp_registry
 from voxagent.memory.embedder import BgeSmallZhEmbedder
 from voxagent.speech.asr import (
     SenseVoiceAsr,
@@ -186,8 +190,17 @@ class _CatalogTts:
         return engine.synthesize(text, voice_key, speed)
 
 
-def _create_production_app(session_token: str):
+def _resolve_tool_provider(tool_provider: str | None) -> str:
+    if tool_provider is None:
+        return tool_provider_from_environment()
+    if tool_provider not in {"native", "mcp"}:
+        raise ValueError("tool provider must be 'native' or 'mcp'")
+    return tool_provider
+
+
+def _create_production_app(session_token: str, tool_provider: str | None = None):
     _validate_session_token(session_token)
+    tool_provider = _resolve_tool_provider(tool_provider)
     catalog = load_production_catalog()
     root = resolve_data_root(None)
     paths = AppPaths.from_root(root)
@@ -234,12 +247,8 @@ def _create_production_app(session_token: str):
     data_service = LocalDataService(database_path, paths.data, mutation_lock)
     backup_manager = DailyBackupManager(paths.data / "backups")
     tool_repository = ToolRepository(database)
-    tool_registry = build_builtin_registry(
-        database,
-        context_source,
-        WindowsAllowlistedLauncher(),
-    )
     agent_service: AgentService | None = None
+    mcp_client: McpLocalClient | None = None
     checkpoint_connection: aiosqlite.Connection | None = None
 
     def orchestrator_factory() -> ConversationOrchestrator:
@@ -289,7 +298,16 @@ def _create_production_app(session_token: str):
         )
 
     async def startup() -> None:
-        nonlocal agent_service, checkpoint_connection
+        nonlocal agent_service, checkpoint_connection, mcp_client
+        launcher = WindowsAllowlistedLauncher()
+        if tool_provider == "mcp":
+            issuer = CapabilityIssuer()
+            mcp_client = McpLocalClient(root, issuer)
+            discovered_tools = await mcp_client.start()
+            provider = McpToolProvider(mcp_client, issuer, database, discovered_tools)
+            tool_registry = build_mcp_registry(database, context_source, launcher, provider)
+        else:
+            tool_registry = build_builtin_registry(database, context_source, launcher)
         checkpoint_connection = await aiosqlite.connect(
             paths.data / "agent-checkpoints.db"
         )
@@ -306,13 +324,25 @@ def _create_production_app(session_token: str):
         )
 
     async def shutdown() -> None:
-        await http.aclose()
-        if checkpoint_connection is not None:
-            await checkpoint_connection.close()
         try:
-            backup_manager.create(database, date.today())
+            if agent_service is not None:
+                await agent_service.shutdown()
         finally:
-            database.close()
+            try:
+                if mcp_client is not None:
+                    await mcp_client.close()
+            finally:
+                try:
+                    await http.aclose()
+                finally:
+                    try:
+                        if checkpoint_connection is not None:
+                            await checkpoint_connection.close()
+                    finally:
+                        try:
+                            backup_manager.create(database, date.today())
+                        finally:
+                            database.close()
 
     application = create_app(
         orchestrator_factory,
@@ -334,9 +364,15 @@ def _create_production_app(session_token: str):
 def serve(
     session_token: Annotated[str, typer.Option("--session-token")],
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8765,
+    tool_provider: Annotated[
+        str | None,
+        typer.Option("--tool-provider", help="Tool provider: native or mcp (default: native)."),
+    ] = None,
 ) -> None:
     try:
-        application = _create_production_app(session_token)
+        application = _create_production_app(
+            session_token, tool_provider=_resolve_tool_provider(tool_provider)
+        )
     except Exception as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=2) from error

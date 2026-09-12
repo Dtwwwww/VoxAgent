@@ -58,7 +58,7 @@ class ToolCall(BaseModel):
         return cls(
             call_id=call_id,
             name=definition.name,
-            arguments=parsed.model_dump(),
+            arguments=parsed.model_dump(mode="json"),
         )
 
 
