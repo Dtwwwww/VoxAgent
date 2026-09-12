@@ -52,11 +52,29 @@ flowchart LR
 
 `qwen3.5:4b` 虽通过质量检查，但 30 分钟稳定性测试在约 431 秒因内存压力主动终止，因此没有被选为默认模型。语音自动回环已通过；物理麦克风、扬声器听感与 20 次插话仍需人工验收，不能由单测替代。详见 [语音闭环报告](benchmarks/voice-loop-acceptance.json)。
 
-## 五分钟启动
+## 启动说明（Windows）
 
-以下步骤假设 Python 3.12、Node.js、pnpm、Ollama、仓库依赖和本地模型已经按 [Plan 1](docs/plan-01/README.md)、[Plan 2](docs/plan-02/README.md)、[Plan 3](docs/plan-03/README.md) 准备完成。
+启动链路固定为 `Ollama → 后端 → 前端`。三个服务分别监听 `127.0.0.1:11434`、`127.0.0.1:8765` 和 `127.0.0.1:5173`；只启动前端页面会一直显示“本地服务未启动”。
 
-先在 PowerShell 生成一次性 Token；只在本次终端和 URL 中使用：
+### 0. 首次运行准备
+
+需要 Python 3.12、[uv](https://docs.astral.sh/uv/)、Node.js、pnpm 以及 Ollama。本项目锁定 Python `<3.13`；目标电脑当前使用 Node.js 24 和 pnpm 11。
+
+新克隆仓库后，在仓库根目录执行：
+
+```powershell
+uv sync --project .\backend --extra dev --extra speech --frozen
+pnpm --dir .\frontend install --frozen-lockfile
+
+& .\scripts\download_embedding_model.ps1 -DataRoot 'D:\VoxAgentData'
+& .\scripts\download_speech_models.ps1 -DataRoot 'D:\VoxAgentData'
+```
+
+目标电脑使用的 Ollama 可执行文件位于 `D:\VoxAgentData\runtime\ollama\ollama.exe`，默认模型是 `qwen3:4b-instruct-2507-q4_K_M`。使用系统安装版 Ollama 时，可将后文的完整路径替换为 `ollama`。模型和语音资产的详细说明见 [Plan 1](docs/plan-01/README.md) 和 [Plan 2](docs/plan-02/README.md)。
+
+### 1. 生成本次会话 Token
+
+在 PowerShell 生成 Token。下面的写法兼容没有静态 `RandomNumberGenerator.GetBytes()` 方法的旧版 Windows PowerShell：
 
 ```powershell
 $tokenBytes = New-Object byte[] 32
@@ -66,7 +84,11 @@ $sessionToken = [Convert]::ToBase64String($tokenBytes).TrimEnd('=').Replace('+',
 $sessionToken
 ```
 
-在第一个 PowerShell 窗口启动项目自带的便携版 Ollama；它不在系统 PATH 中：
+保留输出值，后端命令和浏览器 URL 必须使用完全相同的 Token。不要直接使用示例文字“这里粘贴 Token”。
+
+### 2. 启动 Ollama
+
+在第一个 PowerShell 窗口启动项目自带的便携版 Ollama；它不在系统 `PATH` 中：
 
 ```powershell
 $env:OLLAMA_MODELS = 'D:\VoxAgentData\models\ollama'
@@ -75,27 +97,82 @@ $env:OLLAMA_HOST = '127.0.0.1:11434'
 & 'D:\VoxAgentData\runtime\ollama\ollama.exe' serve
 ```
 
-看到 `Listening on 127.0.0.1:11434` 后，再在仓库根目录打开另外两个 PowerShell 窗口。
+看到 `Listening on 127.0.0.1:11434` 后保持窗口运行。如果端口已经监听，说明 Ollama 已在运行，无需重复启动。可在另一个窗口检查服务和模型：
 
-后端：
+```powershell
+$ollamaState = Invoke-RestMethod 'http://127.0.0.1:11434/api/tags'
+$ollamaState.models.name
+```
+
+输出中应包含 `qwen3:4b-instruct-2507-q4_K_M`。如果缺少该模型，在 Ollama 服务保持运行时执行：
+
+```powershell
+$env:OLLAMA_MODELS = 'D:\VoxAgentData\models\ollama'
+& 'D:\VoxAgentData\runtime\ollama\ollama.exe' pull 'qwen3:4b-instruct-2507-q4_K_M'
+```
+
+### 3. 启动后端
+
+在仓库根目录打开第二个 PowerShell 窗口：
 
 ```powershell
 $sessionToken = '粘贴刚才生成的 Token'
 $env:VOXAGENT_DATA_ROOT = 'D:\VoxAgentData'
 Set-Location .\backend
-& .\.venv\Scripts\python.exe -m voxagent.cli serve --session-token $sessionToken --port 8765
+uv run --frozen voxagent serve --session-token $sessionToken --port 8765
 ```
 
-前端：
+保持后端窗口运行。看到 Uvicorn 启动信息后，在第三个窗口验证：
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8765/healthz'
+```
+
+应返回 `status: ok`。如果后端在启动阶段报告 embedding 或 speech 模型缺失，回到“首次运行准备”重新执行对应下载脚本。
+
+默认使用宿主原生工具。要演示 JR-03 的本地 MCP 工具链，将后端最后一行改为：
+
+```powershell
+uv run --frozen voxagent serve --session-token $sessionToken --port 8765 --tool-provider mcp
+```
+
+MCP 子进程由后端通过固定 stdio 命令管理，不需要另外启动端口。启动或工具发现失败时后端会明确报错，不会静默降级。
+
+### 4. 启动前端
+
+在仓库根目录打开第三个 PowerShell 窗口：
 
 ```powershell
 Set-Location .\frontend
-& .\node_modules\.bin\vite.cmd --host 127.0.0.1 --port 5173
+pnpm exec vite --host 127.0.0.1 --port 5173
 ```
 
-浏览器访问 `http://127.0.0.1:5173/?token=粘贴同一个Token`。首次使用知识库前，还需在仓库根目录运行 `& .\scripts\download_embedding_model.ps1 -DataRoot 'D:\VoxAgentData'`。
+### 5. 打开页面
 
-要让 Agent 的知识/提醒工具改走 MCP，在后端命令中增加 `--tool-provider mcp`。MCP 子进程由宿主以固定命令启动，不需要额外开端口；启动或工具发现失败时后端会直接失败，不会静默降级。
+浏览器访问：
+
+```text
+http://127.0.0.1:5173/?token=粘贴同一个Token
+```
+
+正常状态应满足：
+
+- Ollama 的 `/api/tags` 可访问，并能看到默认 Qwen3 模型。
+- 后端 `/healthz` 返回 `status: ok`。
+- 页面不再显示“本地服务未连接”，文字消息可以得到本地模型回复。
+
+### 常见启动问题
+
+| 现象 | 优先检查 |
+| --- | --- |
+| 页面显示“本地服务未启动” | 确认后端窗口仍在运行，并检查 `Invoke-RestMethod 'http://127.0.0.1:8765/healthz'`。 |
+| 页面能打开，但一直“本地服务未连接” | URL 中不能保留示例 Token；重新生成 Token，并让后端参数与 `?token=` 后的值完全一致。刷新旧页面不会自动更新 Token。 |
+| 显示“本地 Agent 执行失败” | 检查 `http://127.0.0.1:11434/api/tags`，确认 Ollama 在线且默认模型已经安装；具体原因同时会打印在后端窗口。 |
+| `RandomNumberGenerator.GetBytes` 方法不存在 | 使用本文的 `Create()`、实例 `GetBytes()` 和 `Dispose()` 写法，不要调用静态 `GetBytes(32)`。 |
+| 后端提示模型文件缺失 | 重新运行 embedding 或 speech 下载脚本；模型默认应位于 `D:\VoxAgentData\models`。 |
+| 端口 5173、8765 或 11434 被占用 | 先关闭之前启动的对应终端或服务，再按 Ollama、后端、前端的顺序启动。 |
+
+停止项目时，在三个服务窗口分别按 `Ctrl+C`；这不会删除模型、数据库或会话记录。
 
 ## 一键验证
 
