@@ -31,6 +31,8 @@ from voxagent.tools.registry import ToolRegistry, UnknownToolError
 from voxagent.tools.repository import ToolRepository
 from voxagent.tools.schema import ToolCall
 
+_APP_OUTCOMES = frozenset({"launched", "focused", "attention_requested"})
+
 
 class AgentModel(Protocol):
     def stream_agent(
@@ -294,10 +296,31 @@ class AgentWorkflow:
                     request_id, "failed", self.now_utc(), detail={"error_code": "turn_cancelled"}
                 )
             raise
+        outcome = result.data.get("outcome")
+        if (
+            call.name == "apps.open_allowlisted"
+            and result.status == "succeeded"
+            and outcome not in _APP_OUTCOMES
+        ):
+            result = result.model_copy(
+                update={
+                    "status": "failed",
+                    "data": {},
+                    "user_summary": "应用启动失败。",
+                    "error_code": "invalid_app_outcome",
+                }
+            )
+            outcome = None
         if request_id is not None:
             detail: dict[str, Any] = {"duration_ms": result.duration_ms}
             if result.error_code is not None:
                 detail["error_code"] = result.error_code
+            if (
+                call.name == "apps.open_allowlisted"
+                and result.status == "succeeded"
+                and outcome in _APP_OUTCOMES
+            ):
+                detail["outcome"] = outcome
             self.repository.finish_request(
                 request_id,
                 result.status,
@@ -306,14 +329,15 @@ class AgentWorkflow:
             )
         outbox: list[dict[str, Any]] = []
         if result.status == "succeeded":
-            outbox.append(
-                {
-                    "kind": "completed",
-                    "call_id": call.call_id,
-                    "tool_name": call.name,
-                    "user_summary": result.user_summary,
-                }
-            )
+            completed: dict[str, Any] = {
+                "kind": "completed",
+                "call_id": call.call_id,
+                "tool_name": call.name,
+                "user_summary": result.user_summary,
+            }
+            if call.name == "apps.open_allowlisted" and outcome in _APP_OUTCOMES:
+                completed["outcome"] = outcome
+            outbox.append(completed)
         else:
             outbox.append(
                 _failed(call.call_id, call.name, result.error_code or "tool_execution_failed")
@@ -335,7 +359,12 @@ class AgentWorkflow:
                 },
             ]
         )
-        next_action = "authorize" if state.get("pending_calls") else "call_model"
+        is_deterministic_app = (
+            state.get("deterministic_app_action", False) and call.name == "apps.open_allowlisted"
+        )
+        next_action = "respond" if is_deterministic_app else (
+            "authorize" if state.get("pending_calls") else "call_model"
+        )
         if visits >= 7:
             next_action = "respond"
             if state.get("pending_calls"):

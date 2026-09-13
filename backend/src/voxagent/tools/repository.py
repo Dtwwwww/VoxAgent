@@ -27,8 +27,9 @@ TerminalToolRequestStatus = Literal["succeeded", "failed", "denied", "expired"]
 _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "denied", "expired"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-_FINISH_DETAIL_KEYS = frozenset({"duration_ms", "error_code", "recovered_from"})
+_FINISH_DETAIL_KEYS = frozenset({"duration_ms", "error_code", "outcome", "recovered_from"})
 _MAX_DURATION_MS = 300_000
+_APP_OUTCOMES = frozenset({"launched", "focused", "attention_requested"})
 _RECOVERED_FROM_VALUES = frozenset({"awaiting_confirmation", "running"})
 _SENSITIVE_DETAIL_TERMS = frozenset(
     {
@@ -119,7 +120,11 @@ def _validate_sha256(value: str) -> str:
     return value
 
 
-def _validate_finish_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
+def _validate_finish_detail(
+    detail: dict[str, Any] | None,
+    *,
+    tool_name: str | None,
+) -> dict[str, Any]:
     if detail is None:
         return {}
     unknown_keys = set(detail) - _FINISH_DETAIL_KEYS
@@ -139,6 +144,13 @@ def _validate_finish_detail(detail: dict[str, Any] | None) -> dict[str, Any]:
         if any(term in error_code for term in _SENSITIVE_DETAIL_TERMS):
             raise ValueError("detail.error_code must not contain sensitive terms")
         safe_detail["error_code"] = error_code
+    if "outcome" in detail:
+        outcome = detail["outcome"]
+        if outcome not in _APP_OUTCOMES:
+            raise ValueError("detail.outcome must be a validated app outcome")
+        if tool_name != "apps.open_allowlisted":
+            raise ValueError("detail.outcome is limited to allowlisted app actions")
+        safe_detail["outcome"] = outcome
     if "recovered_from" in detail:
         recovered_from = detail["recovered_from"]
         if recovered_from not in _RECOVERED_FROM_VALUES:
@@ -411,9 +423,15 @@ class ToolRepository:
     ) -> bool:
         if status not in _TERMINAL_STATUSES:
             raise ValueError("status must be a terminal request status")
-        safe_detail = _validate_finish_detail(detail)
         timestamp = _utc_text(now_utc)
         with self._write():
+            request = self._connection.execute(
+                "SELECT tool_name FROM tool_requests WHERE id = ?", (tool_request_id,)
+            ).fetchone()
+            safe_detail = _validate_finish_detail(
+                detail,
+                tool_name=(str(request["tool_name"]) if request is not None else None),
+            )
             result = self._connection.execute(
                 """
                 UPDATE tool_requests

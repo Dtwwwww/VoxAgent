@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from voxagent.tools.schema import PermissionLevel
+
+AppOutcome = Literal["launched", "focused", "attention_requested"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +32,7 @@ class ToolCompleted:
     call_id: str
     tool_name: str
     user_summary: str
+    outcome: AppOutcome | None = None
 
 
 @dataclass(frozen=True, slots=True)

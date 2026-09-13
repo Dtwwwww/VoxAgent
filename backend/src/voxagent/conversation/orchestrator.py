@@ -924,6 +924,7 @@ class ConversationOrchestrator:
                         call_id=event.call_id,
                         tool_name=event.tool_name,
                         user_summary=event.user_summary,
+                        outcome=event.outcome,
                     )
                 elif isinstance(event, AgentToolFailed):
                     pending.last_tool_error = event.error_code

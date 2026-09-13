@@ -240,10 +240,12 @@ def _event(item: Mapping[str, Any]) -> AgentEvent:
     if kind == "started":
         return ToolStarted(str(item["call_id"]), str(item["tool_name"]))
     if kind == "completed":
+        outcome = item.get("outcome")
         return ToolCompleted(
             str(item["call_id"]),
             str(item["tool_name"]),
             str(item["user_summary"]),
+            outcome if outcome in {"launched", "focused", "attention_requested"} else None,
         )
     if kind == "failed":
         return ToolFailed(

@@ -145,6 +145,35 @@ class PlainAgentService(FakeAgentService):
         yield AgentTurnDone()
 
 
+class FakeAppActionAgentService(FakeAgentService):
+    confirmation_id = "00000000-0000-4000-8000-000000000003"
+
+    async def start_turn(self, session_id, turn_id, messages):
+        assert session_id and turn_id == 1 and messages[-1].content == "打开计算器"
+        yield AgentToolApprovalRequired(
+            self.confirmation_id,
+            "app-call-1",
+            "apps.open_allowlisted",
+            PermissionLevel.L1,
+        )
+
+    async def resume_confirmation(self, confirmation_id, session_id, turn_id, *, approved):
+        self.resume_calls.append((confirmation_id, session_id, turn_id, approved))
+        if approved:
+            yield AgentToolStarted("app-call-1", "apps.open_allowlisted")
+            yield AgentToolCompleted(
+                "app-call-1",
+                "apps.open_allowlisted",
+                "已切换到计算器。",
+                "focused",
+            )
+        else:
+            yield AgentToolFailed(
+                "app-call-1", "apps.open_allowlisted", "confirmation_denied"
+            )
+        yield AgentTurnDone()
+
+
 class FakePartialAsr:
     def __init__(self) -> None:
         self.reset_calls = 0
@@ -1669,6 +1698,8 @@ async def test_agent_turn_pauses_for_one_time_confirmation_and_resumes():
         "assistant.done",
     ]
     assert agent.resume_calls[0][3] is True
+    assert resumed[1].outcome is None
+    assert "outcome" not in resumed[1].model_dump(mode="json")
     assert orchestrator.history.assistant_text(1) == "已经帮你创建提醒。"
 
     replay = [
@@ -1678,6 +1709,33 @@ async def test_agent_turn_pauses_for_one_time_confirmation_and_resumes():
         )
     ]
     assert replay[0].code == "confirmation_unavailable"
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_app_completion_forwards_typed_execution_outcome():
+    agent = FakeAppActionAgentService()
+    orchestrator, llm, _ = make_orchestrator(agent_service=agent)
+
+    initial = [item async for item in orchestrator.submit_text("打开计算器", False)]
+    assert [item.type for item in initial] == ["tool.approval_required"]
+
+    resumed = [
+        item
+        async for item in orchestrator.resolve_tool_confirmation(
+            agent.confirmation_id, approved=True
+        )
+    ]
+
+    assert [item.type for item in resumed] == [
+        "tool.started",
+        "tool.completed",
+        "assistant.delta",
+        "assistant.done",
+    ]
+    assert resumed[1].outcome == "focused"
+    assert resumed[2].delta == "已切换到计算器。"
+    assert llm.calls == []
     await orchestrator.stop()
 
 
