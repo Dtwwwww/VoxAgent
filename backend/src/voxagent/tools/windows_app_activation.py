@@ -129,16 +129,9 @@ class Win32WindowBackend:
                 callback_error = error
                 return False
 
-        ctypes.set_last_error(0)
-        try:
-            enumeration_succeeded = bool(self._user32.EnumChildWindows(hwnd, visit_child, 0))
-            last_error = ctypes.get_last_error()
-        finally:
-            ctypes.set_last_error(0)
+        self._user32.EnumChildWindows(hwnd, visit_child, 0)
         if callback_error is not None:
             raise OSError("child window enumeration callback failed") from callback_error
-        if not matched and not enumeration_succeeded:
-            raise OSError(last_error, "child window enumeration failed")
         return matched
 
     def _window_process_id(self, hwnd: int) -> int:

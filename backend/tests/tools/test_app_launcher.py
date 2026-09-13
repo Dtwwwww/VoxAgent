@@ -126,6 +126,30 @@ def test_matching_window_callback_stop_is_success(monkeypatch) -> None:
     assert backend.find_window("CalculatorApp.exe") == 42
 
 
+def test_zero_child_enumeration_result_without_callback_error_continues(monkeypatch) -> None:
+    visited: list[int] = []
+
+    def enum_windows(callback, _parameter) -> bool:
+        for hwnd in (41, 42):
+            visited.append(hwnd)
+            if not callback(hwnd, 0):
+                return False
+        return True
+
+    user32 = FakeUser32(enum_windows)
+    user32.EnumChildWindows = lambda _hwnd, _callback, _parameter: False
+    backend = native_backend(user32)
+    monkeypatch.setattr(backend, "_window_process_id", lambda hwnd: hwnd)
+    monkeypatch.setattr(
+        backend,
+        "_process_matches",
+        lambda process_id, _process_name: process_id == 42,
+    )
+
+    assert backend.find_window("CalculatorApp.exe") == 42
+    assert visited == [41, 42]
+
+
 def test_native_window_enumeration_failure_never_launches_duplicate() -> None:
     def enum_windows(_callback, _parameter) -> bool:
         ctypes.set_last_error(5)

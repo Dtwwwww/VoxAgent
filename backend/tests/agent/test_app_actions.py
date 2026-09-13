@@ -14,6 +14,9 @@ def test_routes_each_explicit_allowlisted_app_action() -> None:
     assert detect("切回计算器").arguments == {"app_id": "calculator"}
     assert detect("切换一下计算器").arguments == {"app_id": "calculator"}
     assert detect("唤起计算器").arguments == {"app_id": "calculator"}
+    assert detect("请再帮我打开计算器").arguments == {"app_id": "calculator"}
+    assert detect("麻烦你再打开计算器").arguments == {"app_id": "calculator"}
+    assert detect("把计算器打开").arguments == {"app_id": "calculator"}
 
 
 def test_resolves_it_only_from_the_previous_user_app_reference() -> None:
