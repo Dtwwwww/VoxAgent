@@ -35,6 +35,7 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     memoryProposals: [],
     pendingToolApproval: null,
     recentToolActivity: [],
+    activeToolActivity: null,
     realtime: { active: false, state: "off", provider: null, interimText: "", inputLevel: 0, fallbackReason: null, notice: null },
     microphones: [],
     selectedMicrophoneId: null,
@@ -54,6 +55,7 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     stopVoicePreview: vi.fn(),
     cancelActive: vi.fn(),
     dismissMemoryProposal: vi.fn(),
+    dismissToolActivity: vi.fn(),
     confirmTool: vi.fn(),
     denyTool: vi.fn(),
     clearLocalData: vi.fn(),
@@ -117,6 +119,7 @@ describe("App", () => {
         status: "pending",
       },
       recentToolActivity: [{
+        sessionId: "00000000-0000-4000-8000-000000000001",
         turnId: 3,
         callId: "call-0",
         toolName: "knowledge.search",
@@ -136,6 +139,43 @@ describe("App", () => {
     expect(session.confirmTool).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000002");
     expect(within(card).getByRole("button", { name: "允许一次" })).toBeDisabled();
     expect(within(card).getByRole("button", { name: "拒绝" })).toBeDisabled();
+  });
+
+  it.each([
+    ["failed", "已拒绝或失败"],
+    ["attention_requested", "需要你的注意"],
+  ] as const)("lets the user dismiss %s tool status", (status, copy) => {
+    const session = controller({
+      activeToolActivity: {
+        sessionId: "00000000-0000-4000-8000-000000000001",
+        turnId: 4,
+        callId: "call-1",
+        toolName: "apps.open_allowlisted",
+        status,
+        summary: copy,
+      },
+    });
+    render(<App controller={session} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent(copy);
+    fireEvent.click(screen.getByRole("button", { name: "关闭工具状态" }));
+    expect(session.dismissToolActivity).toHaveBeenCalledOnce();
+  });
+
+  it("shows completed tool status without a close button", () => {
+    render(<App controller={controller({
+      activeToolActivity: {
+        sessionId: "00000000-0000-4000-8000-000000000001",
+        turnId: 4,
+        callId: "call-1",
+        toolName: "apps.open_allowlisted",
+        status: "completed",
+        summary: "已启动计算器。",
+      },
+    })} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("已启动计算器。");
+    expect(screen.queryByRole("button", { name: "关闭工具状态" })).toBeNull();
   });
 
   it("opens lazy settings tabs and keeps them separate from the voice picker", async () => {

@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import fixtureSource from "../../../contracts/protocol-fixtures.json?raw";
 import { MicrophoneCapture, PcmFramePacketizer } from "../audio/capture";
@@ -259,6 +259,10 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("the frozen WebSocket protocol", () => {
   it("accepts every shared valid fixture and rejects every invalid fixture", () => {
     for (const event of fixtures.valid_client) expect(() => parseClientEvent(event)).not.toThrow();
@@ -305,6 +309,14 @@ describe("the frozen WebSocket protocol", () => {
     });
     expect(() => parseClientEventJson('{"type":"voice.transcript.submit","text":"你好"}')).toThrow();
     expect(() => parseClientEventJson('{"type":"voice.transcript.submit","text":"你好","request_id":1.0}')).toThrow();
+  });
+
+  it("accepts only structured app-action outcomes on tool completion", () => {
+    expect(parseServerEventJson(`{"type":"tool.completed","session_id":"${SESSION_ID}","turn_id":3,"call_id":"call-3","tool_name":"apps.open_allowlisted","user_summary":"已启动计算器。","outcome":"launched"}`)).toMatchObject({
+      type: "tool.completed",
+      outcome: "launched",
+    });
+    expect(() => parseServerEventJson(`{"type":"tool.completed","session_id":"${SESSION_ID}","turn_id":3,"call_id":"call-3","tool_name":"apps.open_allowlisted","user_summary":"已启动计算器。","outcome":"unknown"}`)).toThrow();
   });
 
   it("honors the shared astral 4,000/4,001-code-point boundary fixture", () => {
@@ -574,6 +586,107 @@ describe("queued native-rate playback", () => {
 });
 
 describe("useVoiceSession", () => {
+  it("hides a successful tool status after three seconds without removing a newer call", () => {
+    vi.useFakeTimers();
+    const { hook, socket } = openSession();
+    emit(socket, {
+      type: "tool.completed", session_id: SESSION_ID, turn_id: 4,
+      call_id: "old", tool_name: "apps.open_allowlisted", user_summary: "已启动计算器。",
+    });
+    expect(hook.result.current.activeToolActivity?.callId).toBe("old");
+
+    act(() => { vi.advanceTimersByTime(2000); });
+    emit(socket, {
+      type: "tool.started", session_id: SESSION_ID, turn_id: 5,
+      call_id: "new", tool_name: "apps.open_allowlisted",
+    });
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(hook.result.current.activeToolActivity?.callId).toBe("new");
+    vi.useRealTimers();
+  });
+
+  it("expires a successful tool status at exactly three seconds", () => {
+    vi.useFakeTimers();
+    const { hook, socket } = openSession();
+    emit(socket, {
+      type: "tool.completed", session_id: SESSION_ID, turn_id: 4,
+      call_id: "completed", tool_name: "apps.open_allowlisted", user_summary: "已启动计算器。",
+    });
+
+    act(() => { vi.advanceTimersByTime(2999); });
+    expect(hook.result.current.activeToolActivity?.callId).toBe("completed");
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(hook.result.current.activeToolActivity).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("keeps failed tool status until dismissed", () => {
+    vi.useFakeTimers();
+    const { hook, socket } = openSession();
+    emit(socket, {
+      type: "tool.failed", session_id: SESSION_ID, turn_id: 4,
+      call_id: "failed", tool_name: "apps.open_allowlisted", error_code: "tool_timeout",
+    });
+
+    act(() => { vi.advanceTimersByTime(3000); });
+    expect(hook.result.current.activeToolActivity?.status).toBe("failed");
+    act(() => hook.result.current.dismissToolActivity());
+    expect(hook.result.current.activeToolActivity).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("clears active tool status when a text turn starts", () => {
+    const { hook, socket } = openSession();
+    emit(socket, {
+      type: "tool.started", session_id: SESSION_ID, turn_id: 4,
+      call_id: "active", tool_name: "apps.open_allowlisted",
+    });
+
+    act(() => hook.result.current.submitText("新的问题"));
+    expect(hook.result.current.activeToolActivity).toBeNull();
+  });
+
+  it("does not replace active tool status with a stale-session event", () => {
+    const { hook, socket } = openSession();
+    emit(socket, {
+      type: "tool.started", session_id: SESSION_ID, turn_id: 4,
+      call_id: "current", tool_name: "apps.open_allowlisted",
+    });
+    emit(socket, {
+      type: "tool.completed", session_id: "00000000-0000-4000-8000-000000000099", turn_id: 4,
+      call_id: "stale", tool_name: "apps.open_allowlisted", user_summary: "旧会话",
+    });
+
+    expect(hook.result.current.activeToolActivity?.callId).toBe("current");
+  });
+
+  it("clears active tool status when the socket session closes", async () => {
+    const { hook, socket } = openSession();
+    emit(socket, {
+      type: "tool.failed", session_id: SESSION_ID, turn_id: 4,
+      call_id: "failed", tool_name: "apps.open_allowlisted", error_code: "tool_timeout",
+    });
+    expect(hook.result.current.activeToolActivity?.status).toBe("failed");
+
+    await act(async () => socket.close());
+    expect(hook.result.current.activeToolActivity).toBeNull();
+  });
+
+  it("keeps a newer approval when an earlier turn reuses its call id", () => {
+    const { hook, socket } = openSession();
+    emit(socket, {
+      type: "tool.approval_required", session_id: SESSION_ID, turn_id: 5,
+      confirmation_id: "00000000-0000-4000-8000-000000000004",
+      call_id: "reused", tool_name: "apps.open_allowlisted", permission: "L2",
+    });
+    emit(socket, {
+      type: "tool.started", session_id: SESSION_ID, turn_id: 4,
+      call_id: "reused", tool_name: "apps.open_allowlisted",
+    });
+
+    expect(hook.result.current.pendingToolApproval?.turnId).toBe(5);
+  });
+
   it("tracks one approval and sends only its id through confirmation transitions", () => {
     const { hook, socket } = openSession();
     emit(socket, {

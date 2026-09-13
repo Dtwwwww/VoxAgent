@@ -91,7 +91,10 @@ export function App({ controller, knowledgeClient, localApiClient }: AppProps) {
         onConfirm={() => controller.confirmTool(controller.pendingToolApproval!.confirmationId)}
         onDeny={() => controller.denyTool(controller.pendingToolApproval!.confirmationId)}
       />}
-      {!controller.pendingToolApproval && <ToolActivityStatus activity={controller.recentToolActivity.at(-1)} />}
+      {!controller.pendingToolApproval && <ToolActivityStatus
+        activity={controller.activeToolActivity ?? undefined}
+        onDismiss={controller.dismissToolActivity}
+      />}
       <VoiceStatus connectionStatus={controller.connectionStatus} voiceStatus={controller.voiceStatus} realtime={controller.realtime} />
       <Composer controller={controller} />
     </div>

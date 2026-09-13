@@ -58,7 +58,7 @@
     {"type": "assistant.done", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1},
     {"type": "tool.approval_required", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1, "confirmation_id": "00000000-0000-4000-8000-000000000002", "call_id": "call-1", "tool_name": "file.search", "permission": "L2"},
     {"type": "tool.started", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1, "call_id": "call-1", "tool_name": "file.search"},
-    {"type": "tool.completed", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1, "call_id": "call-1", "tool_name": "file.search", "user_summary": "Found 1 result"},
+    {"type": "tool.completed", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1, "call_id": "call-1", "tool_name": "file.search", "user_summary": "Found 1 result", "outcome": "launched"},
     {"type": "tool.failed", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1, "call_id": "call-1", "tool_name": "file.search", "error_code": "tool_timeout"},
     {"type": "tts.started", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1, "request_id": 7},
     {"type": "tts.chunk", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1, "request_id": 7, "sequence": 0, "sample_rate": 24000, "mime_type": "audio/wav", "byte_length": 128},
@@ -84,6 +84,7 @@
     {"type": "tts.chunk", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1, "sequence": 0, "sample_rate": 24000, "mime_type": "audio/mpeg", "byte_length": 128},
     {"type": "tts.started", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1.0},
     {"type": "tts.done", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": "7"},
-    {"type": "tts.done", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 7, "request_id": 7.0}
+    {"type": "tts.done", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 7, "request_id": 7.0},
+    {"type": "tool.completed", "session_id": "00000000-0000-4000-8000-000000000001", "turn_id": 1, "call_id": "call-1", "tool_name": "file.search", "user_summary": "Found 1 result", "outcome": "unknown"}
   ]
 }

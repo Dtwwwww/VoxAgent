@@ -27,6 +27,7 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     memoryProposals: [],
     pendingToolApproval: null,
     recentToolActivity: [],
+    activeToolActivity: null,
     realtime: {
       active: false,
       state: "off",
@@ -57,6 +58,7 @@ function controller(overrides: Partial<VoiceSessionController> = {}): VoiceSessi
     stopVoicePreview: vi.fn(),
     cancelActive: vi.fn(),
     dismissMemoryProposal: vi.fn(),
+    dismissToolActivity: vi.fn(),
     confirmTool: vi.fn(),
     denyTool: vi.fn(),
     clearLocalData: vi.fn(),

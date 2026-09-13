@@ -43,13 +43,22 @@ export function ToolApprovalCard({
   </section>;
 }
 
-export function ToolActivityStatus({ activity }: { activity: ToolActivity | undefined }) {
+export function ToolActivityStatus({
+  activity,
+  onDismiss,
+}: {
+  activity: ToolActivity | undefined;
+  onDismiss(): void;
+}) {
   if (!activity) return null;
   const status = activity.status === "running"
     ? "正在执行"
-    : activity.status === "completed" ? "已完成" : "已拒绝或失败";
-  return <p className="tool-activity" role="status">
+    : activity.status === "failed" ? "已拒绝或失败"
+      : activity.status === "attention_requested" ? "需要你的注意" : "已完成";
+  const dismissible = activity.status === "failed" || activity.status === "attention_requested";
+  return <div className="tool-activity" role="status">
     <span>{toolLabel(activity.toolName)}</span>
-    <strong>{status}</strong>
-  </p>;
+    <strong>{activity.summary ?? status}</strong>
+    {dismissible && <button type="button" onClick={onDismiss} aria-label="关闭工具状态">关闭</button>}
+  </div>;
 }
