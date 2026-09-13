@@ -1,7 +1,7 @@
 # 允许列表应用动作可靠性设计
 
 日期：2026-09-13
-状态：已获用户口头批准，等待书面规格复核
+状态：已按主流实现模式修订，等待用户书面规格复核
 
 ## 背景与根因
 
@@ -44,6 +44,15 @@
 
 在模型之前识别边界清晰的允许列表应用动作，每次建立新的受控调用；执行器根据真实窗口状态选择启动、聚焦或任务栏提示；应用类副作用工具直接使用可信结果收口，前端只展示当前轮活动。该方案改动集中、可测试，并同时覆盖三个根因，因此采用此方案。
 
+## 主流实现模式与采用决策
+
+- Semantic Kernel 对明确工具操作提供 `FunctionChoiceBehavior.Required`，表明成熟 Agent 框架不会只依靠提示词要求模型调用工具。VoxAgent 当前使用的 Ollama 接口不能可靠强制 `tool_choice=required`，因此在应用层加入范围严格的确定性路由，作为本地模型环境下的等价可靠性边界。
+- LangGraph 的中断恢复以持久化状态和同一 `thread_id` 关联待执行动作。VoxAgent 延续现有确认链，并进一步要求每个动作绑定同一 `session_id`、`turn_id`、`call_id` 和一次性 `confirmation_id`；恢复只能消费这一个待执行动作。
+- Vercel AI SDK 的工具界面按 `toolCallId` 表达 `approval-requested`、执行结果和错误等生命周期状态。VoxAgent 不再依赖全局最后一条工具活动，也不只通过清空数组掩盖旧状态，而是按当前轮次和调用 ID 选择展示记录。
+- Electron 的单实例模式会在第二次启动请求时恢复并聚焦已有窗口；VS Code 在 Windows 上也将后续请求转交给已有实例并显式处理前台权限。VoxAgent 对允许列表应用采用相同的“查找、恢复、聚焦，否则启动”语义。
+- Windows 不保证后台程序可以强制获得前台焦点。因此聚焦失败必须退化为 `FlashWindowEx` 请求注意，并报告 `attention_requested`，不能把请求已送达或任务栏已闪烁表述成已经聚焦。
+- MCP 将工具视为模型可控能力，但把交互方式留给宿主应用，同时要求清晰展示工具动作并允许用户拒绝。VoxAgent 对 L1 应用动作继续逐次确认，确定性路由不会绕过 Tool Schema、Policy、Confirmation 或审计。
+
 ## 行为契约
 
 ### 明确动作识别
@@ -58,6 +67,8 @@
 - 无法确定时继续交给模型，但后端仍不得将无工具证据的助手成功声明视为已执行。
 
 确定性路由只生成与用户文本对应的固定 `app_id`；模型不能注入命令、进程或窗口参数。调用随后进入现有 Tool Schema、L1 Policy、Confirmation 和防重放链路。
+
+该路由只负责两个允许列表应用的明确动作，不替代一般意图理解：模糊请求、知识问答和其他工具仍由模型选择。不得通过提高 Prompt 强度、调整温度或重试模型来模拟强制工具调用。
 
 ### 每轮独立授权
 
@@ -97,11 +108,19 @@ Launcher 返回结构化结果：
 
 `apps.open_allowlisted` 成功或安全失败后不再调用模型重新解释结果。编排器使用工具产生的可信摘要完成该轮，避免模型声称不存在的窗口动作。知识搜索等需要模型整合结果的工具保持原流程。
 
+系统执行以下不可绕过的不变量：只有当前 `session_id + turn_id + call_id` 存在匹配的真实工具终态，才允许产生对应动作结论。
+
+- `tool.completed` 且 outcome 为 `launched` 时，才能显示或回复“已启动”。
+- `tool.completed` 且 outcome 为 `focused` 时，才能显示或回复“已切换”。
+- `tool.completed` 且 outcome 为 `attention_requested` 时，只能提示用户点击任务栏。
+- `tool.failed`、拒绝、超时或缺少匹配终态时，不得出现“已打开”“已启动”“已切换”或“已完成”等成功措辞。
+- 模型文本、历史助手消息、进程存在和旧工具事件都不能单独作为成功证据。
+
 ### 前端轮次状态
 
-前端发送新的文字请求成功后立即清除上一轮工具活动；语音产生新一轮最终文本时执行同样操作。收到本轮 `tool.approval_required`、`tool.started`、`tool.completed` 或 `tool.failed` 后再展示状态。
+前端把工具活动保存为由 `session_id + turn_id + call_id` 标识的生命周期记录。发送新的文字请求或语音产生新一轮最终文本时，将该轮设为活动轮次；收到 `tool.approval_required`、`tool.started`、`tool.completed` 或 `tool.failed` 时，只更新具有相同标识的记录。若现有协议事件缺少其中任一关联字段，后端必须补齐后才能依赖该事件驱动动作状态。
 
-状态卡只表达当前轮：等待确认、执行中、已启动、已切换、需要点击或失败。若本轮没有工具事件，不显示上一轮的“已完成”。审计面板仍可查看历史记录，不受此清理影响。
+主对话区只选择当前活动轮次的记录，表达等待确认、执行中、已启动、已切换、需要点击或失败；当前轮没有工具事件时不渲染状态卡。旧轮记录可以留在内存或历史视图，但不能由 `.at(-1)` 等全局最后事件逻辑重新显示。审计面板仍可查看历史记录，不受当前轮选择影响。
 
 ## 数据流
 
@@ -111,8 +130,8 @@ Launcher 返回结构化结果：
 4. 用户点击“允许一次”。
 5. Launcher 枚举允许列表目标窗口：存在则恢复并尝试聚焦，不存在则启动。
 6. 工具记录实际 outcome，发出当前轮完成事件。
-7. 编排器用固定可信摘要结束该轮；前端显示对应当前轮状态。
-8. 下一轮开始时，该状态从主对话区清除，但审计记录继续保留。
+7. 编排器验证匹配的 `session_id + turn_id + call_id` 终态，并用固定可信摘要结束该轮。
+8. 前端按相同标识显示对应当前轮状态；下一轮开始后旧状态不再入选主对话区，但审计记录继续保留。
 
 ## 错误处理
 
@@ -130,8 +149,8 @@ Launcher 返回结构化结果：
 1. 路由单测：首次打开记事本、首次打开计算器和连续两次明确请求各生成一个新调用；否定、询问与计算表达式不触发；用户历史中的唯一应用可解析“再打开它”。
 2. Policy/Confirmation 集成测试：两轮获得不同票据；每轮未确认执行次数为零；旧票据不可用于第二轮。
 3. Launcher 单测：无窗口时只启动一次；已有窗口时不启动进程并返回 `focused`；最小化窗口先恢复；系统拒绝焦点时闪烁并返回 `attention_requested`；进程存在但窗口超时时不重复启动。
-4. Agent 回归测试：连续两轮允许后 Fake Launcher 收到两次调用，仓库存在两条独立成功请求；应用工具后不再请求模型生成虚假总结。
-5. 前端回归测试：新文字或语音轮次清除旧工具状态，新事件只显示本轮结果。
+4. Agent 回归测试：连续两轮允许后 Fake Launcher 收到两次调用，仓库存在两条独立成功请求；应用工具后不再请求模型生成虚假总结；缺少当前调用终态时无法生成成功结论。
+5. 前端回归测试：新文字或语音轮次不选择旧工具状态；只有 `session_id + turn_id + call_id` 匹配的事件才能更新当前卡片；缺少本轮事件时不显示“已完成”。
 6. Windows 人工冒烟：第一次请求启动计算器，切回浏览器后第二次请求恢复并激活同一个计算器窗口；审计中出现两组不同 request/confirmation。
 
 ## 验收标准
@@ -151,3 +170,14 @@ Launcher 返回结构化结果：
 Windows 可能基于前台锁定规则拒绝后台进程抢占焦点。实现尊重返回值并退化为任务栏提示，不采用输入模拟或焦点保护绕过。该行为与 Microsoft 对 `SetForegroundWindow` 的平台约束一致。
 
 参考：[Microsoft Learn — SetForegroundWindow function](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
+
+## 参考实现与规范
+
+- [Microsoft Semantic Kernel — FunctionChoiceBehavior](https://learn.microsoft.com/eu-es/dotnet/api/microsoft.semantickernel.functionchoicebehavior?view=semantic-kernel-dotnet)
+- [Ollama — OpenAI compatibility](https://github.com/ollama/ollama/blob/main/docs/api/openai-compatibility.mdx)
+- [LangGraph — Interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts)
+- [Vercel AI SDK — Chatbot tool usage](https://ai-sdk.dev/docs/ai-sdk-ui/chatbot-tool-usage)
+- [Model Context Protocol — Tools](https://modelcontextprotocol.io/specification/draft/server/tools)
+- [Electron — app single-instance behavior](https://www.electronjs.org/docs/latest/api/app)
+- [VS Code — Windows existing-instance handoff](https://github.com/microsoft/vscode/blob/main/src/vs/code/electron-main/main.ts)
+- [Microsoft Learn — FlashWindowEx function](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-flashwindowex)
