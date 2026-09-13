@@ -174,6 +174,19 @@ class FakeAppActionAgentService(FakeAgentService):
         yield AgentTurnDone()
 
 
+class MismatchedCompletionAgentService(FakeAgentService):
+    async def resume_confirmation(self, confirmation_id, session_id, turn_id, *, approved):
+        self.resume_calls.append((confirmation_id, session_id, turn_id, approved))
+        assert approved
+        yield AgentToolCompleted(
+            "wrong-call",
+            "apps.open_allowlisted",
+            "已切换到计算器。",
+            "focused",
+        )
+        yield AgentTurnDone()
+
+
 class FakePartialAsr:
     def __init__(self) -> None:
         self.reset_calls = 0
@@ -1736,6 +1749,27 @@ async def test_agent_app_completion_forwards_typed_execution_outcome():
     assert resumed[1].outcome == "focused"
     assert resumed[2].delta == "已切换到计算器。"
     assert llm.calls == []
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_mismatched_completion_fails_closed_without_success_copy():
+    agent = MismatchedCompletionAgentService()
+    orchestrator, _, _ = make_orchestrator(agent_service=agent)
+
+    initial = [item async for item in orchestrator.submit_text("创建提醒", False)]
+    assert [item.type for item in initial] == ["tool.approval_required"]
+
+    resumed = [
+        item
+        async for item in orchestrator.resolve_tool_confirmation(
+            agent.confirmation_id, approved=True
+        )
+    ]
+
+    assert [item.type for item in resumed] == ["error"]
+    assert resumed[0].code == "agent_failed"
+    assert not any(getattr(item, "delta", "") == "已切换到计算器。" for item in resumed)
     await orchestrator.stop()
 
 
