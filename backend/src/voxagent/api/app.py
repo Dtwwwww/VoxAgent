@@ -33,6 +33,7 @@ from voxagent.conversation.events import (
 from voxagent.tools.repository import ToolAuditRecord
 
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
+_PUBLIC_APP_OUTCOMES = frozenset({"launched", "focused", "attention_requested"})
 
 
 class _State(Protocol):
@@ -200,6 +201,8 @@ def _public_tool_audit_record(record: ToolAuditRecord) -> dict[str, object]:
         for key, value in record.detail.items()
         if key in {"duration_ms", "error_code", "recovered_from"}
     }
+    if record.detail.get("outcome") in _PUBLIC_APP_OUTCOMES:
+        safe_detail["outcome"] = record.detail["outcome"]
     return {
         "id": record.id,
         "request_id": record.tool_request_id,

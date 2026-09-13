@@ -112,6 +112,7 @@ describe("App", () => {
     const session = controller({
       pendingToolApproval: {
         confirmationId: "00000000-0000-4000-8000-000000000002",
+        sessionId: "00000000-0000-4000-8000-000000000001",
         turnId: 4,
         callId: "call-1",
         toolName: "reminders.create",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 from ctypes import wintypes
 from pathlib import Path
 from typing import Protocol
@@ -39,24 +40,40 @@ class Win32WindowBackend:
     _FLASHW_TIMERNOFG = 0x0000000C
 
     def __init__(self) -> None:
-        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self._configure_native_calls()
+        self._user32 = None
+        self._kernel32 = None
 
     def find_window(self, process_name: str) -> int | None:
+        self._ensure_native()
         matching_window: int | None = None
+        callback_error: Exception | None = None
 
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         def visit_window(hwnd: int, _: int) -> bool:
-            nonlocal matching_window
-            if not self._user32.IsWindowVisible(hwnd):
+            nonlocal callback_error, matching_window
+            try:
+                if not self._user32.IsWindowVisible(hwnd):
+                    return True
+                if self._window_or_descendant_matches(hwnd, process_name):
+                    matching_window = hwnd
+                    return False
                 return True
-            if self._window_or_descendant_matches(hwnd, process_name):
-                matching_window = hwnd
+            except Exception as error:
+                callback_error = error
                 return False
-            return True
 
-        self._user32.EnumWindows(visit_window, 0)
+        ctypes.set_last_error(0)
+        try:
+            enumeration_succeeded = bool(self._user32.EnumWindows(visit_window, 0))
+            last_error = ctypes.get_last_error()
+        finally:
+            ctypes.set_last_error(0)
+        if matching_window is not None:
+            return matching_window
+        if callback_error is not None:
+            raise OSError("window enumeration callback failed") from callback_error
+        if not enumeration_succeeded:
+            raise OSError(last_error, "window enumeration failed")
         return matching_window
 
     def process_exists(self, process_name: str) -> bool:
@@ -71,15 +88,19 @@ class Win32WindowBackend:
         return False
 
     def is_minimized(self, hwnd: int) -> bool:
+        self._ensure_native()
         return bool(self._user32.IsIconic(hwnd))
 
     def restore(self, hwnd: int) -> None:
+        self._ensure_native()
         self._user32.ShowWindow(hwnd, self._SW_RESTORE)
 
     def focus(self, hwnd: int) -> bool:
+        self._ensure_native()
         return bool(self._user32.SetForegroundWindow(hwnd))
 
     def flash(self, hwnd: int) -> None:
+        self._ensure_native()
         info = _FlashWindowInfo(
             cbSize=ctypes.sizeof(_FlashWindowInfo),
             hwnd=hwnd,
@@ -94,16 +115,30 @@ class Win32WindowBackend:
             return True
 
         matched = False
+        callback_error: Exception | None = None
 
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         def visit_child(child: int, _: int) -> bool:
-            nonlocal matched
-            if self._process_matches(self._window_process_id(child), process_name):
-                matched = True
+            nonlocal callback_error, matched
+            try:
+                if self._process_matches(self._window_process_id(child), process_name):
+                    matched = True
+                    return False
+                return True
+            except Exception as error:
+                callback_error = error
                 return False
-            return True
 
-        self._user32.EnumChildWindows(hwnd, visit_child, 0)
+        ctypes.set_last_error(0)
+        try:
+            enumeration_succeeded = bool(self._user32.EnumChildWindows(hwnd, visit_child, 0))
+            last_error = ctypes.get_last_error()
+        finally:
+            ctypes.set_last_error(0)
+        if callback_error is not None:
+            raise OSError("child window enumeration callback failed") from callback_error
+        if not matched and not enumeration_succeeded:
+            raise OSError(last_error, "child window enumeration failed")
         return matched
 
     def _window_process_id(self, hwnd: int) -> int:
@@ -175,3 +210,12 @@ class Win32WindowBackend:
         self._kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
         self._kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
         self._kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def _ensure_native(self) -> None:
+        if self._user32 is not None and self._kernel32 is not None:
+            return
+        if sys.platform != "win32":
+            raise OSError("Windows app activation is unavailable")
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._configure_native_calls()

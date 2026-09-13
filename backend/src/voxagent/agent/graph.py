@@ -359,10 +359,8 @@ class AgentWorkflow:
                 },
             ]
         )
-        is_deterministic_app = (
-            state.get("deterministic_app_action", False) and call.name == "apps.open_allowlisted"
-        )
-        next_action = "respond" if is_deterministic_app else (
+        is_app_action = call.name == "apps.open_allowlisted"
+        next_action = "respond" if is_app_action else (
             "authorize" if state.get("pending_calls") else "call_model"
         )
         if visits >= 7:
@@ -372,7 +370,9 @@ class AgentWorkflow:
         return {
             "node_visit_count": visits,
             "messages": messages,
-            "pending_calls": [] if visits >= 7 else state.get("pending_calls", []),
+            "pending_calls": (
+                [] if visits >= 7 or is_app_action else state.get("pending_calls", [])
+            ),
             "current_call": None,
             "tool_request_id": None,
             "confirmation_id": None,

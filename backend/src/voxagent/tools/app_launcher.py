@@ -57,7 +57,7 @@ class WindowsAllowlistedLauncher:
         monotonic: Callable[[], float] = monotonic,
         wait: Callable[[float], None] = sleep,
     ) -> None:
-        self._backend = backend or Win32WindowBackend()
+        self._backend = backend
         self._start = start or self._start_process
         self._monotonic = monotonic
         self._wait = wait
@@ -65,10 +65,14 @@ class WindowsAllowlistedLauncher:
     def open_app(self, app_id: str) -> AppActivationResult:
         command, process_name = self._SPECS[app_id]
         try:
-            hwnd = self._backend.find_window(process_name)
+            backend = self._backend
+            if backend is None:
+                backend = Win32WindowBackend()
+                self._backend = backend
+            hwnd = backend.find_window(process_name)
             if hwnd is not None:
                 return self._activate(hwnd)
-            if self._backend.process_exists(process_name):
+            if backend.process_exists(process_name):
                 hwnd = self._wait_for_window(process_name)
                 if hwnd is None:
                     raise AppActivationError("app_window_unavailable")

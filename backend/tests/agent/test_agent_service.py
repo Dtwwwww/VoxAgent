@@ -365,6 +365,103 @@ async def test_deterministic_app_action_rejects_missing_or_invalid_execution_evi
 
 
 @pytest.mark.asyncio
+async def test_model_originated_app_success_terminates_from_trusted_result(
+    connection: sqlite3.Connection,
+) -> None:
+    call = ToolCall(
+        call_id="model-app-success",
+        name="apps.open_allowlisted",
+        arguments={"app_id": "calculator"},
+    )
+    model = ScriptedModel(
+        [
+            [AssistantToolCall(call), AssistantStreamDone()],
+            [AssistantTextDelta("不应该调用的模型回答"), AssistantStreamDone()],
+        ]
+    )
+    launcher = FakeAppLauncher(["focused"])
+    service = make_service(
+        connection,
+        model,
+        {},
+        app_executor=build_app_launcher_executor(launcher),
+    )
+
+    initial = await collect(
+        service.start_turn("session-model-app", 1, [{"role": "user", "content": "use a tool"}])
+    )
+    approval = initial[0]
+    assert isinstance(approval, ToolApprovalRequired)
+
+    resumed = await collect(
+        service.resume_confirmation(
+            approval.confirmation_id,
+            "session-model-app",
+            1,
+            approved=True,
+        )
+    )
+
+    assert resumed == [
+        ToolStarted(call.call_id, call.name),
+        ToolCompleted(call.call_id, call.name, "已切换到计算器。", "focused"),
+        TurnDone(),
+    ]
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_model_originated_app_failure_terminates_without_success_text(
+    connection: sqlite3.Connection,
+) -> None:
+    call = ToolCall(
+        call_id="model-app-failure",
+        name="apps.open_allowlisted",
+        arguments={"app_id": "calculator"},
+    )
+
+    async def fail_app(app_call: ToolCall) -> ToolResult:
+        return ToolResult(
+            call_id=app_call.call_id,
+            tool_name=app_call.name,
+            status="failed",
+            user_summary="应用启动失败。",
+            error_code="app_activation_failed",
+            duration_ms=1,
+        )
+
+    model = ScriptedModel(
+        [
+            [AssistantToolCall(call), AssistantStreamDone()],
+            [AssistantTextDelta("错误的成功文本"), AssistantStreamDone()],
+        ]
+    )
+    service = make_service(connection, model, {}, app_executor=fail_app)
+    initial = await collect(
+        service.start_turn("session-model-app", 1, [{"role": "user", "content": "use a tool"}])
+    )
+    approval = initial[0]
+    assert isinstance(approval, ToolApprovalRequired)
+
+    resumed = await collect(
+        service.resume_confirmation(
+            approval.confirmation_id,
+            "session-model-app",
+            1,
+            approved=True,
+        )
+    )
+
+    assert resumed == [
+        ToolStarted(call.call_id, call.name),
+        ToolFailed(call.call_id, call.name, "app_activation_failed"),
+        TurnDone(),
+    ]
+    assert not any(isinstance(event, AgentTextDelta) for event in resumed)
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_l0_executes_once_audits_and_continues_with_untrusted_result(
     connection: sqlite3.Connection,
 ) -> None:

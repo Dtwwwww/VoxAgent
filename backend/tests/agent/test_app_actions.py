@@ -11,6 +11,9 @@ def detect(text: str, *history: dict[str, str]):
 def test_routes_each_explicit_allowlisted_app_action() -> None:
     assert detect("打开记事本").arguments == {"app_id": "notepad"}
     assert detect("再帮我打开计算器").arguments == {"app_id": "calculator"}
+    assert detect("切回计算器").arguments == {"app_id": "calculator"}
+    assert detect("切换一下计算器").arguments == {"app_id": "calculator"}
+    assert detect("唤起计算器").arguments == {"app_id": "calculator"}
 
 
 def test_resolves_it_only_from_the_previous_user_app_reference() -> None:
@@ -20,5 +23,9 @@ def test_resolves_it_only_from_the_previous_user_app_reference() -> None:
 
 def test_rejects_negation_questions_and_calculation_requests() -> None:
     assert detect("不要打开计算器") is None
+    assert detect("我不想打开计算器") is None
+    assert detect("不许打开计算器") is None
+    assert detect("怎么打开计算器？") is None
+    assert detect("计算器打开了吗？") is None
     assert detect("计算器有什么功能") is None
     assert detect("用计算器算一下 2+2") is None
