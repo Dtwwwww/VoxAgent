@@ -13,6 +13,7 @@ from langgraph.graph import StateGraph
 from langgraph.types import interrupt
 from pydantic import ValidationError
 
+from voxagent.agent.app_actions import detect_allowlisted_app_action
 from voxagent.agent.state import AgentState
 from voxagent.conversation.history import TrustedSystemMessage
 from voxagent.llm.ollama import (
@@ -51,6 +52,7 @@ class AgentWorkflow:
         confirmation: ConfirmationService,
         now_utc: Callable[[], datetime],
         is_cancelled: Callable[[str, int], bool],
+        call_id_factory: Callable[[], str],
     ) -> None:
         self.model_name = model_name
         self.model = model
@@ -59,6 +61,7 @@ class AgentWorkflow:
         self.confirmation = confirmation
         self.now_utc = now_utc
         self.is_cancelled = is_cancelled
+        self.call_id_factory = call_id_factory
 
     async def route(self, state: AgentState) -> dict[str, Any]:
         visits = _next_visit(state)
@@ -67,6 +70,15 @@ class AgentWorkflow:
                 "node_visit_count": visits,
                 "next_action": "respond",
                 "outbox": [_failed("", "", "turn_cancelled")],
+            }
+        call = detect_allowlisted_app_action(state.get("messages", []), self.call_id_factory)
+        if call is not None:
+            return {
+                "node_visit_count": visits,
+                "pending_calls": [call.model_dump(mode="json")],
+                "deterministic_app_action": True,
+                "next_action": "authorize",
+                "outbox": [],
             }
         return {"node_visit_count": visits, "next_action": "retrieve", "outbox": []}
 
@@ -367,7 +379,9 @@ def build_graph(workflow: AgentWorkflow, checkpointer: object):
     builder.add_node("persist", workflow.persist)
     builder.add_edge(START, "route")
     builder.add_conditional_edges(
-        "route", lambda state: state["next_action"], {"retrieve": "retrieve", "respond": "respond"}
+        "route",
+        lambda state: state["next_action"],
+        {"retrieve": "retrieve", "authorize": "authorize", "respond": "respond"},
     )
     builder.add_edge("retrieve", "call_model")
     builder.add_conditional_edges(

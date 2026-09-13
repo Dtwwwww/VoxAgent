@@ -28,6 +28,7 @@ from voxagent.llm.ollama import (
     ModelMessage,
     ToolPayload,
 )
+from voxagent.tools.app_launcher import AppOpenArgs
 from voxagent.tools.confirmation import ConfirmationService
 from voxagent.tools.registry import ToolRegistry
 from voxagent.tools.repository import ToolRepository
@@ -74,11 +75,16 @@ def make_registry(
             execution_started.set()
         if execution_release is not None:
             await execution_release.wait()
+        data = (
+            {"echo": call.arguments["value"]}
+            if call.name == "demo.action"
+            else {"app_id": call.arguments["app_id"]}
+        )
         return ToolResult(
             call_id=call.call_id,
             tool_name=call.name,
             status="succeeded",
-            data={"echo": call.arguments["value"]},
+            data=data,
             user_summary="done",
             duration_ms=1,
         )
@@ -90,6 +96,17 @@ def make_registry(
             description="A bounded demo action.",
             permission=permission,
             arguments_model=DemoArgs,
+            timeout_seconds=1,
+            provider="native",
+        ),
+        execute,
+    )
+    registry.register(
+        ToolDefinition(
+            name="apps.open_allowlisted",
+            description="Open one allowlisted local Windows app.",
+            permission=PermissionLevel.L1,
+            arguments_model=AppOpenArgs,
             timeout_seconds=1,
             provider="native",
         ),
@@ -153,6 +170,28 @@ async def test_plain_chat_emits_delta_then_one_done_without_tool_execution(
 
     assert events == [AgentTextDelta("你好"), TurnDone()]
     assert counters == {}
+
+
+@pytest.mark.asyncio
+async def test_explicit_app_action_routes_to_authorization_without_calling_model(
+    connection: sqlite3.Connection,
+) -> None:
+    model = ScriptedModel([])
+    service = make_service(connection, model, {})
+
+    events = await collect(
+        service.start_turn("session-app", 1, [{"role": "user", "content": "打开记事本"}])
+    )
+
+    approval = events[0]
+    assert isinstance(approval, ToolApprovalRequired)
+    assert approval.call_id.startswith("app-")
+    assert approval.tool_name == "apps.open_allowlisted"
+    assert model.messages == []
+    state = await service.graph.aget_state(
+        {"configurable": {"thread_id": "session-app:1"}}
+    )
+    assert state.values["deterministic_app_action"] is True
 
 
 @pytest.mark.asyncio
