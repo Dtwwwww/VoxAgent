@@ -85,6 +85,8 @@ class _PendingAgentTurn:
     token: TurnToken
     answer: list[str]
     speak_response: bool
+    expected_tool_call_id: str | None = None
+    expected_tool_name: str | None = None
     last_tool_summary: str | None = None
     last_tool_error: str | None = None
 
@@ -885,6 +887,8 @@ class ConversationOrchestrator:
                         delta=event.delta,
                     )
                 elif isinstance(event, AgentToolApprovalRequired):
+                    pending.expected_tool_call_id = event.call_id
+                    pending.expected_tool_name = event.tool_name
                     self._pending_tool_confirmations[event.confirmation_id] = pending
                     self._pending_confirmation_by_turn[token.turn_id] = (
                         event.confirmation_id
@@ -908,6 +912,7 @@ class ConversationOrchestrator:
                     )
                     return
                 elif isinstance(event, AgentToolStarted):
+                    self._require_expected_tool_event(pending, event.call_id, event.tool_name)
                     output = ToolStarted(
                         type="tool.started",
                         session_id=token.session_id,
@@ -916,6 +921,7 @@ class ConversationOrchestrator:
                         tool_name=event.tool_name,
                     )
                 elif isinstance(event, AgentToolCompleted):
+                    self._require_expected_tool_event(pending, event.call_id, event.tool_name)
                     pending.last_tool_summary = event.user_summary
                     output = ToolCompleted(
                         type="tool.completed",
@@ -924,8 +930,10 @@ class ConversationOrchestrator:
                         call_id=event.call_id,
                         tool_name=event.tool_name,
                         user_summary=event.user_summary,
+                        outcome=event.outcome,
                     )
                 elif isinstance(event, AgentToolFailed):
+                    self._require_expected_tool_event(pending, event.call_id, event.tool_name)
                     pending.last_tool_error = event.error_code
                     output = ToolFailed(
                         type="tool.failed",
@@ -953,6 +961,19 @@ class ConversationOrchestrator:
                     terminal=True,
                 )
             )
+
+    @staticmethod
+    def _require_expected_tool_event(
+        pending: _PendingAgentTurn,
+        call_id: str,
+        tool_name: str,
+    ) -> None:
+        expected_call_id = pending.expected_tool_call_id
+        expected_tool_name = pending.expected_tool_name
+        if expected_call_id is None and expected_tool_name is None:
+            return
+        if call_id != expected_call_id or tool_name != expected_tool_name:
+            raise RuntimeError("agent tool event did not match pending confirmation")
 
     async def _complete_agent_turn(self, pending: _PendingAgentTurn) -> None:
         token = pending.token

@@ -9,6 +9,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from voxagent.db.migrations import migrate
+from voxagent.tools.app_launcher import AppActivationError, AppActivationResult
 from voxagent.tools.builtin import build_builtin_registry
 from voxagent.tools.registry import FrozenToolRegistryError
 from voxagent.tools.schema import PermissionLevel, ToolCall, ToolDefinition
@@ -37,8 +38,14 @@ class FakeLauncher:
     def __init__(self) -> None:
         self.opened: list[str] = []
 
-    def open_app(self, app_id: str) -> None:
+    def open_app(self, app_id: str) -> AppActivationResult:
         self.opened.append(app_id)
+        return AppActivationResult("focused")
+
+
+class FailingLauncher:
+    def open_app(self, app_id: str) -> AppActivationResult:
+        raise AppActivationError("app_window_unavailable")
 
 
 class EmptyArgs(BaseModel):
@@ -242,6 +249,31 @@ async def test_app_launcher_is_allowlisted_and_invalid_ids_fail_validation() -> 
 
     assert notepad.status == "succeeded"
     assert calculator.status == "succeeded"
+    assert notepad.data == {"app_id": "notepad", "outcome": "focused"}
+    assert calculator.data == {"app_id": "calculator", "outcome": "focused"}
+    assert notepad.user_summary == "已切换到记事本。"
+    assert calculator.user_summary == "已切换到计算器。"
     assert launcher.opened == ["notepad", "calculator"]
     with pytest.raises(ValidationError):
         ToolCall.from_untrusted(definition, "call-3", {"app_id": "cmd"})
+
+
+@pytest.mark.asyncio
+async def test_app_launcher_returns_safe_activation_error_code() -> None:
+    connection = open_test_database()
+    registry = build_builtin_registry(
+        connection,
+        FakeKnowledgeSource(),
+        FailingLauncher(),
+        now_utc=lambda: datetime(2026, 9, 10, tzinfo=UTC),
+    )
+    definition, _ = registry.get("apps.open_allowlisted")
+
+    result = await registry.execute(
+        ToolCall.from_untrusted(definition, "call-1", {"app_id": "calculator"})
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "app_window_unavailable"
+    assert result.data == {}
+    assert result.user_summary == "应用启动失败。"

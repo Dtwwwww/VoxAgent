@@ -237,6 +237,10 @@ class ToolCompleted(TurnServerMessage):
     call_id: str
     tool_name: str
     user_summary: str
+    outcome: Literal["launched", "focused", "attention_requested"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class ToolFailed(TurnServerMessage):

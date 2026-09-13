@@ -12,6 +12,7 @@ class AgentState(TypedDict, total=False):
     node_visit_count: int
     cancelled: bool
     pending_calls: list[dict[str, Any]]
+    deterministic_app_action: bool
     current_call: dict[str, Any] | None
     tool_request_id: int | None
     confirmation_id: str | None

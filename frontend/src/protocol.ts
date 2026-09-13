@@ -33,6 +33,7 @@ export interface VoiceInfo {
 }
 
 type TurnFields = { session_id: string; turn_id: number };
+export type AppOutcome = "launched" | "focused" | "attention_requested";
 
 export interface ContextMemorySource {
   id: number;
@@ -71,7 +72,7 @@ export type ServerEvent =
       permission: "L1" | "L2";
     } & TurnFields)
   | ({ type: "tool.started"; call_id: string; tool_name: string } & TurnFields)
-  | ({ type: "tool.completed"; call_id: string; tool_name: string; user_summary: string } & TurnFields)
+  | ({ type: "tool.completed"; call_id: string; tool_name: string; user_summary: string; outcome?: AppOutcome } & TurnFields)
   | ({ type: "tool.failed"; call_id: string; tool_name: string; error_code: string } & TurnFields)
   | ({ type: "context.sources"; memories: ContextMemorySource[]; knowledge: ContextKnowledgeSource[] } & TurnFields)
   | ({
@@ -294,8 +295,12 @@ export function parseServerEvent(value: unknown): ServerEvent {
       };
     }
     case "tool.completed": {
-      const object = turnObject(value, ["call_id", "tool_name", "user_summary"]);
-      return {
+      const object = turnObject(value, ["call_id", "tool_name", "user_summary"], ["outcome"]);
+      const outcome = object.outcome;
+      if (outcome !== undefined && outcome !== "launched" && outcome !== "focused" && outcome !== "attention_requested") {
+        throw new TypeError("tool outcome is unsupported");
+      }
+      const completed = {
         type,
         session_id: object.session_id as string,
         turn_id: object.turn_id as number,
@@ -303,6 +308,7 @@ export function parseServerEvent(value: unknown): ServerEvent {
         tool_name: string(object.tool_name, "tool_name"),
         user_summary: string(object.user_summary, "user_summary"),
       };
+      return outcome === undefined ? completed : { ...completed, outcome };
     }
     case "tool.failed": {
       const object = turnObject(value, ["call_id", "tool_name", "error_code"]);

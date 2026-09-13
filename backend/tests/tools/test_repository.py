@@ -59,6 +59,22 @@ def make_request(
     return record.id
 
 
+def make_app_request(repository: ToolRepository) -> int:
+    record = repository.create_request(
+        "session-1",
+        7,
+        ToolCall(
+            call_id="app-call-1",
+            name="apps.open_allowlisted",
+            arguments={"app_id": "calculator"},
+        ),
+        PermissionLevel.L1,
+        HASH,
+        NOW,
+    )
+    return record.id
+
+
 def make_confirmation(repository: ToolRepository, request_id: int):
     return repository.create_confirmation(request_id, HASH, NOW)
 
@@ -282,6 +298,21 @@ def test_finish_request_validates_terminal_state(connection: sqlite3.Connection)
     }
 
 
+@pytest.mark.parametrize("outcome", ["launched", "focused", "attention_requested"])
+def test_finish_request_persists_validated_app_outcome(
+    connection: sqlite3.Connection,
+    outcome: str,
+) -> None:
+    repository = ToolRepository(connection)
+    request_id = make_app_request(repository)
+
+    assert repository.finish_request(request_id, "succeeded", NOW, detail={"outcome": outcome})
+
+    audit = repository.list_audit(limit=1)[0]
+    assert audit.event_type == "request.succeeded"
+    assert audit.detail == {"outcome": outcome}
+
+
 @pytest.mark.parametrize(
     "detail",
     [
@@ -330,6 +361,9 @@ def test_finish_request_rejects_unsafe_detail_without_persisting(
         {"duration_ms": True},
         {"duration_ms": 300_001},
         {"recovered_from": "pending"},
+        {"outcome": "focused"},
+        {"outcome": "opened"},
+        {"outcome": True},
     ],
 )
 def test_finish_request_validates_machine_detail_values(

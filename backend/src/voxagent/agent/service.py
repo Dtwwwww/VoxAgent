@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langgraph.types import Command
 
@@ -55,6 +56,7 @@ class AgentService:
                 )
                 in self._cancelled
             ),
+            call_id_factory=lambda: f"app-{uuid4()}",
         )
         self.graph = build_graph(workflow, checkpointer)
         self._repository = repository
@@ -87,6 +89,7 @@ class AgentService:
             "node_visit_count": 0,
             "cancelled": key in self._cancelled,
             "pending_calls": [],
+            "deterministic_app_action": False,
             "current_call": None,
             "tool_request_id": None,
             "confirmation_id": None,
@@ -237,10 +240,12 @@ def _event(item: Mapping[str, Any]) -> AgentEvent:
     if kind == "started":
         return ToolStarted(str(item["call_id"]), str(item["tool_name"]))
     if kind == "completed":
+        outcome = item.get("outcome")
         return ToolCompleted(
             str(item["call_id"]),
             str(item["tool_name"]),
             str(item["user_summary"]),
+            outcome if outcome in {"launched", "focused", "attention_requested"} else None,
         )
     if kind == "failed":
         return ToolFailed(

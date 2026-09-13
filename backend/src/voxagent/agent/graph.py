@@ -13,6 +13,7 @@ from langgraph.graph import StateGraph
 from langgraph.types import interrupt
 from pydantic import ValidationError
 
+from voxagent.agent.app_actions import detect_allowlisted_app_action
 from voxagent.agent.state import AgentState
 from voxagent.conversation.history import TrustedSystemMessage
 from voxagent.llm.ollama import (
@@ -29,6 +30,8 @@ from voxagent.tools.policy import AuthorizationDecision, PolicyContext, ToolPoli
 from voxagent.tools.registry import ToolRegistry, UnknownToolError
 from voxagent.tools.repository import ToolRepository
 from voxagent.tools.schema import ToolCall
+
+_APP_OUTCOMES = frozenset({"launched", "focused", "attention_requested"})
 
 
 class AgentModel(Protocol):
@@ -51,6 +54,7 @@ class AgentWorkflow:
         confirmation: ConfirmationService,
         now_utc: Callable[[], datetime],
         is_cancelled: Callable[[str, int], bool],
+        call_id_factory: Callable[[], str],
     ) -> None:
         self.model_name = model_name
         self.model = model
@@ -59,6 +63,7 @@ class AgentWorkflow:
         self.confirmation = confirmation
         self.now_utc = now_utc
         self.is_cancelled = is_cancelled
+        self.call_id_factory = call_id_factory
 
     async def route(self, state: AgentState) -> dict[str, Any]:
         visits = _next_visit(state)
@@ -67,6 +72,15 @@ class AgentWorkflow:
                 "node_visit_count": visits,
                 "next_action": "respond",
                 "outbox": [_failed("", "", "turn_cancelled")],
+            }
+        call = detect_allowlisted_app_action(state.get("messages", []), self.call_id_factory)
+        if call is not None:
+            return {
+                "node_visit_count": visits,
+                "pending_calls": [call.model_dump(mode="json")],
+                "deterministic_app_action": True,
+                "next_action": "authorize",
+                "outbox": [],
             }
         return {"node_visit_count": visits, "next_action": "retrieve", "outbox": []}
 
@@ -282,10 +296,31 @@ class AgentWorkflow:
                     request_id, "failed", self.now_utc(), detail={"error_code": "turn_cancelled"}
                 )
             raise
+        outcome = result.data.get("outcome")
+        if (
+            call.name == "apps.open_allowlisted"
+            and result.status == "succeeded"
+            and outcome not in _APP_OUTCOMES
+        ):
+            result = result.model_copy(
+                update={
+                    "status": "failed",
+                    "data": {},
+                    "user_summary": "应用启动失败。",
+                    "error_code": "invalid_app_outcome",
+                }
+            )
+            outcome = None
         if request_id is not None:
             detail: dict[str, Any] = {"duration_ms": result.duration_ms}
             if result.error_code is not None:
                 detail["error_code"] = result.error_code
+            if (
+                call.name == "apps.open_allowlisted"
+                and result.status == "succeeded"
+                and outcome in _APP_OUTCOMES
+            ):
+                detail["outcome"] = outcome
             self.repository.finish_request(
                 request_id,
                 result.status,
@@ -294,14 +329,15 @@ class AgentWorkflow:
             )
         outbox: list[dict[str, Any]] = []
         if result.status == "succeeded":
-            outbox.append(
-                {
-                    "kind": "completed",
-                    "call_id": call.call_id,
-                    "tool_name": call.name,
-                    "user_summary": result.user_summary,
-                }
-            )
+            completed: dict[str, Any] = {
+                "kind": "completed",
+                "call_id": call.call_id,
+                "tool_name": call.name,
+                "user_summary": result.user_summary,
+            }
+            if call.name == "apps.open_allowlisted" and outcome in _APP_OUTCOMES:
+                completed["outcome"] = outcome
+            outbox.append(completed)
         else:
             outbox.append(
                 _failed(call.call_id, call.name, result.error_code or "tool_execution_failed")
@@ -323,7 +359,10 @@ class AgentWorkflow:
                 },
             ]
         )
-        next_action = "authorize" if state.get("pending_calls") else "call_model"
+        is_app_action = call.name == "apps.open_allowlisted"
+        next_action = "respond" if is_app_action else (
+            "authorize" if state.get("pending_calls") else "call_model"
+        )
         if visits >= 7:
             next_action = "respond"
             if state.get("pending_calls"):
@@ -331,7 +370,9 @@ class AgentWorkflow:
         return {
             "node_visit_count": visits,
             "messages": messages,
-            "pending_calls": [] if visits >= 7 else state.get("pending_calls", []),
+            "pending_calls": (
+                [] if visits >= 7 or is_app_action else state.get("pending_calls", [])
+            ),
             "current_call": None,
             "tool_request_id": None,
             "confirmation_id": None,
@@ -367,7 +408,9 @@ def build_graph(workflow: AgentWorkflow, checkpointer: object):
     builder.add_node("persist", workflow.persist)
     builder.add_edge(START, "route")
     builder.add_conditional_edges(
-        "route", lambda state: state["next_action"], {"retrieve": "retrieve", "respond": "respond"}
+        "route",
+        lambda state: state["next_action"],
+        {"retrieve": "retrieve", "authorize": "authorize", "respond": "respond"},
     )
     builder.add_edge("retrieve", "call_model")
     builder.add_conditional_edges(

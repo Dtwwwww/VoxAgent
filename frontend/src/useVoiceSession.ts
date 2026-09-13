@@ -52,6 +52,7 @@ export interface MemoryProposal {
 
 export interface ToolApproval {
   confirmationId: string;
+  sessionId: string;
   turnId: number;
   callId: string;
   toolName: string;
@@ -60,10 +61,11 @@ export interface ToolApproval {
 }
 
 export interface ToolActivity {
+  sessionId: string;
   turnId: number;
   callId: string;
   toolName: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "attention_requested" | "failed";
   summary?: string;
   errorCode?: string;
 }
@@ -87,6 +89,7 @@ export interface VoiceSessionController {
   memoryProposals: MemoryProposal[];
   pendingToolApproval: ToolApproval | null;
   recentToolActivity: ToolActivity[];
+  activeToolActivity: ToolActivity | null;
   realtime: RealtimeSnapshot;
   microphones: MicrophoneDevice[];
   selectedMicrophoneId: string | null;
@@ -107,6 +110,7 @@ export interface VoiceSessionController {
   stopVoicePreview(): void;
   cancelActive(): void;
   dismissMemoryProposal(id: string): void;
+  dismissToolActivity(): void;
   confirmTool(confirmationId: string): void;
   denyTool(confirmationId: string): void;
   clearLocalData(): void;
@@ -136,6 +140,14 @@ const OFF_REALTIME_SNAPSHOT: RealtimeSnapshot = {
   notice: null,
 };
 
+function sameToolActivity(left: ToolActivity, right: ToolActivity): boolean {
+  return left.sessionId === right.sessionId && left.turnId === right.turnId && left.callId === right.callId;
+}
+
+function recordToolActivity(history: ToolActivity[], activity: ToolActivity): ToolActivity[] {
+  return [...history.filter((item) => !sameToolActivity(item, activity)), activity].slice(-5);
+}
+
 export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionController {
   const [initialSettings] = useState(() => loadVoiceSettings(localStorage));
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
@@ -152,6 +164,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const [memoryProposals, setMemoryProposals] = useState<MemoryProposal[]>([]);
   const [pendingToolApproval, setPendingToolApproval] = useState<ToolApproval | null>(null);
   const [recentToolActivity, setRecentToolActivity] = useState<ToolActivity[]>([]);
+  const [activeToolActivity, setActiveToolActivity] = useState<ToolActivity | null>(null);
   const [realtime, setRealtime] = useState<RealtimeSnapshot>({ ...OFF_REALTIME_SNAPSHOT });
   const [microphones, setMicrophones] = useState<MicrophoneDevice[]>([]);
   const [selectedMicrophoneId, setSelectedMicrophoneId] = useState<string | null>(initialSettings.microphoneDeviceId);
@@ -184,6 +197,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   const responseSourcesRef = useRef(new Map<number, ResponseSource[]>());
   const sessionIdRef = useRef<string | null>(null);
   const maximumTurnIdRef = useRef(0);
+  const minimumVisibleToolTurnRef = useRef(0);
   const blockedThroughTurnRef = useRef(0);
   const cancelledTurnsRef = useRef(new Set<number>());
   const allowedReplayTurnsRef = useRef(new Set<number>());
@@ -349,6 +363,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     responseSourcesRef.current.clear();
     sessionIdRef.current = null;
     maximumTurnIdRef.current = 0;
+    minimumVisibleToolTurnRef.current = 0;
     blockedThroughTurnRef.current = 0;
     cancelledTurnsRef.current.clear();
     allowedReplayTurnsRef.current.clear();
@@ -366,6 +381,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     activeBrowserPreviewOwnerRef.current = null;
     expectedPreviewIdRef.current = 0;
     setMemoryProposals([]);
+    setActiveToolActivity(null);
   }, []);
 
   const stopLocalResources = useCallback(async () => {
@@ -473,6 +489,16 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     }
   }, [acceptsTtsTurn, failProtocol]);
 
+  useEffect(() => {
+    if (activeToolActivity?.status !== "completed") return;
+    const key = `${activeToolActivity.sessionId}:${activeToolActivity.turnId}:${activeToolActivity.callId}`;
+    const timeout = window.setTimeout(() => {
+      setActiveToolActivity((current) => current
+        && `${current.sessionId}:${current.turnId}:${current.callId}` === key ? null : current);
+    }, 3000);
+    return () => window.clearTimeout(timeout);
+  }, [activeToolActivity]);
+
   const handleServerEvent = useCallback((event: ServerEvent) => {
     if ("turn_id" in event) maximumTurnIdRef.current = Math.max(maximumTurnIdRef.current, event.turn_id);
     switch (event.type) {
@@ -483,6 +509,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         sessionIdRef.current = event.session_id;
         assistantDraftsRef.current.clear();
         maximumTurnIdRef.current = 0;
+        minimumVisibleToolTurnRef.current = 0;
         blockedThroughTurnRef.current = 0;
         cancelledTurnsRef.current.clear();
         allowedReplayTurnsRef.current.clear();
@@ -498,6 +525,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         expectedPreviewIdRef.current = 0;
         setPendingToolApproval(null);
         setRecentToolActivity([]);
+        setActiveToolActivity(null);
         setConnectionStatus("connected");
         setModelId(event.model_id);
         setOffline(event.offline);
@@ -566,6 +594,12 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
           pendingBrowserTranscriptRequestRef.current = null;
           activeBrowserTranscriptRef.current = { requestId: event.request_id, turnId: event.turn_id };
         }
+        minimumVisibleToolTurnRef.current = Math.max(
+          minimumVisibleToolTurnRef.current,
+          event.turn_id,
+        );
+        setPendingToolApproval(null);
+        setActiveToolActivity(null);
         setMessages((current) => [...current, { id: nextId("voice-user"), turnId: event.turn_id, role: "user", origin: "voice", text: event.text, status: "complete" }]);
         setVoiceStatus((current) => current === "preparing" || current === "speaking" ? current : "thinking");
         break;
@@ -614,8 +648,11 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         setVoiceStatus((current) => current === "thinking" ? "idle" : current);
         break;
       case "tool.approval_required":
+        if (event.session_id !== sessionIdRef.current) break;
+        if (event.turn_id < minimumVisibleToolTurnRef.current) break;
         setPendingToolApproval({
           confirmationId: event.confirmation_id,
+          sessionId: event.session_id,
           turnId: event.turn_id,
           callId: event.call_id,
           toolName: event.tool_name,
@@ -624,42 +661,60 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         });
         break;
       case "tool.started":
-        setPendingToolApproval((current) => current?.callId === event.call_id ? null : current);
-        setRecentToolActivity((current) => [
-          ...current.filter((item) => item.callId !== event.call_id),
-          {
+        if (event.session_id !== sessionIdRef.current) break;
+        setPendingToolApproval((current) => current?.sessionId === event.session_id
+          && current.callId === event.call_id && current.turnId === event.turn_id ? null : current);
+        {
+          const activity: ToolActivity = {
+            sessionId: event.session_id,
             turnId: event.turn_id,
             callId: event.call_id,
             toolName: event.tool_name,
-            status: "running" as const,
-          },
-        ].slice(-5));
+            status: "running",
+          };
+          setRecentToolActivity((current) => recordToolActivity(current, activity));
+          if (event.turn_id >= minimumVisibleToolTurnRef.current) {
+            setActiveToolActivity(activity);
+          }
+        }
         break;
       case "tool.completed":
-        setPendingToolApproval((current) => current?.callId === event.call_id ? null : current);
-        setRecentToolActivity((current) => [
-          ...current.filter((item) => item.callId !== event.call_id),
-          {
+        if (event.session_id !== sessionIdRef.current) break;
+        setPendingToolApproval((current) => current?.sessionId === event.session_id
+          && current.callId === event.call_id && current.turnId === event.turn_id ? null : current);
+        {
+          const activity: ToolActivity = {
+            sessionId: event.session_id,
             turnId: event.turn_id,
             callId: event.call_id,
             toolName: event.tool_name,
-            status: "completed" as const,
+            status: event.outcome === "attention_requested" ? "attention_requested" : "completed",
             summary: event.user_summary,
-          },
-        ].slice(-5));
+          };
+          setRecentToolActivity((current) => recordToolActivity(current, activity));
+          if (event.turn_id >= minimumVisibleToolTurnRef.current) {
+            setActiveToolActivity(activity);
+          }
+        }
         break;
       case "tool.failed":
-        setPendingToolApproval((current) => current?.callId === event.call_id ? null : current);
-        setRecentToolActivity((current) => [
-          ...current.filter((item) => item.callId !== event.call_id),
-          {
+        if (event.session_id !== sessionIdRef.current) break;
+        setPendingToolApproval((current) => current?.sessionId === event.session_id
+          && current.callId === event.call_id && current.turnId === event.turn_id ? null : current);
+        {
+          const activity: ToolActivity = {
+            sessionId: event.session_id,
             turnId: event.turn_id,
             callId: event.call_id,
             toolName: event.tool_name,
-            status: "failed" as const,
+            status: "failed",
             errorCode: event.error_code,
-          },
-        ].slice(-5));
+          };
+          setRecentToolActivity((current) => recordToolActivity(current, activity));
+          if (event.turn_id >= minimumVisibleToolTurnRef.current) {
+            setActiveToolActivity(activity);
+          }
+        }
         break;
       case "memory.proposed": {
         const proposal: MemoryProposal = {
@@ -677,7 +732,10 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
         break;
       }
       case "turn.cancelled":
-        setPendingToolApproval((current) => current?.turnId === event.turn_id ? null : current);
+        setPendingToolApproval((current) => current?.sessionId === event.session_id
+          && current.turnId === event.turn_id ? null : current);
+        setActiveToolActivity((current) => current?.sessionId === event.session_id
+          && current.turnId === event.turn_id && current.status === "running" ? null : current);
         if (event.request_id !== undefined) {
           const pendingMatches = pendingBrowserTranscriptRequestRef.current === event.request_id;
           const activeMatches = activeBrowserTranscriptRef.current?.requestId === event.request_id
@@ -1063,6 +1121,10 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
       return;
     }
     if (pendingAudioRef.current?.kind === "turn") pendingAudioRef.current.valid = false;
+    minimumVisibleToolTurnRef.current = Math.max(
+      minimumVisibleToolTurnRef.current + 1,
+      maximumTurnIdRef.current + 1,
+    );
     blockedThroughTurnRef.current = Math.max(blockedThroughTurnRef.current, maximumTurnIdRef.current);
     manualSpeechGenerationRef.current += 1;
     if (realtimeSnapshotRef.current.active) realtimeEngineRef.current?.cancelCurrentOutput();
@@ -1075,6 +1137,8 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     activeReplayRequestRef.current = 0;
     playbackRef.current.stopConversation();
     setSpeakingTurnId(null);
+    setPendingToolApproval(null);
+    setActiveToolActivity(null);
     setMessages((current) => [...current, { id: nextId("text-user"), role: "user", origin: "text", text, status: "complete" }]);
     setVoiceStatus("thinking");
     send({ type: "text.submit", text, speak_response: false });
@@ -1284,6 +1348,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
   }, [cancelVoicePreview]);
 
   const cancelActive = useCallback(() => {
+    const cancelledTurnId = maximumTurnIdRef.current;
     if (pendingAudioRef.current) pendingAudioRef.current.valid = false;
     blockedThroughTurnRef.current = Math.max(blockedThroughTurnRef.current, maximumTurnIdRef.current);
     allowedReplayTurnsRef.current.clear();
@@ -1297,12 +1362,19 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     playbackRef.current.stopAll();
     setSpeakingTurnId(null);
     setPreviewingVoiceKey(null);
-    setPendingToolApproval(null);
+    setPendingToolApproval((current) => current?.sessionId === sessionIdRef.current
+      && current.turnId === cancelledTurnId ? null : current);
+    setActiveToolActivity((current) => current?.sessionId === sessionIdRef.current
+      && current.turnId === cancelledTurnId && current.status === "running" ? null : current);
     send({ type: "turn.cancel" });
   }, [send]);
 
   const dismissMemoryProposal = useCallback((id: string) => {
     setMemoryProposals((current) => current.filter((proposal) => proposal.id !== id));
+  }, []);
+
+  const dismissToolActivity = useCallback(() => {
+    setActiveToolActivity(null);
   }, []);
 
   const confirmTool = useCallback((confirmationId: string) => {
@@ -1332,6 +1404,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     setMemoryProposals([]);
     setPendingToolApproval(null);
     setRecentToolActivity([]);
+    setActiveToolActivity(null);
     setError(null);
     setVoiceStatus("idle");
   }, [cancelActive]);
@@ -1343,6 +1416,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     socket?.close();
     await stopLocalResources();
     setPendingToolApproval(null);
+    setActiveToolActivity(null);
     setConnectionStatus("disconnected");
   }, [stopLocalResources]);
 
@@ -1370,6 +1444,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     memoryProposals,
     pendingToolApproval,
     recentToolActivity,
+    activeToolActivity,
     realtime,
     microphones,
     selectedMicrophoneId,
@@ -1390,6 +1465,7 @@ export function useVoiceSession({ url }: VoiceSessionOptions): VoiceSessionContr
     stopVoicePreview,
     cancelActive,
     dismissMemoryProposal,
+    dismissToolActivity,
     confirmTool,
     denyTool,
     clearLocalData,
